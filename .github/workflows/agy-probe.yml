@@ -1,9 +1,12 @@
 # TEMPORARY probe job for task 255 -- delete before this branch merges.
 #
-# Round 2: the settings schema around "permissions", and what a print-mode
-# run actually loads. `-p "/permissions"` and `-p "/config"` answer without
-# an agent turn (agy's own changelog: those slash commands are answered in
-# print mode without spending quota), so this needs no credential.
+# Round 3. A dummy GEMINI_API_KEY gets past the startup check that stopped
+# round 2, so `-p /permissions` and `-p /config` answer (agy's changelog:
+# those are answered in print mode without an agent turn), and a
+# stream-json run gets far enough to emit its `init` event -- which carries
+# the advertised native tool roster and the permission mode -- before the
+# model call fails on the bogus key. Comparing that roster with and without
+# a permissions block in settings.json is the question this job exists for.
 name: agy-probe
 
 on:
@@ -18,7 +21,7 @@ jobs:
   probe:
     name: probe agy permissions schema
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
 
     steps:
       - uses: actions/checkout@v4
@@ -36,71 +39,79 @@ jobs:
           echo "AGY_BIN=$agy" >> "$GITHUB_ENV"
           agy --version
 
-      - name: Schema, with adjacency
+      - name: Type names
         run: |
           set +e +o pipefail
           out=/tmp/agy-evidence
           rm -rf "$out"; mkdir -p "$out"
           agy --version > "$out"/version.txt 2>&1
-          # Unsorted: neighbouring lines are physically adjacent strings in
-          # the binary, which for Go struct tags means neighbouring fields.
           strings -n 4 "$AGY_BIN" > /tmp/agy.strings
+          grep -aoE '(permissions|settings|permission|config|printmode)\.[A-Za-z_][A-Za-z0-9_]*' /tmp/agy.strings \
+            | sort -u > "$out"/type-names.txt
+          grep -aoE '\*?permissions\.[A-Za-z_][A-Za-z0-9_]*' /tmp/agy.strings | sort -u > "$out"/permissions-types.txt
+          grep -a -iE 'allow.?rule|allowlist|deny|prohibit|not allowed|soft.?den' /tmp/agy.strings \
+            | grep -aiE '[a-z] [a-z]' | sort -u > "$out"/denial-prose.txt
+          grep -a -iE 'skip.?permission|dangerously|auto.?approve|bypass' /tmp/agy.strings | sort -u > "$out"/skip-strings.txt
 
-          ctx() { echo "##### $1"; grep -a -n -B "${3:-6}" -A "${3:-6}" -- "$2" /tmp/agy.strings | head -"${4:-120}"; echo; }
-          {
-            ctx 'json:"permissions"' 'json:"permissions"' 10 200
-            ctx 'json:"deny' 'json:"deny,omitempty"' 10 200
-            ctx 'json:"allow,omitempty"' 'json:"allow,omitempty"' 10 200
-            ctx 'permissionPreset' 'permissionPreset' 12 200
-            ctx 'fileAccessPolicy' 'fileAccessPolicy' 12 200
-            ctx 'agentPermissions' 'agentPermissions' 12 200
-            ctx 'default_grant' 'default_grant' 8 120
-            ctx 'is prohibited by' 'is prohibited by' 8 120
-            ctx 'allow_tool' 'json:"allow_tool,omitempty"' 8 120
-            ctx 'cascade_denied_commands' 'cascade_denied_commands' 8 120
-          } > "$out"/schema-context.txt 2>&1
-
-          grep -a -iE 'skip.?permission|dangerously|auto.?approve|autoapprove|bypass' /tmp/agy.strings \
-            | sort -u | head -120 > "$out"/strings-skip-permissions.txt
-          grep -a -iE '^[A-Za-z ,._-]*(deny|denied|prohibit|not allowed|blocked)[A-Za-z ,._%-]*$' /tmp/agy.strings \
-            | sort -u | head -200 > "$out"/strings-denial-messages.txt
-          grep -a -iE 'allow-?rule|allowlist|deny.?rule|permission rule|/permissions' /tmp/agy.strings \
-            | sort -u | head -120 > "$out"/strings-rules.txt
-
-      - name: What a print-mode run actually loads
+      - name: Print-mode answers, with a dummy key
+        env:
+          GEMINI_API_KEY: not-a-real-key-probe-only
         run: |
           set +e +o pipefail
           out=/tmp/agy-evidence
+          deny='{"modelProvider":"gemini","permissions":{"allow":["mcp_grain-sandbox_*"],"deny":["run_command(*)","view_file(*)","write_to_file(*)"]}}'
 
-          probe() { # $1 = label, $2 = settings json, rest = extra agy args
+          probe() { # $1 label, $2 settings, rest = extra flags
             local label="$1" settings="$2"; shift 2
             local h="/tmp/home-$label"
             rm -rf "$h"; mkdir -p "$h/.gemini/antigravity-cli" "$h/.gemini/config"
             printf '%s' "$settings" > "$h/.gemini/antigravity-cli/settings.json"
             echo '{"mcpServers":{}}' > "$h/.gemini/config/mcp_config.json"
             {
-              echo "===== $label"
-              echo "--- settings written:"; cat "$h/.gemini/antigravity-cli/settings.json"; echo
+              echo "########## $label   (flags: $*)"
+              echo "--- settings in:"; cat "$h/.gemini/antigravity-cli/settings.json"; echo
               for cmd in /permissions /config; do
-                echo "--- agy $* -p $cmd"
-                ( cd /tmp && HOME="$h" timeout 120 agy "$@" -p "$cmd" 2>&1 | head -80 )
-                echo "exit=$?"
+                echo "--- -p $cmd (text)"
+                ( cd /tmp && HOME="$h" timeout 90 agy "$@" -p "$cmd" 2>&1 | head -60 )
+                echo "--- -p $cmd (json)"
+                ( cd /tmp && HOME="$h" timeout 90 agy "$@" --output-format json -p "$cmd" 2>&1 | head -60 )
               done
-              echo "--- settings.json after the run (agy may rewrite it):"
-              cat "$h/.gemini/antigravity-cli/settings.json"; echo
+              echo "--- settings out:"; cat "$h/.gemini/antigravity-cli/settings.json"; echo
             } >> "$out"/print-mode.txt 2>&1
           }
-
-          deny='{"modelProvider":"gemini","permissions":{"allow":["mcp_grain-sandbox_*"],"deny":["run_command(*)","view_file(*)","write_to_file(*)","replace_file_content(*)","grep_search(*)","find_by_name(*)"]}}'
           probe baseline '{"modelProvider":"gemini"}'
           probe deny-plain "$deny"
-          probe deny-skipperms "$deny" --dangerously-skip-permissions
-          probe deny-singular '{"modelProvider":"gemini","permission":{"allow":[],"deny":["run_command(*)"]}}'
-          probe deny-command '{"modelProvider":"gemini","permissions":{"deny":["command(*)","write_file(*)","read_file(*)"]}}'
-          probe preset-strict '{"modelProvider":"gemini","permissionPreset":"strict"}'
-          probe garbage '{"modelProvider":"gemini","permissions":{"deny":12345}}'
+          probe deny-skip "$deny" --dangerously-skip-permissions
+          probe deny-bad '{"modelProvider":"gemini","permissions":{"deny":12345}}'
+          probe preset-bad '{"modelProvider":"gemini","permissionPreset":12345}'
 
-          wc -l "$out"/* | tail -20
+      - name: The init event's roster, with and without a deny block
+        env:
+          GEMINI_API_KEY: not-a-real-key-probe-only
+        run: |
+          set +e +o pipefail
+          out=/tmp/agy-evidence
+          deny='{"modelProvider":"gemini","permissions":{"allow":["mcp_grain-sandbox_*"],"deny":["run_command(*)","view_file(*)","write_to_file(*)","replace_file_content(*)","grep_search(*)","find_by_name(*)"]}}'
+
+          roster() { # $1 label, $2 settings, rest = extra flags
+            local label="$1" settings="$2"; shift 2
+            local h="/tmp/rhome-$label"
+            rm -rf "$h"; mkdir -p "$h/.gemini/antigravity-cli" "$h/.gemini/config" "$h/ws"
+            printf '%s' "$settings" > "$h/.gemini/antigravity-cli/settings.json"
+            echo '{"mcpServers":{}}' > "$h/.gemini/config/mcp_config.json"
+            {
+              echo "########## $label   (flags: $*)"
+              echo '{"event":"user","message":{"role":"user","content":"say hi"}}' \
+                | ( cd "$h/ws" && HOME="$h" timeout 120 agy "$@" \
+                      --input-format stream-json --output-format stream-json \
+                      --print-timeout 60s 2>&1 | head -40 )
+            } >> "$out"/init-roster.txt 2>&1
+          }
+          roster skip-only '{"modelProvider":"gemini"}' --dangerously-skip-permissions
+          roster skip-deny "$deny" --dangerously-skip-permissions
+          roster deny-only "$deny"
+          roster plain '{"modelProvider":"gemini"}'
+          wc -c "$out"/* 
 
       - name: Push the capture to a tag
         run: |
@@ -116,7 +127,7 @@ jobs:
           mkdir -p docs/agy-evidence
           cp /tmp/agy-evidence/* docs/agy-evidence/
           git add -A docs/agy-evidence
-          git commit -m "agy probe evidence for task 255 (round 2)"
+          git commit -m "agy probe evidence for task 255 (round 3)"
           git tag -f "$tag"
           git push -f origin "$tag"
           echo "pushed tag $tag"
@@ -125,6 +136,7 @@ jobs:
         run: |
           set +e +o pipefail
           cd /tmp/agy-evidence
-          echo "===== print mode ====="; head -200 print-mode.txt
+          echo "===== permissions type names ====="; head -60 permissions-types.txt
+          echo "===== init rosters ====="; head -80 init-roster.txt
           echo "::error::probe job -- fails on purpose so its log is quoted back"
           exit 1
