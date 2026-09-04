@@ -3214,17 +3214,40 @@ the check imports it back into. The image is grain's own container
 because grain publishes no bare binaries and that package is public, so
 the step needs no credential of any kind.
 
+*Which* of grain's containers is the part a deployment cannot be wrong
+about. The check only means anything against a build that knows the same
+schema as the deployment — `grain state check` refuses a dump stamped
+with any other, and says so in those words — so a workflow pointed at
+the tag that follows main is right for a deployment tracking main and
+wrong for every other one: a deployment held at an older tag got a check
+that failed every pull request against its own settings for a reason
+that had nothing to do with the change proposed in it, until an operator
+noticed and pinned it by hand. So the deployment answers it, out of the
+same trick that tells it which sandbox to run: the grain image carries
+its own reference, stamped in at link time
+(`cmd/grain/grainimage.go`, the Dockerfile's `GRAIN_IMAGE_REF` build
+arg, `grain image` to print it), and that is what it writes into the
+workflow. An unstamped build — `make build` on a laptop — falls back to
+the tag CI keeps pointed at main, which is a less precise answer than
+the stamp and a much better one than none.
+
 Unlike the README, which is grain's text and is rewritten on every sync,
-a workflow that is already there is never touched again. Pinning the
-image to the tag a deployment runs is the obvious edit -- the check only
-means anything against a build that knows the same schema (`grain state
-status` prints both numbers) -- and a runner, a trigger or a step of
-somebody's own are just as much theirs; a file grain rewrote every
-thirty seconds would be a file whose editor is fighting a timer, which
-is the same reason the export must not fight a hand edit to a table
-file. Deleting it is not an opt-out, because grain writes back what is
-missing: `"noWorkflow": true` in `state-repo.json` is, and
-`"checkImage"` pins the image from the host side.
+a workflow that is already there is never touched again — but for that
+one image line, which grain keeps in step with the build it is running.
+That line is a fact about the deployment rather than about the
+repository, and it goes stale on its own every time the deployment is
+upgraded, so a sync after an upgrade repoints it on a one-line commit of
+its own and the syncs after that have nothing to do. The rule that makes
+that safe is byte equality: grain only touches a file that is still word
+for word its own rendering, so a runner, a trigger or a step of
+somebody's own hands the whole file back to whoever wrote it, image
+included. A file grain rewrote every thirty seconds would be a file
+whose editor is fighting a timer, which is the same reason the export
+must not fight a hand edit to a table file. Deleting it is not an
+opt-out, because grain writes back what is missing: `"noWorkflow": true`
+in `state-repo.json` is, and `"checkImage"` pins the image from the host
+side — grain then writes and maintains that value instead of its own, so
+a pin made there is one a later sync does not take back.
 
 That leaves the reason grain did not commit this file until now, which
 is real: a push adding a file under `.github/workflows` is refused
@@ -3232,17 +3255,21 @@ unless the credential making it may write workflows, and grain's own
 installation token need not be able to. So the workflow is a commit of
 its own, pushed on its own, and a refusal -- GitHub says "refusing to
 allow ... to create or update workflow" -- is undone in full: the commit
-is dropped, the file removed, the export goes on untouched, and the
-journal says to run `grain state ci` in a clone and commit the file with
-a credential that may. grain tries again a day later, so granting the
-permission needs no restart. A local-only repository gets no workflow at
-all: there is no GitHub to run one.
+is dropped, the file put back as it was — removed when grain had just
+written it, restored when what was refused was the one-line repointing
+of a check the repository already had — the export goes on untouched,
+and the journal says to run `grain state ci` in a clone and commit the
+file with a credential that may. grain tries again a day later, so
+granting the permission needs no restart. A local-only repository gets
+no workflow at all: there is no GitHub to run one.
 
 `grain state ci DIR` is that manual path, and the one for a repository
 whose deployment cannot push workflows. It writes the same file into a
-clone of the state repository, with `-image` to pin and `-force` to
-replace one that is already there, and commits nothing: it runs in
-somebody's own checkout, and the commit is theirs to make.
+clone of the state repository, with `-image` to pin (defaulting, like
+everything else here, to the image the binary running it was published
+as) and `-force` to replace one that is already there, and commits
+nothing: it runs in somebody's own checkout, and the commit is theirs to
+make.
 
 `grain state format DIR` is the step before adopting: an operator has
 made an empty repository on GitHub and cloned it, and this lays out the
@@ -5109,6 +5136,15 @@ same question and pulls its sandbox before cutting over, so the two
 halves move together or not at all. The stamp names the immutable
 `sha-` tag rather than a branch, which is what makes a rollback ask for
 its own older sandbox rather than whatever that branch points at today.
+
+The same build stamps in the grain image's *own* reference
+(`cmd/grain/grainimage.go`, the `GRAIN_IMAGE_REF` build arg, printed by
+`grain image`), for the one place a deployment has to write down which
+build it is: the CI step it installs in its own state repository, whose
+`grain state check` refuses a dump stamped with a schema it does not
+know. Same rules, same reasons — the sha- tag, so a deployment held at
+an older one names itself rather than main, and the tag CI keeps pointed
+at main as the fallback for a build that was never stamped at all.
 
 The guest *disk* used to be the one thing a deployment still built, and
 that was not an oversight: `guest-setup.sh` baked the deployment's own

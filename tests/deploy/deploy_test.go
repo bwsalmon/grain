@@ -653,6 +653,23 @@ func TestTheSandboxReferenceIsStampedIntoTheGrainImage(t *testing.T) {
 	contains(t, read(t, "Dockerfile"), "SANDBOX_IMAGE=${SANDBOX_IMAGE}")
 }
 
+// The other half of the same trick: the grain image is told what it is
+// called, not only what sandbox goes with it.
+//
+// A deployment writes that reference into the CI step it installs in its
+// own state repository, whose `grain state check` refuses a dump stamped
+// with a schema it does not know -- so the check has to run the build the
+// deployment runs, and nothing but the deployment knows which that is.
+// The sha- tag again, never the branch tag: a deployment held at an older
+// one has to name itself rather than main, which is the whole point.
+func TestTheGrainImageIsStampedWithItsOwnReference(t *testing.T) {
+	job := from(t, workflow(t), "grain-container:")
+	contains(t, job, `GRAIN_IMAGE_REF="${image}:sha-${GITHUB_SHA:0:7}"`)
+
+	contains(t, read(t, "Makefile"), "-X main.defaultGrainImage=$(GRAIN_IMAGE_REF)")
+	contains(t, read(t, "Dockerfile"), "GRAIN_IMAGE_REF=${GRAIN_IMAGE_REF}")
+}
+
 // bwsalmon/agents#645: a deployment stopped building its sandbox.
 //
 // It used to run scripts/kontur/build-oci-image.sh on every host, which is

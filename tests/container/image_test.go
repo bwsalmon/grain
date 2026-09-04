@@ -84,6 +84,32 @@ func TestTheImageNamesTheSandboxContainerItExpects(t *testing.T) {
 	}
 }
 
+// And the image knows what it is itself.
+//
+// `grain image` prints the reference stamped into this build
+// (cmd/grain/grainimage.go), which is what a deployment writes into the
+// CI step it installs in its own state repository. `grain state check`
+// refuses a dump stamped with a schema it does not know, so a deployment
+// that named the wrong build there would fail every pull request against
+// its own settings for a reason that had nothing to do with the change
+// in it -- which is precisely what naming a tag that follows main used
+// to do to every deployment that was not tracking main.
+func TestTheImageNamesItself(t *testing.T) {
+	requireImage(t)
+	out := strings.TrimSpace(docker(t, "run", "--rm", image, "image"))
+
+	if !strings.Contains(out, "/grain:") {
+		t.Fatalf("image printed %q", out)
+	}
+	// As above: a bare `make image` leaves the source default and CI
+	// stamps the immutable sha- tag it is publishing under. Either is a
+	// real reference; an empty or malformed one is a deployment writing
+	// nonsense into its own state repository.
+	if strings.HasSuffix(out, ":") || strings.Contains(out, " ") {
+		t.Fatalf("image printed a malformed reference: %q", out)
+	}
+}
+
 // The image carries the source it was built from.
 //
 // tests/deploy pins that the Dockerfile says so and that cmd/grain looks

@@ -19,7 +19,21 @@ BUILDVCS ?= auto
 # no answer. .github/workflows/build-artifacts.yml passes the exact
 # sha- tag of the sandbox image built from this same commit.
 SANDBOX_IMAGE ?=
-LDFLAGS := $(if $(SANDBOX_IMAGE),-X main.defaultSandboxImage=$(SANDBOX_IMAGE),)
+
+# This build's *own* image reference, stamped in for the same reason and
+# with the same rules -- empty here so an unstamped build keeps the
+# source default, CI passing the exact sha- tag it is publishing. It is
+# what a deployment writes into the CI step of its own state repository,
+# so that the check runs the build the deployment runs rather than
+# whatever main points at today. See cmd/grain/grainimage.go.
+#
+# GRAIN_IMAGE_REF rather than GRAIN_IMAGE because scripts/setup.sh
+# already means the repository with no tag on it by that second name, and
+# what is stamped here is a full reference, tag included.
+GRAIN_IMAGE_REF ?=
+LDFLAGS := $(strip \
+	$(if $(SANDBOX_IMAGE),-X main.defaultSandboxImage=$(SANDBOX_IMAGE),) \
+	$(if $(GRAIN_IMAGE_REF),-X main.defaultGrainImage=$(GRAIN_IMAGE_REF),))
 
 # --- Containerised build ----------------------------------------------
 #
@@ -236,4 +250,5 @@ image:
 		--build-arg GO_VERSION=$(GO_VERSION) \
 		--build-arg BUILDVCS=$(BUILDVCS) \
 		$(if $(SANDBOX_IMAGE),--build-arg SANDBOX_IMAGE=$(SANDBOX_IMAGE),) \
+		$(if $(GRAIN_IMAGE_REF),--build-arg GRAIN_IMAGE_REF=$(GRAIN_IMAGE_REF),) \
 		-t $(IMAGE) -f Dockerfile .

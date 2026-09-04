@@ -228,10 +228,12 @@ func openStateRepo(ctx context.Context, dataDir string) (*staterepo.Repo, error)
 		Token:       stateRepoToken(dataDir, settings),
 		// Whether grain installs the CI step that runs `grain state
 		// check` on pull requests against this repository, and which
-		// image it runs it from. Both default to "yes, grain's published
-		// image", so a deployment that has never heard of either ends up
-		// with a state repository whose changes are checked.
-		CheckImage: settings.CheckImage,
+		// image it runs it from. Both default to "yes, the image this
+		// deployment is itself running" (grainimage.go), so a deployment
+		// that has never heard of either ends up with a state repository
+		// whose changes are checked by a build that knows its schema
+		// rather than by whatever main points at today.
+		CheckImage: checkImage(settings),
 		NoWorkflow: settings.NoWorkflow,
 	})
 	if err != nil {
