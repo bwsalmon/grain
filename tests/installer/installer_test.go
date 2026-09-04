@@ -524,6 +524,40 @@ func TestTheCLIWrapperTalksToTheDeploymentItInstalled(t *testing.T) {
 	}
 }
 
+// The other two CLI subcommands an operator runs on this host, and the
+// only ones that read the deployment's files rather than its API.
+//
+// Both take a -data-dir, and both are printed without one: setup.sh's
+// closing report ends with `grain state status`. Typed exactly as
+// printed, on a real deployment, that failed with "-data-dir is
+// required" -- the wrapper bind-mounts the data directory but named it
+// to nothing inside the container (grain/task-303). This runs them the
+// way the report says to, through sudo, whose environment carries
+// nothing from /etc/profile.d either: what makes them work has to be
+// baked into the wrapper.
+func TestTheCLIWrapperKnowsWhereThisDeploymentsStateLives(t *testing.T) {
+	requireInstaller(t)
+	d := deployed(t)
+
+	status := sudo("/usr/local/bin/grain", "state", "status")
+	if status.exitCode != 0 {
+		t.Errorf("`grain state status` needs a -data-dir the report never prints:\n%v", status)
+	} else if !strings.Contains(status.stdout, d.data) {
+		t.Errorf("`grain state status` reports on some other data directory than %s:\n%s", d.data, status.stdout)
+	}
+	if listed := sudo("/usr/local/bin/grain", "secrets", "list"); listed.exitCode != 0 {
+		t.Errorf("`grain secrets list` needs a -data-dir:\n%v", listed)
+	}
+
+	// And a login shell gets the same answer, for the host-side commands
+	// (the bootstrap playbooks, this script's own report) that spell out
+	// $GRAIN_DATA_DIR.
+	profile := sudoRead("/etc/profile.d/grain.sh")
+	if want := `export GRAIN_DATA_DIR="` + d.data + `"`; !strings.Contains(profile, want) {
+		t.Errorf("/etc/profile.d/grain.sh does not export %s:\n%s", d.data, profile)
+	}
+}
+
 // --- small helpers -------------------------------------------------------
 
 // splitImage separates the repository from the tag, which setup.sh takes

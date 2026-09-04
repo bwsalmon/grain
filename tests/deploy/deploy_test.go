@@ -155,6 +155,39 @@ func TestTheCLIWrappersReplaceASymlinkRatherThanWritingThroughIt(t *testing.T) {
 		"the wrapper is written before the symlink is removed")
 }
 
+// The CLI has to be told the two things about this deployment it cannot
+// work out for itself: where the daemon listens, and where its files are.
+//
+// The second was missing (grain/task-303). `grain state` and `grain
+// secrets` edit the data directory directly and take a -data-dir; the
+// wrapper already bind-mounts that directory at its own path, but passed
+// nothing naming it -- so the `grain state status` this script's own
+// closing report prints failed, typed exactly as printed, with
+// "-data-dir is required".
+//
+// Both halves are asserted: the wrapper's container, which is where a
+// `grain` invocation on this host actually runs, and the profile script,
+// which is what a shell (and anything reading $GRAIN_DATA_DIR out here,
+// like pkg/capability/bootstrap's playbooks) gets.
+func TestTheCLIIsToldWhereThisDeploymentsStateLives(t *testing.T) {
+	text := setupText(t)
+
+	wrapper := between(t, text, "cat > /usr/local/lib/grain/run-image.sh", "\nWRAPPER\n")
+	contains(t, wrapper, "--env GRAIN_DATA_DIR=${GRAIN_DATA_DIR}")
+	// Baked, not passed through from the caller the way GRAIN_SERVER is:
+	// the only data directory inside that container is the one mounted
+	// on the next line.
+	contains(t, wrapper, "--volume ${GRAIN_DATA_DIR}:${GRAIN_DATA_DIR}")
+
+	profile := body(t, text, "write_cli_profile() {")
+	contains(t, profile, `export GRAIN_DATA_DIR="${GRAIN_DATA_DIR}"`)
+	contains(t, profile, `export GRAIN_SERVER=`)
+	// The data directory is exported even when GRAIN_UI_ADDR carries no
+	// port to build a GRAIN_SERVER out of: the two are unrelated, and
+	// that branch used to write no profile script at all.
+	absent(t, profile, "not writing /etc/profile.d/grain.sh")
+}
+
 // The `grain` CLI is a `docker run` with the data dir bind-mounted.
 //
 // Docker creates a missing bind-mount source itself, as root and with a

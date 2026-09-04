@@ -817,6 +817,16 @@ install_cli_wrappers() {
   # http://127.0.0.1:8420, which is only ever right by coincidence. A
   # GRAIN_SERVER already set in the caller's environment still wins.
   local port="${GRAIN_UI_ADDR##*:}"
+  # GRAIN_DATA_DIR goes in the same way, for the two subcommands that
+  # read this deployment's files rather than its API: `grain state` and
+  # `grain secrets` take a -data-dir and default it to this variable, so
+  # without it the `grain state status` this script's own closing report
+  # tells the operator to run fails with "-data-dir is required"
+  # (grain/task-303). Baked rather than let through from the caller like
+  # GRAIN_SERVER is: the only data directory that exists inside this
+  # container is the one mounted just below, so any other value names a
+  # path that is not there.
+
   # Removed, not overwritten: on a host deployed before
   # bwsalmon/agents#645 both of these are *symlinks* into
   # $GRAIN_DATA_DIR/bin, and `cat >` follows a symlink -- which would
@@ -865,6 +875,7 @@ args=(
   --user ${uid}:${gid}
   --env HOME=${GRAIN_DATA_DIR}/home
   --env "GRAIN_SERVER=\${GRAIN_SERVER:-http://127.0.0.1:${port}}"
+  --env GRAIN_DATA_DIR=${GRAIN_DATA_DIR}
   --volume ${GRAIN_DATA_DIR}:${GRAIN_DATA_DIR}
 )
 [ -d "${GRAIN_SANDBOX_DIR}" ] && args+=(--volume ${GRAIN_SANDBOX_DIR}:${GRAIN_SANDBOX_DIR})
@@ -922,7 +933,7 @@ write_image_ref() {
 }
 
 # write_cli_profile points this host's `grain` CLI at this host's own
-# daemon.
+# daemon, and at that daemon's own data directory.
 #
 # The CLI talks to the daemon over REST and defaults to
 # http://127.0.0.1:8420 (cmd/grain/main.go's defaultServerURL), which is
@@ -935,20 +946,34 @@ write_image_ref() {
 # which is not an address to connect *to*. Only the port carries over;
 # the host is always loopback, since this file is for shells on the same
 # machine.
+#
+# GRAIN_DATA_DIR is the same favour for `grain state` and `grain secrets`,
+# which read this deployment's files rather than its API and default
+# their -data-dir to it (grain/task-303). It is exported even when the
+# port cannot be worked out: the two are unrelated, and a shell that
+# cannot be told where the daemon listens can still be told where its
+# state lives.
 write_cli_profile() {
   local port="${GRAIN_UI_ADDR##*:}"
+  local server=""
   if [ -z "$port" ] || [ "$port" = "$GRAIN_UI_ADDR" ]; then
-    log "  GRAIN_UI_ADDR ($GRAIN_UI_ADDR) has no port; not writing /etc/profile.d/grain.sh"
-    return 0
+    log "  GRAIN_UI_ADDR ($GRAIN_UI_ADDR) has no port; /etc/profile.d/grain.sh will not set GRAIN_SERVER"
+  else
+    server="export GRAIN_SERVER=\"http://127.0.0.1:${port}\""
   fi
   cat > /etc/profile.d/grain.sh <<PROFILE
 # Written by scripts/setup.sh. Points the grain CLI at the daemon this
-# host runs, whose port comes from the -ui-addr it was started with.
-# An explicit -server flag still overrides this.
-export GRAIN_SERVER="http://127.0.0.1:${port}"
+# host runs, whose port comes from the -ui-addr it was started with, and
+# at the data directory that daemon was started with. An explicit
+# -server or -data-dir flag still overrides either.
+${server}
+export GRAIN_DATA_DIR="${GRAIN_DATA_DIR}"
 PROFILE
   chmod 0644 /etc/profile.d/grain.sh
-  log "  grain CLI on this host defaults to http://127.0.0.1:${port} (/etc/profile.d/grain.sh)"
+  if [ -n "$server" ]; then
+    log "  grain CLI on this host defaults to http://127.0.0.1:${port} (/etc/profile.d/grain.sh)"
+  fi
+  log "  \`grain state\` and \`grain secrets\` on this host default to ${GRAIN_DATA_DIR} (/etc/profile.d/grain.sh)"
 }
 
 # --- 3. the unprivileged account grain runs as --------------------------
