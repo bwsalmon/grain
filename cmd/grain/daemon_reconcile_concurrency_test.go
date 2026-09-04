@@ -101,23 +101,58 @@ func TestReconcileDispatchesWhileAnEarlierRunIsStillLive(t *testing.T) {
 	waitCtx, waitCancel := context.WithTimeout(ctx, 60*time.Second)
 	defer waitCancel()
 	if err := runs.Wait(waitCtx); err != nil {
-		t.Fatalf("waiting for the dispatched runs: %v", err)
-	}
-	for _, id := range []string{"t1", "t2"} {
-		got, err := store.Runs(context.Background(), id)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(got) != 1 || got[0].FinishedAt == nil {
-			t.Errorf("%s's runs = %+v, want exactly one, finished", id, got)
-		}
+		// Not fatal: the store is what says what actually happened, and
+		// the assertions below say more about it than this error does.
+		// A wait that times out here means something is still being
+		// dispatched, which is exactly what they report.
+		t.Errorf("waiting for the dispatched runs: %v", err)
 	}
 
+	// Stop the loop before reading the store, and only once the runs it
+	// was meant to have outlived are over. InFlight.Wait's condition is
+	// "nothing is live", not "these two runs ended" (its own doc
+	// comment), so a loop left ticking here would leave the assertions
+	// below racing whatever it dispatched next -- and this test is about
+	// what the loop does while a run is live, not about how it behaves
+	// once nothing is.
 	cancel()
 	select {
 	case <-loopDone:
 	case <-time.After(60 * time.Second):
 		t.Fatal("reconcile did not return after its context was cancelled")
+	}
+	drainInFlight(runs)
+
+	// One run each, and no second attempt at either. Both tasks were
+	// completed by their own run (the agent's comment_on_issue is a
+	// closing note, orchestrator.ProcessResult), so a task dispatched
+	// again here is a task run twice over: the cycle that did it would
+	// have been deciding from a ready list read before that completion
+	// landed, which is the window dispatch.stillReady closes and which
+	// this loop, ticking every 20ms around two runs that end together,
+	// is the most likely thing in the tree to hit.
+	byTask := map[string][]model.Run{}
+	for _, id := range []string{"t1", "t2"} {
+		got, err := store.Runs(context.Background(), id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		byTask[id] = got
+		if len(got) != 1 || got[0].FinishedAt == nil {
+			t.Errorf("%s's runs = %+v, want exactly one, finished", id, got)
+		}
+	}
+
+	// The claim in this test's name, as the store recorded it: t2's run
+	// started before t1's had finished. awaitRun proved it of the agent
+	// (t2 entered while t1 was blocked inside it); this is the same fact
+	// about the rows a human reads afterwards.
+	if len(byTask["t1"]) > 0 && len(byTask["t2"]) > 0 {
+		first, second := byTask["t1"][0], byTask["t2"][0]
+		if first.FinishedAt != nil && !second.StartedAt.Before(*first.FinishedAt) {
+			t.Errorf("%s started at %s, after %s finished at %s: the two runs never overlapped",
+				second.ID, second.StartedAt, first.ID, *first.FinishedAt)
+		}
 	}
 }
 

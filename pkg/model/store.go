@@ -2361,6 +2361,31 @@ func (s *Store) Ready(ctx context.Context) ([]string, error) {
 	return out, err
 }
 
+// IsReady is Ready asked about one task: whether taskID is dispatchable
+// at the moment of the call, by exactly the rule the list itself applies
+// (the task_ready view).
+//
+// Ready answers "what could start", which is a list, and a caller
+// walking that list spends real time on each entry -- reading a streak,
+// starting a run. IsReady is for the look taken at the end of that walk,
+// immediately before a run is recorded: a list read a moment ago is a
+// snapshot, and the one thing most likely to have invalidated it is a
+// run of that very task ending in the meantime. dispatch.Cycle's own doc
+// comment has the window; this is the cheapest honest way to close it,
+// one row rather than the whole view re-read per dispatch.
+func (s *Store) IsReady(ctx context.Context, taskID string) (bool, error) {
+	var one int
+	err := s.db.QueryRowContext(ctx,
+		"SELECT 1 FROM `task_ready` WHERE `task_id` = ?", taskID).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // ReadyMergers is Ready narrowed to the merge queue's own fix tasks
 // (Origin.Reason == ReasonFix, OriginReason.Merger) -- the ready tasks
 // whose runs are mergers, and so bounded by Limits.Mergers on top of
