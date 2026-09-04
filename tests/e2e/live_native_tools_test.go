@@ -39,7 +39,15 @@ package e2e
 // controller is the property itself and is checked first. The hook's
 // verdict on grain's own tools is next, because that is the failure this
 // test was written after: a denial that also denies grain's tools reads,
-// from any distance, like a model that would not do as it was asked.
+// from any distance, like a model that would not do as it was asked. Last
+// is the run seen from the hook's own side -- the names agy put in front
+// of grain, which is what the deny list is matched against and what no
+// transcript records (assertHookSawTheseCalls, below).
+//
+// What this test cannot see is a hook that was never loaded: a model that
+// happens not to reach for a native tool passes every assertion here
+// whether or not hooks.json was read at all. That is
+// TestLiveAgyLoadsGrainsHookConfig's question, and it needs no credential.
 
 import (
 	"context"
@@ -66,6 +74,13 @@ func TestLiveNativeToolsAreDenied(t *testing.T) {
 		skipUnlessLiveRequired(t, "no agy binary on $PATH")
 	}
 
+	// grain, with every PreToolUse payload agy sends written to a file on
+	// the way past. What the deny list matches on is the name inside that
+	// payload, and nothing else in a run records it: a transcript reports
+	// the tool agy ran, not the name it asked the hook about. See
+	// hook_payload_log_test.go.
+	recordingGrain, hookLogPath := buildHookRecordingGrain(t, buildGrainBinary(t))
+
 	sandbox := t.TempDir()
 	// Outside the sandbox on purpose: agy's own tools run wherever agy
 	// runs, which is the controller, so this is where a native
@@ -85,7 +100,7 @@ func TestLiveNativeToolsAreDenied(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
-	fw := antigravity.New(agyPath, buildGrainBinary(t), antigravity.WithAPIKey(apiKey))
+	fw := antigravity.New(agyPath, recordingGrain, antigravity.WithAPIKey(apiKey))
 	result, runErr := fw.Run(ctx, agent.RunConfig{
 		Prompt:         prompt,
 		SandboxRoot:    sandbox,
@@ -147,6 +162,8 @@ func TestLiveNativeToolsAreDenied(t *testing.T) {
 		t.Logf("the hook denied %d of %d call(s) to agy's own tools", denied, attempted)
 	}
 
+	assertHookSawTheseCalls(t, hookLogPath, steps)
+
 	if runErr != nil {
 		t.Fatalf("agent run failed: %v", runErr)
 	}
@@ -157,6 +174,98 @@ func TestLiveNativeToolsAreDenied(t *testing.T) {
 		t.Errorf("sandbox-probe.txt is not in the sandbox (%v): grain's own run_command never wrote it, so this run's tools reached nothing",
 			err)
 	}
+}
+
+// assertHookSawTheseCalls checks the run from the hook's own side: what
+// agy put in front of grain, under what names.
+//
+// This is the question every assertion above takes on trust. HookDecision
+// matches toolCall.name against a list of agy's tool names, and agy's own
+// hook documentation describes matchers as matching *step types*
+// ("lowercasing the step type and removing the CORTEX_STEP_TYPE_
+// prefix") rather than tool names -- so a name arriving in a shape the
+// deny list is not written in would leave that list denying nothing, with
+// no symptom but a native tool that ran. The transcript cannot settle it:
+// it says which tool agy ran, not which name the hook was handed.
+//
+// What it must not do is fail a run for a shape that is merely
+// unexpected. A payload grain does not recognise costs a run nothing --
+// HookDecision abstains and the call proceeds exactly as it would have --
+// so the names are logged in full, every time, and only two things fail:
+// a hook that was asked about nothing at all, and a native call the deny
+// list could not have matched.
+func assertHookSawTheseCalls(t *testing.T, hookLogPath string, steps []toolStep) {
+	t.Helper()
+	payloads := readHookPayloads(t, hookLogPath)
+	for _, p := range payloads {
+		t.Logf("hook payload: name=%q raw=%s", p.Name, firstBytes(p.Raw, 240))
+	}
+
+	if len(steps) > 0 && len(payloads) == 0 {
+		t.Errorf("this run made %d tool call(s) and grain's hook was asked about none of them.\n"+
+			"The denial is not in front of anything: check `agy -p /hooks` against this run's HOME "+
+			"(TestLiveAgyLoadsGrainsHookConfig does), and that the hook command in hookConfigJSON is one "+
+			"this agy can run.", len(steps))
+		return
+	}
+
+	// The names, split the way HookDecision splits them: the ones it
+	// would deny, grain's own (which it must never deny), and everything
+	// else -- agy's other tools, and any shape nobody has seen yet.
+	var withheld, grains, others []string
+	prefix := mcp.AgyQualifiedToolName("")
+	for _, p := range payloads {
+		switch {
+		case antigravity.IsWithheldNativeTool(p.Name):
+			withheld = append(withheld, p.Name)
+		case strings.HasPrefix(p.Name, prefix):
+			grains = append(grains, p.Name)
+		default:
+			others = append(others, p.Name)
+		}
+	}
+	t.Logf("the hook was asked about %d call(s): %d named a withheld native tool (%v), %d were grain's own (%v), %d were neither (%v)",
+		len(payloads), len(withheld), withheld, len(grains), grains, len(others), others)
+
+	// A native call the transcript saw, that the hook was never asked
+	// about under a name its deny list could match, is the silent
+	// failure this function exists for.
+	var nativeSteps []string
+	for _, s := range steps {
+		if !strings.HasPrefix(s.Name, prefix) && antigravity.IsWithheldNativeTool(s.Name) {
+			nativeSteps = append(nativeSteps, s.Name)
+		}
+	}
+	if len(nativeSteps) > 0 && len(withheld) == 0 {
+		t.Errorf("the run called agy's own %v, and every name the hook was handed (%v) is one "+
+			"IsWithheldNativeTool does not recognise.\n"+
+			"HookDecision matches toolCall.name, so this deny list denies nothing: the payload's name is not "+
+			"the tool name it is written in.", nativeSteps, append(append([]string{}, grains...), others...))
+	}
+
+	// And grain's own, which is the other half of the same question: the
+	// names its tools arrive under must be ones the deny list cannot
+	// match, or a run loses the only tools that reach its sandbox.
+	// Logged rather than asserted when the hook never sees them at all,
+	// which is a safe shape and one this agy may simply not have.
+	switch {
+	case len(grains) > 0:
+		t.Logf("grain's own tools reach the hook under their qualified names (%v), which no deny-list "+
+			"entry can match", grains)
+	case len(payloads) > 0:
+		t.Logf("the hook was never asked about one of grain's own tools; if that is because agy no longer " +
+			"routes MCP calls through PreToolUse, nothing here breaks -- if it is because they arrive under " +
+			"some other name, it is in the payload log above")
+	}
+}
+
+// firstBytes trims a payload for a log line: a hook payload carries the
+// call's whole arguments, which for a file write is the file.
+func firstBytes(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "...(truncated)"
 }
 
 // toolStep is one tool call as agy reported it, in agy's own spelling.
