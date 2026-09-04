@@ -181,6 +181,9 @@ func (s *Store) Init(ctx context.Context) error {
 	if err := s.ensureTaskObservationRefreshedColumn(ctx); err != nil {
 		return fmt.Errorf("migrating task_observation: %w", err)
 	}
+	if err := s.ensureTaskObservationPendingSecretColumn(ctx); err != nil {
+		return fmt.Errorf("migrating task_observation: %w", err)
+	}
 	if err := s.ensureConfigPromptExtensionColumn(ctx); err != nil {
 		return fmt.Errorf("migrating grain_config: %w", err)
 	}
@@ -439,6 +442,29 @@ func (s *Store) ensureTaskObservationRefreshedColumn(ctx context.Context) error 
 	}
 	_, err = s.db.ExecContext(ctx,
 		"ALTER TABLE `task_observation` ADD COLUMN `merge_queue_refreshed_at` DATETIME NULL")
+	return err
+}
+
+// ensureTaskObservationPendingSecretColumn adds
+// task_observation.pending_secret (Observation's own field has the
+// reasoning) to a database created before it existed -- the same
+// probe-then-ALTER ensureTaskObservationRefreshedColumn above already
+// does for its own column, and for the identical reason: CREATE TABLE IF
+// NOT EXISTS never alters a table that is already there.
+//
+// No SchemaVersion bump goes with it, on the same terms: the column is
+// nullable, so an existing database migrates into the new shape rather
+// than being one this build "cannot simply be re-created into". Every
+// row written before it reads back NULL, which getObservation reads as
+// the empty string -- no secret pending, which is exactly right for a
+// task parked before the tool that asks for one existed.
+func (s *Store) ensureTaskObservationPendingSecretColumn(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, "SELECT `pending_secret` FROM `task_observation` WHERE 1 = 0")
+	if err == nil {
+		return rows.Close()
+	}
+	_, err = s.db.ExecContext(ctx,
+		"ALTER TABLE `task_observation` ADD COLUMN `pending_secret` TEXT NULL")
 	return err
 }
 
@@ -1862,11 +1888,12 @@ func (s *Store) Observe(ctx context.Context, o Observation) error {
 func observe(ctx context.Context, tx *sql.Tx, o Observation) error {
 	_, err := tx.ExecContext(ctx,
 		"REPLACE INTO `task_observation` (`task_id`,`closed_at`,`completed_at`,"+
-			"`pending_question_comment_id`,`baseline_comment_id`,`merge_queue_blocked_at`,"+
+			"`pending_question_comment_id`,`baseline_comment_id`,`pending_secret`,"+
+			"`merge_queue_blocked_at`,"+
 			"`merge_queue_refreshed_at`,`observed_at`,"+
-			"`retry_requested_at`,`pr_opened_at`,`pr_merged_at`,`pr_closed_at`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+			"`retry_requested_at`,`pr_opened_at`,`pr_merged_at`,`pr_closed_at`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
 		o.TaskID, timeOf(o.ClosedAt), timeOf(o.CompletedAt),
-		int64Of(o.PendingQuestionCommentID), int64Of(o.BaselineCommentID),
+		int64Of(o.PendingQuestionCommentID), int64Of(o.BaselineCommentID), o.PendingSecret,
 		timeOf(o.MergeQueueBlockedAt), timeOf(o.MergeQueueRefreshedAt),
 		timeOf(o.ObservedAt), timeOf(o.RetryRequestedAt),
 		timeOf(o.PrOpenedAt), timeOf(o.PrMergedAt), timeOf(o.PrClosedAt))
@@ -1880,14 +1907,19 @@ func (s *Store) GetObservation(ctx context.Context, taskID string) (*Observation
 func getObservation(ctx context.Context, q querier, taskID string) (*Observation, error) {
 	row := q.QueryRowContext(ctx,
 		"SELECT `closed_at`,`completed_at`,`pending_question_comment_id`,"+
-			"`baseline_comment_id`,`merge_queue_blocked_at`,`merge_queue_refreshed_at`,"+
+			"`baseline_comment_id`,`pending_secret`,`merge_queue_blocked_at`,`merge_queue_refreshed_at`,"+
 			"`observed_at`,`retry_requested_at`,"+
 			"`pr_opened_at`,`pr_merged_at`,`pr_closed_at` "+
 			"FROM `task_observation` WHERE `task_id` = ?", taskID)
 	o := Observation{TaskID: taskID}
 	var closed, completed, blocked, refreshed, observed, retried, prOpened, prMerged, prClosed sql.NullTime
 	var pending, baseline sql.NullInt64
-	if err := row.Scan(&closed, &completed, &pending, &baseline, &blocked, &refreshed, &observed, &retried,
+	// pendingSecret is scanned as a NullString rather than into the
+	// string field directly: a row written before the column existed
+	// carries NULL there, which is the same "nothing pending" an empty
+	// string means (ensureTaskObservationPendingSecretColumn).
+	var pendingSecret sql.NullString
+	if err := row.Scan(&closed, &completed, &pending, &baseline, &pendingSecret, &blocked, &refreshed, &observed, &retried,
 		&prOpened, &prMerged, &prClosed); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
@@ -1896,6 +1928,7 @@ func getObservation(ctx context.Context, q querier, taskID string) (*Observation
 	}
 	o.ClosedAt, o.CompletedAt, o.ObservedAt = timePtr(closed), timePtr(completed), timePtr(observed)
 	o.PendingQuestionCommentID, o.BaselineCommentID = int64Ptr(pending), int64Ptr(baseline)
+	o.PendingSecret = pendingSecret.String
 	o.MergeQueueBlockedAt, o.MergeQueueRefreshedAt = timePtr(blocked), timePtr(refreshed)
 	o.RetryRequestedAt = timePtr(retried)
 	o.PrOpenedAt, o.PrMergedAt, o.PrClosedAt = timePtr(prOpened), timePtr(prMerged), timePtr(prClosed)

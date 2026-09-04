@@ -867,6 +867,19 @@ func (p *printer) detail(d ui.TaskDetail) {
 			fmt.Printf("last failure:    %s\n", d.LastFailureReason)
 		}
 	}
+	// A task parked on a credential looks exactly like one parked on a
+	// question from here -- awaiting_reply, with the request as the last
+	// comment -- so the one thing this says is the one thing that
+	// differs: what it is waiting for, and that answering it is a box in
+	// the UI rather than a reply here. `grain secrets set` would store
+	// the same value and leave the task parked, since nothing about a
+	// write to the secret store tells this task it was answered.
+	if d.PendingSecret != nil {
+		fmt.Printf("waiting on secret: %s (stored as %s/%s, %s)\n",
+			d.PendingSecret.Name, d.PendingSecret.Secret, d.PendingSecret.Key,
+			map[bool]string{true: "already set", false: "not set"}[d.PendingSecret.Set])
+		fmt.Println("                   set it in this task's pane in the UI -- that stores the value and queues the task again")
+	}
 	if len(d.Transitions) > 0 {
 		fmt.Println("\nhistory:")
 		for _, tr := range d.Transitions {

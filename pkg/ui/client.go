@@ -421,6 +421,7 @@ func (c *Client) GetTask(ctx context.Context, id string) (TaskDetail, error) {
 		detail.Transitions = append(detail.Transitions, transitionFrom(tr))
 	}
 	detail.PullRequestEvents = pullRequestEventsFrom(obs)
+	detail.PendingSecret = c.pendingSecretFor(obs)
 	return detail, nil
 }
 
@@ -1572,8 +1573,16 @@ func (c *Client) AddComment(ctx context.Context, id, body string, uploads []Atta
 	if obs == nil || obs.PendingQuestionCommentID == nil {
 		return nil
 	}
+	// PendingSecret goes with it. A run's request_secret call parks the
+	// task through the very field above (orchestrator.relayParkingCalls),
+	// so a reply un-parks a task that was waiting for a credential just
+	// as surely as one that was waiting for an answer -- and a task back
+	// in the queue must not still be offering a box that writes a value
+	// nothing is waiting for. Answering "not this one, use the staging
+	// key" in words is a legitimate answer to a request for a secret.
 	return c.Store.ObserveField(ctx, id, now, func(o *model.Observation) {
 		o.PendingQuestionCommentID = nil
+		o.PendingSecret = ""
 	})
 }
 
