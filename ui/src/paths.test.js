@@ -68,6 +68,99 @@ describe("parsePath", () => {
   it("tolerates a trailing slash", () => {
     expect(parsePath("/repos/")).toEqual({ view: "repos" });
   });
+
+  // grain/task-317: how a task view is narrowed rides in the query, so
+  // "the failed gcp-key tasks on acme/widgets" is a link rather than a
+  // set of gestures somebody repeats.
+  describe("a narrowed task view", () => {
+    it("reads the search, the sort and every filter out of the query", () => {
+      expect(
+        parsePath("/", "?q=ci&sort=title&repo=acme/widgets&capability=gcp-key"),
+      ).toEqual({
+        view: "tasks",
+        narrowing: {
+          search: "ci",
+          sortBy: "title",
+          filters: { repo: "acme/widgets", capability: "gcp-key" },
+        },
+      });
+    });
+
+    it("reports no narrowing at all for a query that asks for none", () => {
+      expect(parsePath("/", "")).toEqual({ view: "tasks" });
+      expect(parsePath("/", "?nothing=here")).toEqual({ view: "tasks" });
+    });
+
+    it("narrows the board and a repo's own page the same way", () => {
+      expect(parsePath("/board", "?q=ci")).toEqual({
+        view: "board",
+        narrowing: { search: "ci", sortBy: "manual", filters: {} },
+      });
+      expect(parsePath("/repos/acme/widgets", "?author=grain")).toEqual({
+        view: "repos",
+        repo: "acme/widgets",
+        narrowing: {
+          search: "",
+          sortBy: "manual",
+          filters: { author: "grain" },
+        },
+      });
+    });
+
+    // A query on a path that isn't showing a task view means nothing --
+    // the same treatment /settings already gives the view it was opened
+    // over, which it doesn't carry either.
+    it("ignores a query on a path with no task view on it", () => {
+      expect(parsePath("/settings", "?q=ci")).toEqual({
+        view: "tasks",
+        showSettings: true,
+      });
+      expect(parsePath("/tasks/42", "?q=ci")).toEqual({
+        view: "tasks",
+        taskId: "42",
+      });
+      expect(parsePath("/schedules", "?repo=acme/widgets")).toEqual({
+        view: "schedules",
+      });
+      expect(parsePath("/repos", "?repo=acme/widgets")).toEqual({
+        view: "repos",
+      });
+      expect(parsePath("/repos/acme/widgets/releases", "?q=ci")).toEqual({
+        view: "repos",
+        repo: "acme/widgets",
+        showReleases: true,
+      });
+    });
+
+    it("falls back to the backlog's own order for a sort it has never heard of", () => {
+      expect(parsePath("/", "?sort=whatever")).toEqual({ view: "tasks" });
+      expect(parsePath("/", "?q=ci&sort=whatever")).toEqual({
+        view: "tasks",
+        narrowing: { search: "ci", sortBy: "manual", filters: {} },
+      });
+    });
+
+    // Nothing here can tell whether "acme/gone" is still a repo any
+    // task carries -- that is a question about the tasks. A stale link
+    // parses as written and the view resolves it (filterViews reads a
+    // choice it cannot offer as "any").
+    it("takes a filter value on trust, however stale", () => {
+      expect(parsePath("/", "?repo=acme/gone")).toEqual({
+        view: "tasks",
+        narrowing: {
+          search: "",
+          sortBy: "manual",
+          filters: { repo: "acme/gone" },
+        },
+      });
+    });
+
+    it("reads 'has none of these' as the answer it is", () => {
+      expect(parsePath("/", "?repo=__none__").narrowing.filters).toEqual({
+        repo: "__none__",
+      });
+    });
+  });
 });
 
 describe("buildPath", () => {
@@ -126,6 +219,80 @@ describe("buildPath", () => {
     expect(buildPath({ view: "repos", taskId: "42", showMetrics: true })).toBe(
       "/metrics",
     );
+  });
+
+  describe("a narrowed task view", () => {
+    const narrowing = {
+      search: "ci",
+      sortBy: "title",
+      filters: { repo: "acme/widgets", capability: "gcp-key" },
+    };
+
+    it("writes the narrowing into the query, search first and filters in FILTERS' order", () => {
+      expect(buildPath({ view: "tasks", narrowing })).toBe(
+        "/?q=ci&sort=title&repo=acme/widgets&capability=gcp-key",
+      );
+    });
+
+    it("leaves an un-narrowed list at its own path", () => {
+      expect(
+        buildPath({
+          view: "tasks",
+          narrowing: { search: "", sortBy: "manual", filters: {} },
+        }),
+      ).toBe("/");
+    });
+
+    it("narrows the board and a repo's own page too", () => {
+      expect(buildPath({ view: "board", narrowing: { search: "ci" } })).toBe(
+        "/board?q=ci",
+      );
+      expect(
+        buildPath({
+          view: "repos",
+          repo: "acme/widgets",
+          narrowing: { search: "ci" },
+        }),
+      ).toBe("/repos/acme/widgets?q=ci");
+    });
+
+    // The narrowing is dropped for as long as something covers the list
+    // -- App goes on holding it, and closing the pane puts it back in
+    // the address bar, the same way the view behind /settings does.
+    it("drops the narrowing from a path with no task view on it", () => {
+      expect(buildPath({ view: "tasks", narrowing, showSettings: true })).toBe(
+        "/settings",
+      );
+      expect(buildPath({ view: "tasks", narrowing, taskId: "42" })).toBe(
+        "/tasks/42",
+      );
+      expect(buildPath({ view: "schedules", narrowing })).toBe("/schedules");
+      expect(buildPath({ view: "repos", narrowing })).toBe("/repos");
+      expect(
+        buildPath({
+          view: "repos",
+          repo: "acme/widgets",
+          showReleases: true,
+          narrowing,
+        }),
+      ).toBe("/repos/acme/widgets/releases");
+    });
+
+    it("round-trips every narrowed path parsePath recognizes", () => {
+      const paths = [
+        "/?q=ci",
+        "/?sort=title",
+        "/?repo=acme/widgets&capability=gcp-key",
+        "/?q=ci&sort=oldest&repo=__none__&base=main&author=grain",
+        "/?origin=schedule&kind=interactive&autoMerge=on",
+        "/board?q=ci&repo=acme/widgets",
+        "/repos/acme/widgets?q=ci&sort=newest",
+      ];
+      for (const path of paths) {
+        const [pathname, search] = path.split("?");
+        expect(buildPath(parsePath(pathname, `?${search}`))).toBe(path);
+      }
+    });
   });
 
   it("round-trips every path parsePath recognizes", () => {

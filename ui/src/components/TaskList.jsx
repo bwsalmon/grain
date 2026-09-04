@@ -60,26 +60,33 @@ export default function TaskList({
   tasks,
   stateFilter,
   config,
+  narrowing,
+  onNarrow,
   onOpenTask,
   selected,
   onToggleSelect,
   onSelectAll,
   onReorder,
 }) {
-  // search, sortBy and filters are local, not lifted to App.jsx
-  // alongside stateFilter: unlike that one, they are a refinement of the
-  // list currently on screen rather than a standing question about
-  // "which tasks", so it is fine for them to reset the next time this
-  // component mounts (switching to the repos or schedules view and back)
-  // instead of surviving the trip the way stateFilter deliberately does.
+  // The search text, the sort order and the attribute filters are all
+  // App's now, and the URL's (grain/task-317): they used to be local
+  // state here, on the grounds that a refinement of the list on screen
+  // could reset the next time this component mounted, but a list
+  // narrowed by half a dozen menus at once is a view somebody wants to
+  // come back to and to send to someone else -- so it lives in the
+  // query string, where every other piece of navigable state already
+  // lives (paths.js), and survives switching views and back the way
+  // stateFilter does.
   //
-  // filters is keyed by FILTERS entry id; a missing key, or "", is that
-  // attribute left out of the question.
-  const [search, setSearch] = useState("");
-  const [sortBy, setSortBy] = useState("manual");
-  const [filters, setFilters] = useState({});
+  // narrowing.filters is keyed by FILTERS entry id; a missing key, or
+  // "", is that attribute left out of the question. onNarrow takes a
+  // patch of the narrowing, so each control below only says what it
+  // changes.
+  const { search, sortBy, filters } = narrowing;
+  const setSearch = (value) => onNarrow({ search: value });
+  const setSortBy = (value) => onNarrow({ sortBy: value });
   const setFilter = (id, value) =>
-    setFilters((prev) => ({ ...prev, [id]: value }));
+    onNarrow({ filters: { ...filters, [id]: value } });
 
   // showClosedOverride is null until this list's own "Show closed tasks"
   // checkbox is touched -- until then, showClosed instead follows
@@ -87,7 +94,10 @@ export default function TaskList({
   // default), even though config itself only arrives after this
   // component's first render (App.jsx fetches it once, asynchronously).
   // Once a viewer picks a value here it wins for the rest of this list's
-  // life, same "local refinement" treatment as search/sortBy above.
+  // life. It stays local where search/sortBy/filters no longer are: it
+  // is not a narrowing somebody would link to but a standing rule about
+  // what this list shows at all, and its default is the deployment's
+  // (config.showClosedByDefault) rather than the URL's.
   const [showClosedOverride, setShowClosedOverride] = useState(null);
   const showClosed =
     showClosedOverride !== null
@@ -177,10 +187,7 @@ export default function TaskList({
   // menus, which is otherwise as many gestures as it took to get in.
   // The sort is not part of it: an order is not something a list has to
   // be rescued from.
-  const clearNarrowing = () => {
-    setSearch("");
-    setFilters({});
-  };
+  const clearNarrowing = () => onNarrow({ search: "", filters: {} });
 
   const startDrag = (t) => {
     const ids =

@@ -280,6 +280,10 @@ describe("App", () => {
   afterEach(() => {
     api.mockReset();
     vi.useRealTimers();
+    // The address bar outlives a test's own render -- and now carries a
+    // list's narrowing (grain/task-317) -- so put it back to "/" rather
+    // than let one test's URL seed the next test's App.
+    window.history.replaceState(null, "", "/");
   });
 
   it("loads config and the task list on mount", async () => {
@@ -1090,6 +1094,140 @@ describe("App", () => {
     expect(
       screen.queryByRole("heading", { name: "Metrics" }),
     ).not.toBeInTheDocument();
+  });
+
+  // grain/task-317: how the list is narrowed is App's state and the
+  // URL's, so a narrowed list is somewhere you can link to, reload into
+  // and come back to -- rather than a set of menus that reset the next
+  // time TaskList mounts.
+  describe("a narrowed task list", () => {
+    it("puts the search text in the address bar as it is typed", async () => {
+      setupApi();
+      const user = userEvent.setup();
+      render(<App />);
+      await screen.findByText("Fix bug");
+
+      await user.type(screen.getByPlaceholderText("Search tasks…"), "feature");
+
+      expect(screen.queryByText("Fix bug")).not.toBeInTheDocument();
+      expect(screen.getByText("Add feature")).toBeInTheDocument();
+      expect(window.location.pathname + window.location.search).toBe(
+        "/?q=feature",
+      );
+    });
+
+    it("opens a narrowed list from the URL alone", async () => {
+      window.history.replaceState(null, "", "/?repo=acme/other");
+      setupApi();
+      render(<App />);
+
+      expect(await screen.findByText("Add feature")).toBeInTheDocument();
+      expect(screen.queryByText("Fix bug")).not.toBeInTheDocument();
+      expect(window.location.search).toBe("?repo=acme/other");
+    });
+
+    it("names the picked repo in the URL when it is chosen from the menu", async () => {
+      setupApi();
+      const user = userEvent.setup();
+      render(<App />);
+      await screen.findByText("Fix bug");
+
+      await user.click(screen.getByLabelText("Repo"));
+      await user.click(
+        within(screen.getByRole("listbox")).getByText("acme/other"),
+      );
+
+      expect(screen.queryByText("Fix bug")).not.toBeInTheDocument();
+      await waitFor(() =>
+        expect(window.location.search).toBe("?repo=acme/other"),
+      );
+    });
+
+    // A link somebody kept naming a repo that has since gone quiet, or
+    // a capability that was removed: the list it names is the whole
+    // list, not an empty one (filterViews reads a choice it cannot
+    // offer as "any").
+    it("shows the whole list for a link naming a repo no task carries", async () => {
+      window.history.replaceState(null, "", "/?repo=acme/gone");
+      setupApi();
+      render(<App />);
+
+      expect(await screen.findByText("Fix bug")).toBeInTheDocument();
+      expect(screen.getByText("Add feature")).toBeInTheDocument();
+    });
+
+    it("keeps the narrowing across a trip to another view and back", async () => {
+      setupApi();
+      const user = userEvent.setup();
+      render(<App />);
+      await screen.findByText("Fix bug");
+
+      await user.type(screen.getByPlaceholderText("Search tasks…"), "feature");
+      await user.click(screen.getByRole("button", { name: /^Repos/ }));
+      await screen.findByText("acme/widgets");
+      await user.click(screen.getByRole("button", { name: /^All tasks/ }));
+
+      expect(await screen.findByText("Add feature")).toBeInTheDocument();
+      expect(screen.queryByText("Fix bug")).not.toBeInTheDocument();
+      expect(window.location.search).toBe("?q=feature");
+    });
+
+    // The board asks taskFilters.js's question the same way the list
+    // does, so the answer comes with you rather than being asked again.
+    it("carries the narrowing onto the board", async () => {
+      setupApi();
+      const user = userEvent.setup();
+      render(<App />);
+      await screen.findByText("Fix bug");
+
+      await user.type(screen.getByPlaceholderText("Search tasks…"), "feature");
+      await user.click(screen.getByRole("button", { name: "Board" }));
+
+      await screen.findByRole("heading", { name: "Board" });
+      expect(screen.getByText("Add feature")).toBeInTheDocument();
+      expect(screen.queryByText("Fix bug")).not.toBeInTheDocument();
+      expect(window.location.pathname + window.location.search).toBe(
+        "/board?q=feature",
+      );
+    });
+
+    // Narrowing replaces rather than pushes -- a history step per
+    // keystroke would make Back mean "delete a letter" -- but a
+    // narrowed URL is still an entry the Back button restores in full
+    // once something else has navigated away from it.
+    it("restores the narrowing when the browser navigates back to it", async () => {
+      window.history.replaceState(null, "", "/?q=feature");
+      setupApi();
+      const user = userEvent.setup();
+      render(<App />);
+      await screen.findByText("Add feature");
+
+      await user.click(screen.getByRole("button", { name: /^Repos/ }));
+      await screen.findByText("acme/widgets");
+      expect(window.location.pathname).toBe("/repos");
+
+      window.history.replaceState(null, "", "/?q=feature");
+      fireEvent.popState(window);
+
+      expect(await screen.findByText("Add feature")).toBeInTheDocument();
+      expect(screen.queryByText("Fix bug")).not.toBeInTheDocument();
+      expect(screen.getByPlaceholderText("Search tasks…")).toHaveValue(
+        "feature",
+      );
+    });
+
+    it("clears the narrowing, and the query, with the toolbar's Clear", async () => {
+      window.history.replaceState(null, "", "/?q=feature");
+      setupApi();
+      const user = userEvent.setup();
+      render(<App />);
+      await screen.findByText("Add feature");
+
+      await user.click(screen.getByRole("button", { name: "Clear" }));
+
+      expect(await screen.findByText("Fix bug")).toBeInTheDocument();
+      expect(window.location.pathname + window.location.search).toBe("/");
+    });
   });
 
   it("polls the task list on an interval", async () => {

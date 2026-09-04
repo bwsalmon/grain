@@ -1,7 +1,9 @@
+import { useState } from "react";
 import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import TaskList from "./TaskList.jsx";
+import { NO_NARROWING } from "../taskFilters.js";
 
 const tasks = [
   {
@@ -21,6 +23,22 @@ const tasks = [
   },
 ];
 
+// Narrowed holds the search text, sort order and filters the toolbar
+// drives, the way App does now that they live there and in the URL
+// (grain/task-317) rather than inside TaskList itself. Tests that only
+// look at rows never touch it; a test that starts from an already
+// narrowed list passes a `narrowing` prop, which seeds it.
+function Narrowed({ props }) {
+  const [narrowing, setNarrowing] = useState(props.narrowing || NO_NARROWING);
+  return (
+    <TaskList
+      {...props}
+      narrowing={narrowing}
+      onNarrow={(patch) => setNarrowing((prev) => ({ ...prev, ...patch }))}
+    />
+  );
+}
+
 function renderList(overrides = {}) {
   const props = {
     tasks,
@@ -32,13 +50,15 @@ function renderList(overrides = {}) {
     onSelectAll: vi.fn(),
     ...overrides,
   };
-  const { rerender } = render(<TaskList {...props} />);
+  const { rerender } = render(<Narrowed props={props} />);
   // rerender takes another set of overrides, for a test that needs this
   // component to survive a change of props -- a poll bringing new task
   // states, the sidebar's own filter moving -- rather than mount fresh.
+  // Whatever the toolbar was asking survives it, since Narrowed above
+  // is what holds that.
   return {
     ...props,
-    rerender: (next) => rerender(<TaskList {...props} {...next} />),
+    rerender: (next) => rerender(<Narrowed props={{ ...props, ...next }} />),
   };
 }
 
@@ -363,6 +383,8 @@ describe("TaskList", () => {
           tasks={threeTasks}
           stateFilter="all"
           config={null}
+          narrowing={NO_NARROWING}
+          onNarrow={vi.fn()}
           onOpenTask={vi.fn()}
           selected={new Set()}
           onToggleSelect={vi.fn()}
