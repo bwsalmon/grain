@@ -12,13 +12,16 @@
 // because what it grants is not material moved into a sandbox, it is
 // tools.
 //
-// Two sets of them, and this package holds only the first: SourceTools
-// below, for grain's own source, and pkg/mcp's NewTaskTools, for grain's
-// own *tasks* -- their prompts, their session transcripts and the errors
-// their attempts recorded, which is where the answer to "why did that
-// run do that" actually lives. The second set is in pkg/mcp because it
-// reads the store through the daemon's REST API and pkg/ui imports this
-// package; both are turned on together, by the same grant.
+// One set of them: SourceTools below, for grain's own source. This
+// grant used to carry a second set as well -- pkg/mcp's NewTaskTools,
+// four tools reading grain's own *tasks* through the daemon's REST API
+// -- for the "why did that run do that" half of the question. The state
+// repository answers that half now: every one of those rows is a file
+// in it (pkg/staterepo), so a task that needs to read what this
+// deployment did is given read access to that repository and reads
+// tables/task.json, tables/task_comment.json and tables/task_run.json
+// with the file tools every run already has, rather than through four
+// tools and a REST hop built to serve them.
 //
 // How they reach a run is `grain mcpserver -self-debug`, passed by a
 // Framework only for a task holding this grant (agent.RunConfig.

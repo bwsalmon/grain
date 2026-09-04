@@ -1411,9 +1411,7 @@ no Runner" stays true of the package itself even though a deployment can
 now wire one in from outside it. `selfdebug.SourceTools` is read-only --
 `read_grain_source`/`list_grain_source`, confined to whatever directory
 a deployment's `-upgrade-src-dir` already names, needing no confirmation
-of any kind, since nothing it exposes can change anything -- and the same
-grant now also carries `pkg/mcp`'s four task tools, for reading grain's
-*other* tasks (see below).
+of any kind, since nothing it exposes can change anything.
 `selfrepair.HostCommandTools`' `run_host_command` is the opposite: it
 runs a shell command directly against the same host `grain daemon`
 itself runs on -- no sandbox, no adapter, the real machine -- so every
@@ -1443,24 +1441,36 @@ forks exactly when `agent.RunConfig.SelfDebug` says this task holds the
 grant — `RunDispatch` reads that off the task's own `Grants`, and
 `agent.SelfDebugArgs` is the one translation from "what this run may do"
 to "what that process is told", shared by all three frameworks the way
-`RunDeadlineArgs` already is. What the flag turns on is two halves of one
-question. `selfdebug.SourceTools`' `read_grain_source`/`list_grain_source`
-answer what grain is *built* to do. `mcp.NewTaskTools`'
+`RunDeadlineArgs` already is. What the flag turns on is
+`selfdebug.SourceTools`' `read_grain_source`/`list_grain_source`, which
+answer what grain is *built* to do. They refuse politely rather than
+disappearing when a deployment has no source checkout, so a run's tool
+roster is a property of the vocabulary rather than of one deployment's
+configuration.
+
+The other half of that question — what this deployment actually *did* —
+used to be four more tools on the same flag (`mcp.NewTaskTools`'
 `list_grain_tasks`, `read_grain_task`, `read_grain_task_prompt` and
-`read_grain_task_transcript` answer what this deployment actually *did*:
-another task's record, every attempt it has had with the error each one
-recorded, the prompt its agent was really handed, and its session
-transcript — a still-running attempt's included, since the daemon serves
-one from `Config.LiveTranscripts`. Those reads take the same hop
-`open_pull_request` takes for its write: `cmd/grain/mcpserver.go`'s
-`daemonTasks` asks the daemon over its REST API, so that process still
-holds no store handle and `docs/design.md`'s split surface is untouched.
-Both halves refuse politely rather than disappearing when a deployment
-has no source checkout, or an `mcpserver` no daemon to ask, so a run's
-tool roster is a property of the vocabulary rather than of one
-deployment's configuration.
-Closing that gap means giving the `mcpserver` subcommand a route back to
-the store, which is a design question rather than a missing flag: the
+`read_grain_task_transcript`, reading another task's record, its
+attempts, the prompt its agent was really handed and its session
+transcript through `cmd/grain/mcpserver.go`'s `daemonTasks` over the
+daemon's REST API). They are gone, and the state repository is why: the
+rows they rendered are files in it now (`tables/task.json`,
+`tables/task_comment.json`, `tables/task_run.json`, prompts and
+transcripts included — see "The store is a git repository again"), so a
+task that needs to read what this deployment did is given read access to
+that repository, and reads it with `read_file` and `run_command` like
+any other checkout. Four tools, a `TaskReader` interface, an adapter in
+`cmd/grain` and two `ui.HTTPClient` methods, all to render what a clone
+already hands over. What that trades away is freshness: `task_run` is a
+churn-tier table (below), so an attempt's transcript reaches the
+repository on `ChurnInterval` rather than immediately, and a
+still-running attempt's transcript-in-progress — which the daemon did
+serve, from `Config.LiveTranscripts` — is not in a clone at all.
+
+Closing `selfrepair`'s own gap — a tool that blocks mid-call on a human's
+reply in the task's chat — means giving the `mcpserver` subcommand a
+route back to the store, which is a design question rather than a missing flag: the
 isolation that makes the subprocess frameworks safe is exactly that it
 holds no store handle. What it does hold is deliberately narrow and
 deliberately not that: a read-only GitHub client scoped to one branch

@@ -18,9 +18,10 @@ func TestSelfDebugArgsCarriesTheGrantAndTheSourceDir(t *testing.T) {
 	}
 }
 
-// A deployment with no checkout of grain's source still gets the task
-// half of the capability, so the grant is passed on its own rather than
-// with an empty directory beside it.
+// A deployment with no checkout of grain's source still gets the
+// capability's tools -- they say on the call that there is nothing to
+// read -- so the grant is passed on its own rather than with an empty
+// directory beside it.
 func TestSelfDebugArgsOmitsAnAbsentSourceDir(t *testing.T) {
 	args := agent.SelfDebugArgs(agent.RunConfig{SelfDebug: true})
 	if want := []string{"-self-debug"}; !slices.Equal(args, want) {

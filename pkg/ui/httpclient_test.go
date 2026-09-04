@@ -13,7 +13,6 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"testing"
-	"time"
 
 	"github.com/bwsalmon/grain/pkg/model"
 	"github.com/bwsalmon/grain/pkg/ui"
@@ -452,88 +451,5 @@ func TestHTTPClientRepoMethodsRejectAMalformedRepoLocally(t *testing.T) {
 	}
 	if _, err := c.RemoveTargetRepo(ctx, "widgets"); !errors.As(err, &ve) {
 		t.Errorf("RemoveTargetRepo(\"widgets\"): error = %v, want a ValidationError", err)
-	}
-}
-
-// The two reads `grain mcpserver` makes on behalf of a self-debug run's
-// read_grain_task_prompt and read_grain_task_transcript tools: what
-// another task's agent was told, and what its session actually did.
-// Both are on HTTPClient rather than only on Client because that process
-// holds no store handle of its own -- see pkg/mcp's task_tools.go.
-func TestHTTPClientReadsATasksPromptAndTranscript(t *testing.T) {
-	storeClient, store, ctx := testClient(t)
-	srv := httptest.NewServer(ui.NewServerWithClient(storeClient))
-	t.Cleanup(srv.Close)
-	c := ui.NewHTTPClient(srv.URL)
-
-	task := create(t, storeClient, ctx)
-	if err := store.StartRun(ctx, model.Run{
-		ID: "r1", TaskID: task.ID, Sandbox: "s1", Attempt: 1, StartedAt: baseTime,
-	}, model.Limits{}); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.FinishRun(ctx, "r1", baseTime.Add(time.Minute), "failed", "cloning: exit status 128"); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.SetRunPrompt(ctx, "r1", "You are working on it."); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.SetRunTranscript(ctx, "r1", "> run_command(git clone)\nexit=128"); err != nil {
-		t.Fatal(err)
-	}
-
-	prompt, err := c.TaskPrompt(ctx, task.ID)
-	if err != nil {
-		t.Fatalf("TaskPrompt: %v", err)
-	}
-	if prompt.Prompt != "You are working on it." || prompt.Attempt != 1 {
-		t.Errorf("TaskPrompt = %+v, want attempt 1's own prompt", prompt)
-	}
-
-	transcript, err := c.AttemptTranscript(ctx, task.ID, 1)
-	if err != nil {
-		t.Fatalf("AttemptTranscript: %v", err)
-	}
-	if transcript != "> run_command(git clone)\nexit=128" {
-		t.Errorf("AttemptTranscript = %q", transcript)
-	}
-}
-
-// A task nothing has been dispatched for has no prompt, and that is an
-// answer rather than a failure -- the route itself draws that line, and
-// the client must not turn it into an error.
-func TestHTTPClientTaskPromptIsEmptyForAnUndispatchedTask(t *testing.T) {
-	storeClient, _, ctx := testClient(t)
-	srv := httptest.NewServer(ui.NewServerWithClient(storeClient))
-	t.Cleanup(srv.Close)
-	c := ui.NewHTTPClient(srv.URL)
-
-	task := create(t, storeClient, ctx)
-	prompt, err := c.TaskPrompt(ctx, task.ID)
-	if err != nil {
-		t.Fatalf("TaskPrompt: %v", err)
-	}
-	if prompt.Prompt != "" || prompt.Attempt != 0 {
-		t.Errorf("TaskPrompt = %+v, want the empty prompt", prompt)
-	}
-}
-
-// An attempt that never happened is a NotFoundError over the wire too,
-// so read_grain_task_transcript can say which attempt it could not find
-// rather than reporting an empty transcript.
-func TestHTTPClientAttemptTranscriptOfAnUnknownAttemptIsNotFound(t *testing.T) {
-	storeClient, _, ctx := testClient(t)
-	srv := httptest.NewServer(ui.NewServerWithClient(storeClient))
-	t.Cleanup(srv.Close)
-	c := ui.NewHTTPClient(srv.URL)
-
-	task := create(t, storeClient, ctx)
-	if _, err := c.AttemptTranscript(ctx, task.ID, 4); err == nil {
-		t.Fatal("AttemptTranscript err = nil, want a not-found error")
-	} else {
-		var notFound *ui.NotFoundError
-		if !errors.As(err, &notFound) {
-			t.Fatalf("AttemptTranscript err = %v, want a *ui.NotFoundError", err)
-		}
 	}
 }
