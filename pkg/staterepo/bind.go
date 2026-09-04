@@ -454,7 +454,10 @@ over your change.
 Check it first. ` + "`" + `grain state check .` + "`" + ` loads the whole directory into a
 throwaway database and reports what breaks; without it, a malformed file
 or a row missing a required column fails when the daemon next starts,
-which is the worst place to find out.
+which is the worst place to find out. If ` + "`" + WorkflowFile + "`" + `
+is here, that check already runs on every pull request against this
+repository, and a red tick on yours means grain would not have loaded
+it. If it is not, ` + "`" + `grain state ci .` + "`" + ` writes it.
 
 Do not hand-edit while grain is running unless you mean it: grain is the
 only writer, exports on a timer, and a local edit it did not make is
@@ -504,7 +507,7 @@ func EnsureIgnored(dir string) error {
 		// behind by an older build, or by a hand that put one here, from
 		// being committed back.
 		SecretsFile + "\n"
-	path := filepath.Join(dir, ".gitignore")
+	path := filepath.Join(dir, IgnoreFile)
 	existing, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
 		return writeFileIfChanged(path, []byte(body))

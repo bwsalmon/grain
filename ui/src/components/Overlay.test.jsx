@@ -56,16 +56,50 @@ describe("Overlay", () => {
     expect(document.querySelector(".overlay-pane-header")).toBeNull();
   });
 
-  it("closes from the close button in either shape", async () => {
+  it("closes a centered dialog from the close button", async () => {
     const user = userEvent.setup();
     const onClose = vi.fn();
-    const { rerender } = render(<Overlay onClose={onClose}>body</Overlay>);
+    render(<Overlay onClose={onClose}>body</Overlay>);
 
     await user.click(screen.getByRole("button", { name: "Close dialog" }));
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
 
-    rerender(<Overlay onClose={onClose} pane>body</Overlay>);
-    await user.click(screen.getByRole("button", { name: "Close dialog" }));
-    expect(onClose).toHaveBeenCalledTimes(2);
+  // grain/task-177: a pane leaves the way a repo's page does -- a back
+  // button in the top-left corner, not an X in the top-right. Both are
+  // destinations with their own URL, so both should be left by the same
+  // gesture in the same corner.
+  it("leaves a pane by a back button on the left, not a close button on the right", async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    render(<Overlay onClose={onClose} pane>body</Overlay>);
+
+    expect(screen.queryByRole("button", { name: "Close dialog" })).toBeNull();
+    const back = screen.getByRole("button", { name: "← Back" });
+    expect(document.querySelector(".overlay-pane-back")).toContainElement(back);
+
+    await user.click(back);
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  // The panes that only ever open from one list name it, the way
+  // RepoPage's own button says "← Repos" rather than "← Back".
+  it("names where the back button lands when given a label", () => {
+    render(<Overlay onClose={() => {}} pane backLabel="Templates">body</Overlay>);
+
+    expect(screen.getByRole("button", { name: "← Templates" })).toBeInTheDocument();
+  });
+
+  // Above the header, not over it: a floating button in the corner used
+  // to cost the tab strip beside it 3rem of right padding to stay clear
+  // of, and a pane's title now starts at the pane's own left edge with
+  // nothing on top of it.
+  it("puts the back button above a pane's fixed header", () => {
+    render(<Overlay onClose={() => {}} pane header={<h2>Settings</h2>}>body</Overlay>);
+
+    const back = document.querySelector(".overlay-pane-back");
+    const head = document.querySelector(".overlay-pane-header");
+    expect(back).not.toContainElement(head);
+    expect(back.compareDocumentPosition(head) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 });

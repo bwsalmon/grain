@@ -34,10 +34,19 @@ type recordingRunner struct {
 	homeAtRun     string
 	settingsAtRun string
 	sawSettings   bool
+	// dirEntriesAtRun is what the working directory agy was started in
+	// held while the run was in flight, and dirExistedAtRun whether it
+	// was there at all -- read for the same reason as the two above, a
+	// scratch directory inside the private HOME going away with it.
+	dirEntriesAtRun int
+	dirExistedAtRun bool
 }
 
 func (r *recordingRunner) Run(_ context.Context, args []string, stdin string, env []string, dir string, tee io.Writer) (string, error) {
 	r.args, r.stdin, r.env, r.dir = args, stdin, env, dir
+	if entries, err := os.ReadDir(dir); err == nil {
+		r.dirEntriesAtRun, r.dirExistedAtRun = len(entries), true
+	}
 	for _, e := range env {
 		if home, ok := strings.CutPrefix(e, "HOME="); ok {
 			if data, err := os.ReadFile(filepath.Join(home, mcpConfigRelPath)); err == nil {
@@ -92,8 +101,14 @@ func TestRunSendsThePromptOverStdinAndNeverInArgv(t *testing.T) {
 	if err := json.Unmarshal([]byte(strings.TrimSpace(r.stdin)), &ev); err != nil {
 		t.Fatalf("stdin was not one JSON user event: %v (%q)", err, r.stdin)
 	}
-	if ev.Event != "user" || ev.Message.Role != "user" || ev.Message.Content != secret {
+	// Contains rather than equals: Run prepends toolPreamble, which is
+	// what keeps a run using grain's tools rather than agy's own. The
+	// prompt itself still has to arrive whole and unaltered.
+	if ev.Event != "user" || ev.Message.Role != "user" || !strings.Contains(ev.Message.Content, secret) {
 		t.Errorf("stdin user event = %+v, want the prompt as a user turn", ev)
+	}
+	if !strings.Contains(ev.Message.Content, mcp.AgyQualifiedToolName("run_command")) {
+		t.Errorf("stdin user event = %+v, want the preamble naming grain's own tools", ev)
 	}
 	if !argsHave(r.args, "--input-format", "stream-json") {
 		t.Errorf("args = %v, want --input-format stream-json (the mode that reads the prompt from stdin)", r.args)
@@ -521,17 +536,103 @@ func TestRunMirrorsTheRawStreamToTranscriptPath(t *testing.T) {
 	}
 }
 
-// TestVerifyToolRosterNotesATooBroadRoster is the check standing in for
-// claude's --strict-mcp-config, which agy has no equivalent of: a tool
-// grain never published is reported to whoever reads the run.
-func TestVerifyToolRosterNotesATooBroadRoster(t *testing.T) {
+// TestRunPassesAPrintTimeoutPastGrainsOwnDeadline pins the flag whose
+// absence ended every dispatched run five minutes in: agy's print mode
+// caps a whole non-interactive run at 5m by default and kills it with
+// "timeout waiting for response". The value has to sit past the deadline
+// grain will cancel the run at, so that grain is always what stops a run
+// and the reason it stopped is always reported.
+func TestRunPassesAPrintTimeoutPastGrainsOwnDeadline(t *testing.T) {
+	r := &recordingRunner{stdout: okStream()}
+	f := newFramework(r, "/usr/local/bin/grain")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Minute)
+	defer cancel()
+	if _, err := f.Run(ctx, agent.RunConfig{Prompt: "go", SandboxRoot: t.TempDir()}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	got, ok := flagValueFor(r.args, "--print-timeout")
+	if !ok {
+		t.Fatalf("args = %v, want --print-timeout among them; without it agy stops the run at 5m", r.args)
+	}
+	d, err := time.ParseDuration(got)
+	if err != nil {
+		t.Fatalf("--print-timeout %q is not a duration agy would parse: %v", got, err)
+	}
+	if d <= 90*time.Minute {
+		t.Errorf("--print-timeout = %s, want more than the run's own 90m deadline", d)
+	}
+}
+
+// A run with no deadline at all -- a test, or a caller that means it to
+// take as long as it takes -- still needs a cap, since agy's flag has no
+// "never" value and its default is five minutes.
+func TestRunPassesAPrintTimeoutWithNoDeadline(t *testing.T) {
+	r := &recordingRunner{stdout: okStream()}
+	f := newFramework(r, "/usr/local/bin/grain")
+
+	if _, err := f.Run(context.Background(), agent.RunConfig{
+		Prompt: "go", SandboxRoot: t.TempDir(),
+	}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	got, _ := flagValueFor(r.args, "--print-timeout")
+	d, err := time.ParseDuration(got)
+	if err != nil {
+		t.Fatalf("--print-timeout %q is not a duration agy would parse: %v", got, err)
+	}
+	if d < time.Hour {
+		t.Errorf("--print-timeout = %s, want a cap no ordinary run could reach", d)
+	}
+}
+
+// A kontur run has no local sandbox path to start agy in, and used to be
+// left in whatever directory the daemon itself was started in -- which is
+// where agy's own native file tools would have written. It gets an empty
+// scratch directory instead.
+func TestKonturRunStartsAgyInAnEmptyScratchDirectory(t *testing.T) {
+	r := &recordingRunner{stdout: okStream()}
+	f := newFramework(r, "/usr/local/bin/grain", WithKonturSSH("debian", "", "/work"))
+
+	if _, err := f.Run(context.Background(), agent.RunConfig{
+		Prompt: "go", KonturVM: "vm-1",
+	}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if r.dir == "" {
+		t.Fatal("agy was started with no working directory; it would inherit the daemon's own")
+	}
+	if !r.dirExistedAtRun {
+		t.Fatalf("the working directory agy was given (%s) did not exist", r.dir)
+	}
+	if r.dirEntriesAtRun != 0 {
+		t.Errorf("working directory %s held %d entries, want an empty scratch directory",
+			r.dir, r.dirEntriesAtRun)
+	}
+}
+
+// flagValueFor reads the value that follows name in an argument list.
+func flagValueFor(args []string, name string) (string, bool) {
+	for i, a := range args {
+		if a == name && i+1 < len(args) {
+			return args[i+1], true
+		}
+	}
+	return "", false
+}
+
+// TestVerifyToolRosterNotesARunThatCannotReachGrain covers the one
+// conclusion agy's init roster actually supports: a roster with neither
+// the call_mcp_tool dispatcher nor any eagerly registered grain tool is a
+// run that cannot touch its sandbox or report back, and whoever reads the
+// run is told so.
+func TestVerifyToolRosterNotesARunThatCannotReachGrain(t *testing.T) {
 	capture := stream(
-		`{"event":"init","init":{"tools":["mcp__grain-sandbox__run_command","Bash"]}}`,
+		`{"event":"init","init":{"tools":["run_command","view_file"]}}`,
 		`{"event":"result","result":{"status":"SUCCESS","response":"done"}}`,
 	)
-	unexpected := verifyToolRoster(capture)
-	if len(unexpected) != 1 || unexpected[0] != "Bash" {
-		t.Fatalf("verifyToolRoster = %v, want just the tool grain never published", unexpected)
+	if note := verifyToolRoster(capture); note == "" {
+		t.Fatal("verifyToolRoster = \"\", want a note for a roster with no route to grain's tools")
 	}
 
 	r := &recordingRunner{stdout: capture}
@@ -540,25 +641,47 @@ func TestVerifyToolRosterNotesATooBroadRoster(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if !strings.Contains(result.Transcript, "Bash") {
-		t.Errorf("Transcript = %q, want the unexpected tool named in it", result.Transcript)
+	if !strings.Contains(result.Transcript, "call_mcp_tool") {
+		t.Errorf("Transcript = %q, want the missing bridge named in it", result.Transcript)
 	}
 }
 
-// TestVerifyToolRosterAcceptsExactlyWhatGrainPublishes is the other side:
-// the roster a correctly wired run reports must produce no note at all,
-// or the note above would be noise on every run.
-func TestVerifyToolRosterAcceptsExactlyWhatGrainPublishes(t *testing.T) {
-	tools, err := json.Marshal(allowedTools())
-	if err != nil {
-		t.Fatal(err)
+// TestVerifyToolRosterAcceptsAgysOwnNativeRoster is the other side, and
+// the reason the check had to be rewritten: a real agy advertises its own
+// 57 native tools and no grain tool at all, so the old "which of these
+// did grain not publish?" reading flagged every one of them on every
+// single run. What that roster does carry is a way through to grain --
+// call_mcp_tool, or an eagerly registered mcp_grain-sandbox_* name -- and
+// either one means there is nothing to report.
+func TestVerifyToolRosterAcceptsAgysOwnNativeRoster(t *testing.T) {
+	for name, roster := range map[string][]string{
+		"the lazy dispatcher": {"run_command", "view_file", "call_mcp_tool"},
+		"an eager grain tool": {"run_command", mcp.AgyQualifiedToolName("ask_question")},
+	} {
+		t.Run(name, func(t *testing.T) {
+			tools, err := json.Marshal(roster)
+			if err != nil {
+				t.Fatal(err)
+			}
+			capture := stream(
+				`{"event":"init","init":{"tools":`+string(tools)+`}}`,
+				`{"event":"result","result":{"status":"SUCCESS","response":"done"}}`,
+			)
+			if note := verifyToolRoster(capture); note != "" {
+				t.Errorf("verifyToolRoster = %q, want none for a roster that reaches grain", note)
+			}
+		})
 	}
-	capture := stream(
-		`{"event":"init","init":{"tools":`+string(tools)+`}}`,
+}
+
+// A capture with no init event at all -- a run killed before agy spoke --
+// supports no conclusion either way, and must not produce a note that
+// reads like a misconfiguration.
+func TestVerifyToolRosterSaysNothingWithoutARoster(t *testing.T) {
+	if note := verifyToolRoster(stream(
 		`{"event":"result","result":{"status":"SUCCESS","response":"done"}}`,
-	)
-	if unexpected := verifyToolRoster(capture); len(unexpected) != 0 {
-		t.Errorf("verifyToolRoster = %v, want none for the roster grain itself publishes", unexpected)
+	)); note != "" {
+		t.Errorf("verifyToolRoster = %q, want none when there is no roster to read", note)
 	}
 }
 
@@ -598,18 +721,52 @@ func TestRunOmitsTheGrainServerWithoutATaskID(t *testing.T) {
 	}
 }
 
-// open_pull_request is published like every other tool: agy has no
-// --allowedTools of its own, so this list is what verifyToolRoster
-// measures a run's reported roster against, and a tool missing from it
-// would be reported as one grain never published.
-func TestAllowedToolsNamesOpenPullRequest(t *testing.T) {
-	names := allowedTools()
+// open_pull_request is published like every other tool, and being on
+// this list is what decides whether agy registers it as a tool the model
+// can see at all: everything named here is asked for eagerly, and
+// everything left off is reachable only through agy's dispatcher, if the
+// model thinks to look for it.
+func TestPublishedToolsNamesOpenPullRequest(t *testing.T) {
+	names := publishedTools()
 	for _, n := range names {
-		if n == "mcp__grain-sandbox__open_pull_request" {
+		if n == "open_pull_request" {
 			return
 		}
 	}
-	t.Errorf("allowedTools() = %v, want open_pull_request among them", names)
+	t.Errorf("publishedTools() = %v, want open_pull_request among them", names)
+}
+
+// TestRunAsksForEveryGrainToolEagerly pins the config key that decides
+// whether a run has grain's tools at all. Without it agy loads them
+// lazily: they appear in no roster, the model reaches for agy's own
+// native tools instead -- which run on the controller, not in the sandbox
+// -- and what does get called is recorded under the dispatcher's name
+// rather than the tool's.
+func TestRunAsksForEveryGrainToolEagerly(t *testing.T) {
+	r := &recordingRunner{stdout: okStream()}
+	f := newFramework(r, "/usr/local/bin/grain")
+
+	if _, err := f.Run(context.Background(), agent.RunConfig{
+		Prompt: "go", SandboxRoot: t.TempDir(),
+	}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	var config struct {
+		MCPServers map[string]struct {
+			Tools map[string]struct {
+				Eager bool `json:"eager"`
+			} `json:"tools"`
+		} `json:"mcpServers"`
+	}
+	if err := json.Unmarshal([]byte(r.homeAtRun), &config); err != nil {
+		t.Fatalf("mcp config was not JSON: %v (%s)", err, r.homeAtRun)
+	}
+	tools := config.MCPServers[mcpServerName].Tools
+	for _, name := range publishedTools() {
+		if !tools[name].Eager {
+			t.Errorf("mcp config asks for %q lazily; every published tool must be eager", name)
+		}
+	}
 }
 
 // settingsArgs pulls the grain-sandbox server's own argument list out of

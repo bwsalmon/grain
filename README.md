@@ -1661,14 +1661,22 @@ credential comes up holding grain's tools.
 test that execs the real `agy`, and it now asserts the two things a
 scripted run cannot show, separately and in this order:
 
-- **the roster.** agy's opening `init` event names the tools it actually
-  loaded, so the test keeps the run's raw `stream-json`
+- **a route to grain at all.** agy's opening `init` event names the tools
+  it loaded, so the test keeps the run's raw `stream-json`
   (`RunConfig.TranscriptPath`) and reads that event back: the roster must
-  carry `mcp__grain-sandbox__*` names, `run_command` among them. This is
-  checked before the run's own error is, deliberately -- a run given no
-  tools fails later on anyway, and every one of those later failures
-  reads like a model that would not do as it was asked rather than like
-  one that was never handed a way to.
+  carry `call_mcp_tool` or an `mcp_grain-sandbox_*` name. This is checked
+  before the run's own error is, deliberately -- a run given no tools
+  fails later on anyway, and every one of those later failures reads like
+  a model that would not do as it was asked rather than like one that was
+  never handed a way to.
+
+  It asked a stronger question first, and got it wrong: it demanded
+  `mcp__grain-sandbox__*` names in that roster, on the theory that the
+  roster is the run's whole tool vocabulary. Running it proved otherwise.
+  agy's `init` event lists agy's own 57 native tools and *never* an MCP
+  tool, under either spelling, eagerly registered or not -- so the old
+  assertion would have failed every live run, and blamed a config file
+  that was in the right place all along.
 - **a call that landed.** At least one `run_command` call has to have
   returned without error, and the assertions already there -- the pushed
   branch, the line in `NOTES.md` -- are what say it reached this run's
@@ -1696,15 +1704,24 @@ skipping it, so nobody comes away believing the roster was checked when
 nothing checked it. The `-v` output logs the whole advertised roster,
 which is the line to read.
 
-**Last exercised: not yet, as of 2026-09-03.** The assertions above and
-this note landed together, written and reviewed without ever being run
-against a live agy: the sandbox they were written in had no
-`GEMINI_API_KEY`, no `agy`, and no route to the network either credential
-or binary would have come from. So the claim that a live run comes up
-holding grain's tools still rests on the binary analysis above and on an
-assertion nothing has yet executed. Whoever first runs the command above
-against a real key should replace this paragraph with the agy version
-they ran, the date, and what the roster came back as.
+**Last exercised: 2026-09-04, against agy 1.1.25 and a live Gemini API
+key.** It passed, and it had to be repaired first: the run was cut off
+five minutes in by agy's own `--print-timeout` default, its tools were
+loaded lazily behind agy's `call_mcp_tool` dispatcher rather than
+registered, and the names it did report were spellings grain did not
+recognize. Those are fixed; what the roster came back as is the 57 native
+tools quoted above, with `call_mcp_tool` among them and no grain tool at
+all -- which is what the assertion now looks for. The proof that the run
+reached its sandbox is the call that landed: `run_command`, recorded
+under its bare name, which cloned, branched, committed and pushed.
+
+The lesson to keep is the one that generalizes past this run: **every
+fault it found was a difference between what agy does and what
+`agent/antigravity` assumed it did, and every scripted test in this
+repository asserted the assumption.** A fake that speaks the protocol
+faithfully is still a fake of one's own beliefs about the protocol. Run
+this by hand after anything that changes how agy is invoked, and after an
+agy upgrade -- and when it fails, suspect the belief before the code.
 
 ## Letting a run watch its own CI
 
@@ -2406,6 +2423,31 @@ flat list has instead of a poorer second list. That is also what retired
 the task view's `repoFilter` chip: "the tasks of one repo" is a place to
 go now, not a filter left standing on another place.
 
+**Everything you open leaves by a back button on the left
+(grain/task-177).** Those two halves grew their own way out. A repo's
+page and its releases were plain pages, so they took the obvious one: a
+"← Repos" button in the top-left corner, above the title. Every pane --
+a task, a schedule, a template, a suite, Settings, Debug, Metrics -- was
+a `Dialog` before it was a destination, so it kept the dialog's own X
+floating in the top-right. That left one product with two gestures for
+the same "go back where I came from", in opposite corners of the screen,
+chosen by which of the two you happened to open. They are the same kind
+of thing: each fills the content area beside the sidebar, and each has a
+URL of its own. So `Overlay.jsx`'s pane shape drops the X for a back
+button in the corner a repo page already puts one in, in the flow above
+the pane's `header` rather than floating over it -- which also gives a
+tab strip back the 3rem of right padding it needed to stay clear of the
+old button. `backLabel` names where the button lands for the panes that
+only ever open from one list ("← Schedules", "← Templates", "← Suites"),
+the way the repo page's own says "← Repos"; the panes reachable from
+more than one place -- a task opens from the flat list, from a repo's
+page and from the Metrics backlog -- say just "← Back" rather than
+naming a destination they cannot know. Escape and a backdrop click still
+close a pane, since it is still a `Dialog`. The centered shape keeps its
+X: New task, Run a suite and an attempt's transcript are actions taken
+over the page you are already on, not somewhere you navigated to, and
+there is nothing there to go back to.
+
 **`grain demo` (bwsalmon/agents#276, folded into its own subcommand by
 #363) for trying out the frontend on its own.** A real `grain daemon`
 needs a real Gemini key, a real store, and a real deployment's tasks to
@@ -2687,6 +2729,14 @@ contents replace this installation's database, or an empty repository
 grain seeds from what it has. The last two are one operation, because
 adopting cannot tell them apart up front and does not need to.
 
+An empty repository is worth formatting before it is adopted:
+`grain state format`, in a clone of it, writes the README, the
+`.gitignore` and the CI step that validates every later pull request
+against it (see "A task can change the settings" below). It is optional
+-- grain seeds a repository that has had nothing done to it just the same
+-- and it is the only way that CI step gets there, since grain's own
+pushes deliberately never carry a workflow file.
+
 Adopting is destructive in one direction on purpose -- the repository is
 the source of truth, and adopting one means taking its answer -- so the
 previous working tree is moved aside with a timestamped name rather than
@@ -2744,6 +2794,34 @@ a row missing a NOT NULL column failed after the merge, on the
 deployment. As a CI step in the state repository (`grain state check .`
 needs no `-data-dir`, no store and no daemon) it fails the pull request
 instead.
+
+`grain state ci DIR` is what puts it there. It writes
+`.github/workflows/grain-state-check.yml` into a clone of the state
+repository: a checkout and one `docker run` of grain's own published
+image, on pull requests alone -- grain commits to that repository itself
+every time its database changes, and validating those pushes would spend
+a CI run per task state change on a dump grain had just written out of
+the database the check imports it back into. The image is a flag, because
+the check only means anything against a build that knows the same schema
+as the deployment (`grain state status` prints both numbers). Neither
+this nor `format` below commits anything, and that is deliberate: a push
+adding a file under `.github/workflows` is refused unless the credential
+making it may write workflows, and a commit sitting in the deployment's
+own working tree that its sync loop can never push would wedge every
+later sync behind it.
+
+`grain state format DIR` is the step before adopting: an operator has
+made an empty repository on GitHub and cloned it, and this lays out the
+parts of a state repository that are not the dump -- the README that says
+what the tree is, the `.gitignore` that keeps a stray key out of it, and
+that same CI step. It writes no `tables/` and no `schema-version`, which
+is what keeps the bootstrap's two cases apart: a repository with a dump
+in it is one adopting *imports over the database*, so a format that wrote
+an empty dump would turn "grain seeds this empty repository from what it
+has" into "this empty repository replaces grain's state", and an operator
+who formatted one and then adopted it would have emptied their own
+deployment. It refuses a directory that already holds a dump and points
+at `grain state ci`, which is the command that has something to do there.
 
 And the encrypted secrets file is not in there any more, for the reason
 the section above gives: a repository a sandbox may clone is a

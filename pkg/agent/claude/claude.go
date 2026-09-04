@@ -415,8 +415,7 @@ func mcpConfigJSON(grainBinaryPath string, mcpArgs []string) ([]byte, error) {
 // its pull request, are both independent of which backend its sandbox
 // runs on. So is agent.SelfDebugArgs, which passes on whether this
 // task holds the self-debug grant -- and so whether that server serves
-// the read-only tools for grain's own source and grain's own task
-// records.
+// the read-only tools for grain's own source.
 //
 // So is agent.RunDeadlineArgs, which is why ctx is here at all: the
 // deadline on the ctx this run was given is what grain will cancel it

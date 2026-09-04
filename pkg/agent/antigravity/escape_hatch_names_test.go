@@ -9,39 +9,93 @@ import (
 
 // TestEscapeHatchToolCallsAreRecordedUnderTheirBareNames is
 // agent/claude's test of the same name, for agy's own step_update
-// vocabulary: agy reports a tool it loaded from its MCP settings as
-// "mcp__grain-sandbox__<tool>" (this package's own allowedTools writes
-// that prefix), and orchestrator.ProcessResult matches ToolCall.Name
-// against "ask_question", "comment_on_issue" and "propose_task" exactly.
-// Recording the prefixed name matched none of them, so a run that asked
-// the human a question was recorded no_action and the question was never
-// relayed. Every other test here scripts the bare name, which is why
-// nothing caught it.
+// vocabulary, and it now covers both of the two names a real agy reports
+// a grain tool under.
+//
+// orchestrator.ProcessResult matches ToolCall.Name against "ask_question",
+// "comment_on_issue" and "propose_task" exactly. agy names an eagerly
+// registered MCP tool "mcp_grain-sandbox_<tool>" (single underscores) and
+// reports a lazily loaded one as a "call_mcp_tool" step carrying the real
+// name in its arguments. Neither matched, so a run that asked the human a
+// question was recorded no_action and the question was never relayed.
+// This suite scripted "mcp__grain-sandbox__<tool>" -- a spelling agy has
+// never produced -- which is why nothing caught it.
 func TestEscapeHatchToolCallsAreRecordedUnderTheirBareNames(t *testing.T) {
 	for _, tool := range []string{"ask_question", "comment_on_issue", "propose_task"} {
-		t.Run(tool, func(t *testing.T) {
-			reported := mcp.QualifiedToolName(tool)
-			got, err := parseTranscript(stream(
-				initLine,
-				toolActive(0, reported, `{"question":"which config file?"}`),
-				toolDone(0, reported, "Recorded"),
-				`{"event":"result","result":{"status":"SUCCESS","response":"waiting on a reply"}}`,
-			))
-			if err != nil {
-				t.Fatalf("parseTranscript: %v", err)
-			}
-			if len(got.ToolCalls) != 1 {
-				t.Fatalf("ToolCalls = %+v, want 1", got.ToolCalls)
-			}
-			if got.ToolCalls[0].Name != tool {
-				t.Errorf("ToolCalls[0].Name = %q, want %q -- orchestrator.ProcessResult "+
-					"matches the bare name exactly, so anything else relays nothing",
-					got.ToolCalls[0].Name, tool)
-			}
-			if strings.Contains(got.Transcript, "mcp__") {
-				t.Errorf("Transcript = %q, want no mcp__ prefix in it", got.Transcript)
-			}
-		})
+		for _, reporting := range []struct {
+			name  string
+			steps func(tool string) []string
+		}{{
+			// What a run gets today: Framework.Run asks for every grain
+			// tool eagerly, so agy registers it as a native tool of its
+			// own under this name.
+			name: "eagerly registered",
+			steps: func(tool string) []string {
+				reported := mcp.AgyQualifiedToolName(tool)
+				return []string{
+					toolActive(0, reported, `{"question":"which config file?"}`),
+					toolDone(0, reported, "Recorded"),
+				}
+			},
+		}, {
+			// The fallback route, which stays open whatever the config
+			// says: agy's dispatcher for lazily loaded MCP tools, with
+			// the tool it actually called in its arguments.
+			name: "through agy's dispatcher",
+			steps: func(tool string) []string {
+				args := `{"ServerName":"grain-sandbox","ToolName":"` + tool +
+					`","Arguments":{"question":"which config file?"}}`
+				return []string{
+					toolActive(0, "call_mcp_tool", args),
+					toolDone(0, "call_mcp_tool", "Recorded"),
+				}
+			},
+		}} {
+			t.Run(tool+"/"+reporting.name, func(t *testing.T) {
+				lines := append([]string{initLine}, reporting.steps(tool)...)
+				lines = append(lines,
+					`{"event":"result","result":{"status":"SUCCESS","response":"waiting on a reply"}}`)
+				got, err := parseTranscript(stream(lines...))
+				if err != nil {
+					t.Fatalf("parseTranscript: %v", err)
+				}
+				if len(got.ToolCalls) != 1 {
+					t.Fatalf("ToolCalls = %+v, want 1", got.ToolCalls)
+				}
+				if got.ToolCalls[0].Name != tool {
+					t.Errorf("ToolCalls[0].Name = %q, want %q -- orchestrator.ProcessResult "+
+						"matches the bare name exactly, so anything else relays nothing",
+						got.ToolCalls[0].Name, tool)
+				}
+				if got.ToolCalls[0].Arguments["question"] != "which config file?" {
+					t.Errorf("ToolCalls[0].Arguments = %v, want the tool's own arguments -- "+
+						"ProcessResult reads the question out of them",
+						got.ToolCalls[0].Arguments)
+				}
+				if strings.Contains(got.Transcript, "mcp_") || strings.Contains(got.Transcript, "call_mcp_tool") {
+					t.Errorf("Transcript = %q, want the tool's own name in it", got.Transcript)
+				}
+			})
+		}
+	}
+}
+
+// A dispatch naming a server this grain did not publish is left exactly
+// as agy reported it: renaming it would attribute a foreign tool's call
+// to one of grain's own.
+func TestDispatchToAnotherServerIsNotUnwrapped(t *testing.T) {
+	args := `{"ServerName":"someone-elses","ToolName":"ask_question","Arguments":{"question":"?"}}`
+	got, err := parseTranscript(stream(
+		initLine,
+		toolActive(0, "call_mcp_tool", args),
+		toolDone(0, "call_mcp_tool", "Recorded"),
+		`{"event":"result","result":{"status":"SUCCESS","response":"done"}}`,
+	))
+	if err != nil {
+		t.Fatalf("parseTranscript: %v", err)
+	}
+	if len(got.ToolCalls) != 1 || got.ToolCalls[0].Name != "call_mcp_tool" {
+		t.Fatalf("ToolCalls = %+v, want the dispatcher's own name", got.ToolCalls)
 	}
 }
 
@@ -53,7 +107,7 @@ func TestEscapeHatchToolCallsAreRecordedUnderTheirBareNames(t *testing.T) {
 func TestToolStepWithNoActiveUpdateIsAlsoRecordedBarely(t *testing.T) {
 	got, err := parseTranscript(stream(
 		initLine,
-		toolDone(0, mcp.QualifiedToolName("comment_on_issue"), "Recorded"),
+		toolDone(0, mcp.AgyQualifiedToolName("comment_on_issue"), "Recorded"),
 		`{"event":"result","result":{"status":"SUCCESS","response":"done"}}`,
 	))
 	if err != nil {
