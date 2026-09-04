@@ -1,9 +1,17 @@
-# The checks in this repository that run a real model: tests/e2e's
-# TestLive* -- driving the real `agy` binary against a real Gemini API
-# key, asserting that a run comes up holding grain's MCP tools and
+# The checks in this repository that need a real `agy`: tests/e2e's
+# TestLive* -- asserting that a run comes up holding grain's MCP tools and
 # reaches its sandbox through one (TestLiveIssueCompletesEndToEnd), and
 # that agy honours the denial grain writes into every run's HOME for
-# agy's own file and command tools (TestLiveNativeToolsAreDenied).
+# agy's own file and command tools (TestLiveNativeToolsAreDenied). Both
+# drive the binary against a real Gemini API key.
+#
+# Two of them do not: TestLiveAgyLoadsGrainsHookConfig and
+# TestLiveAgyLoadsGrainsPermissionRules ask agy's print mode what it
+# loaded out of the HOME grain wrote (`agy -p /hooks`, `-p /permissions`),
+# which costs no quota and no model turn. They run here because this is
+# where an agy is installed, and because what they catch -- a hooks.json
+# or a permissions block agy silently ignores -- drifts with the binary
+# exactly like everything else below.
 #
 # It exists because nothing else can see what it sees. Every other test
 # of that wiring drives a scripted runner or a stub CLI, which reads

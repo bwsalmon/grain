@@ -64,6 +64,20 @@ jobs:
         with:
           go-version-file: go.mod
 
+      # Before the frontend build and everything after it: this needs
+      # nothing but the toolchain and the tree, takes seconds, and until
+      # it existed nothing in CI read formatting at all -- so drift was
+      # free to grow, and `gofmt -l` was useless as a local signal
+      # because it always had something to say about files the change
+      # had not touched.
+      #
+      # `make fmt` rather than an inline `gofmt -l` so the gate has one
+      # definition (see the target's own comment in the Makefile for what
+      # it covers and why it is plain gofmt rather than `gofmt -s`); it
+      # prints a diff per offender, so the log says what to change.
+      - name: Format
+        run: make fmt
+
       - uses: actions/setup-node@v4
         with:
           node-version: 20

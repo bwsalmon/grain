@@ -486,7 +486,7 @@ func stateFormat(args []string) error {
 			"and defaults to \".\". It must not hold a dump already: use `grain state ci`\n"+
 			"to add the validation step to a repository a deployment is already using.\n")
 	}
-	image := fs.String("image", staterepo.DefaultCheckImage,
+	image := fs.String("image", defaultGrainImage,
 		"container image the CI step runs `grain state check` from")
 	force := fs.Bool("force", false, "replace a workflow file that is already there")
 	dir, err := stateDirArg(fs, args, "format")
@@ -542,7 +542,7 @@ func stateCI(args []string) error {
 			"DIR is a clone of a state repository, and defaults to \".\". Writes the\n"+
 			"workflow that runs `grain state check` on every pull request against it.\n")
 	}
-	image := fs.String("image", staterepo.DefaultCheckImage,
+	image := fs.String("image", defaultGrainImage,
 		"container image the CI step runs `grain state check` from")
 	force := fs.Bool("force", false, "replace a workflow file that is already there")
 	dir, err := stateDirArg(fs, args, "ci")
