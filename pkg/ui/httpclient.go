@@ -477,3 +477,46 @@ func (c *HTTPClient) Metrics(ctx context.Context, window string) (MetricsReport,
 	}
 	return report, nil
 }
+
+// AgentPause is Client.AgentPause over the wire: whether dispatch is
+// currently gated by an agent's usage limit, and until when.
+//
+// enabled is false when the daemon has no gate to ask at all
+// (Config.AgentPause nil -- a UI served without a reconcile loop behind
+// it), which is a different answer from a deployment that simply is not
+// paused, and the reason this returns the flag rather than folding both
+// into a zero status. Its caller is `grain pause`
+// (cmd/grain/pause.go): an operator on a terminal could otherwise only
+// learn that dispatch was paused by reading the daemon's journal.
+func (c *HTTPClient) AgentPause(ctx context.Context) (status AgentPauseStatus, enabled bool, err error) {
+	var resp agentPauseResponse
+	if err := c.do(ctx, http.MethodGet, "/api/pause", nil, &resp); err != nil {
+		return AgentPauseStatus{}, false, err
+	}
+	if !resp.Enabled || resp.Pause == nil {
+		return AgentPauseStatus{}, false, nil
+	}
+	return *resp.Pause, true, nil
+}
+
+// LiftAgentPause is Client.LiftAgentPause over the wire -- `grain pause
+// -lift`, the terminal's own half of the banner's "Resume now" button:
+// open the gate now, reporting the state left behind and whether there
+// was a pause to clear at all.
+//
+// A deployment with no gate wired answers 404, which surfaces here as
+// the NotFoundError carrying the route's own message, rather than as the
+// quiet enabled-false a read gets: an action that did nothing should say
+// so. Lifting a pause that had already expired is not an error, and
+// reports lifted false.
+func (c *HTTPClient) LiftAgentPause(ctx context.Context) (status AgentPauseStatus, lifted bool, err error) {
+	var resp agentPauseResponse
+	if err := c.do(ctx, http.MethodDelete, "/api/pause", nil, &resp); err != nil {
+		return AgentPauseStatus{}, false, err
+	}
+	lifted = resp.Lifted != nil && *resp.Lifted
+	if resp.Pause == nil {
+		return AgentPauseStatus{}, lifted, nil
+	}
+	return *resp.Pause, lifted, nil
+}

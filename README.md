@@ -5319,6 +5319,21 @@ skipping. If the limit is in fact still in force, that run meets it and
 pauses again, which is the same self-correcting shape as a window that
 expires without having really reset.
 
+Both halves are on the CLI too (`cmd/grain/pause.go`), since an operator
+ssh'd into the deployment, or driving it with `grain -server`, has no
+banner to read. `grain pause` prints the reading — what the provider
+said, when dispatch resumes and how long that is from now — and `grain
+pause -lift` is the same DELETE the button sends. It is spelled as a noun
+with a flag, the way `grain settings` is, rather than as a `grain resume`
+verb: every verb in this CLI acts on the task its argument names
+(`approve`, `retry`, `reopen`), so a bare `grain resume` would read as
+one of those with the id left off. A deployment whose UI was handed no
+gate at all (`enabled: false` — a UI served without a reconcile loop
+behind it) says exactly that rather than "nothing is paused", which is
+the one wrong answer here: it is what an operator would act on to rule
+the usage limit out. `grain metrics` still says nothing about any of
+this, for the reason above.
+
 ## Every sandbox is built at a size grain chose
 
 All three dimensions of a sandbox VM were opt-in: `sandbox-cpus`,
