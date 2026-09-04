@@ -21,19 +21,28 @@ func scanBranch(scan func(...any) error) (Branch, error) {
 	return b, nil
 }
 
-// CreateBranch records a fresh request to create name on repo -- the
-// issue's own "create a new branch on a repo... This should just create
-// the given branch in github." It only ever writes a row, declaring the
-// intent; the branches reconciler (pkg/orchestrator.SyncBranches) is what
-// actually creates it on GitHub, at the repo's current default branch
-// tip, and advances Status to BranchCreated.
+// CreateBranch records a fresh request for name on repo -- the issue's
+// own "create a new branch on a repo... This should just create the given
+// branch in github," and grain/task-176's "if a branch already exists on
+// a repo, we should be able to add it to grain." It only ever writes a
+// row, declaring the intent; the branches reconciler
+// (pkg/orchestrator.SyncBranches) is what talks to GitHub, and it either
+// creates name at the repo's current default branch tip (Status
+// BranchCreated) or, if the ref is already there, adopts it exactly as it
+// stands (BranchAdopted).
+//
+// One call covers both because a caller cannot know which it is asking
+// for: whether a name is already on GitHub is a fact only GitHub holds,
+// and the answer can change between the form being drawn and the row
+// being reconciled. So the request says which branch, not who is
+// expected to have made it, and the status it lands on says which
+// happened.
 //
 // name must satisfy ValidBranchName (ErrInvalidBranchName). Unlike
 // CreateRelease, there is no in-store uniqueness check against name:
-// whether it collides with something already on GitHub is a fact only
-// GitHub itself holds, so a collision surfaces as LastError once the
-// reconciler tries and GitHub refuses it, the same way any other
-// GitHub-side failure here does.
+// asking twice is how a row whose reconcile failed gets retried, and a
+// second row for a name grain already has costs a line on the repo page
+// and nothing else.
 func (s *Store) CreateBranch(ctx context.Context, repo RepoRef, name string, now time.Time) (Branch, error) {
 	if !ValidBranchName(name) {
 		return Branch{}, ErrInvalidBranchName
@@ -101,13 +110,25 @@ func (s *Store) PendingBranches(ctx context.Context) ([]Branch, error) {
 }
 
 // MarkBranchCreated advances a BranchPending row to BranchCreated,
-// clearing LastError -- the branches reconciler's report that Name is
-// live on GitHub.
+// clearing LastError -- the branches reconciler's report that it cut Name
+// on GitHub itself.
 func (s *Store) MarkBranchCreated(ctx context.Context, id int64) error {
-	return s.write(ctx, "mark branch created", func(tx *sql.Tx) error {
+	return s.markBranch(ctx, id, BranchCreated, "mark branch created")
+}
+
+// MarkBranchAdopted advances a BranchPending row to BranchAdopted,
+// clearing LastError -- the branches reconciler's report that Name was
+// already live on GitHub and grain has taken the existing ref as it
+// stands rather than creating (or moving) anything.
+func (s *Store) MarkBranchAdopted(ctx context.Context, id int64) error {
+	return s.markBranch(ctx, id, BranchAdopted, "mark branch adopted")
+}
+
+func (s *Store) markBranch(ctx context.Context, id int64, status BranchStatus, what string) error {
+	return s.write(ctx, what, func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx,
 			"UPDATE `branch` SET `status` = ?, `last_error` = NULL WHERE `id` = ?",
-			string(BranchCreated), id)
+			string(status), id)
 		return err
 	})
 }

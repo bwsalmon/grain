@@ -91,6 +91,16 @@ describe("RepoPage", () => {
     expect((await screen.findByText("myfeat")).closest("li")).toHaveTextContent("myfeat -- created");
   });
 
+  // grain/task-176: a name already on the repo is added by adopting the
+  // ref that is there rather than by cutting one, and the list says which
+  // of the two happened -- the status the reconciler landed on, verbatim.
+  it("says a branch was adopted rather than created", async () => {
+    routeApi({ branches: [{ name: "myfeat", status: "adopted", createdAt: "2026-01-01T00:00:00Z" }] });
+    renderPage();
+
+    expect((await screen.findByText("myfeat")).closest("li")).toHaveTextContent("myfeat -- adopted");
+  });
+
   it("goes back to the repo list", async () => {
     routeApi();
     const onBack = vi.fn();
@@ -116,7 +126,7 @@ describe("RepoPage", () => {
     expect(onOpenReleases).toHaveBeenCalledWith("acme/widgets");
   });
 
-  it("creates a branch and refreshes the branch list on success", async () => {
+  it("adds a branch and refreshes the branch list on success", async () => {
     routeApi();
     const user = userEvent.setup();
     renderPage();
@@ -126,7 +136,7 @@ describe("RepoPage", () => {
     api.mockImplementationOnce(() => Promise.resolve([{ repo: "acme/widgets", name: "myfeat", status: "pending", createdAt: "2026-01-01T00:00:00Z" }]));
 
     await user.type(screen.getByPlaceholderText("feature/foo"), "myfeat");
-    await user.click(screen.getByRole("button", { name: "Create branch" }));
+    await user.click(screen.getByRole("button", { name: "Add branch" }));
 
     expect(api).toHaveBeenCalledWith("/api/repos/acme/widgets/branches", {
       method: "POST", body: JSON.stringify({ name: "myfeat" }),
@@ -134,7 +144,7 @@ describe("RepoPage", () => {
     expect((await screen.findByText("myfeat")).closest("li")).toHaveTextContent("myfeat -- pending");
   });
 
-  it("reports the error when creating a branch fails, without clearing the field", async () => {
+  it("reports the error when adding a branch fails, without clearing the field", async () => {
     routeApi();
     const showError = vi.fn();
     const user = userEvent.setup();
@@ -144,7 +154,7 @@ describe("RepoPage", () => {
     api.mockImplementationOnce(() => Promise.reject(new Error("invalid branch name")));
 
     await user.type(screen.getByPlaceholderText("feature/foo"), "bad name");
-    await user.click(screen.getByRole("button", { name: "Create branch" }));
+    await user.click(screen.getByRole("button", { name: "Add branch" }));
 
     expect(showError).toHaveBeenCalledWith(expect.objectContaining({ message: "invalid branch name" }));
     expect(screen.getByPlaceholderText("feature/foo")).toHaveValue("bad name");

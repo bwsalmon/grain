@@ -58,23 +58,20 @@ func TestSyncBranchesIsIdempotentOnceCreated(t *testing.T) {
 	}
 }
 
-func TestSyncBranchesRecordsAnErrorWhenTheNameAlreadyExistsOnGitHub(t *testing.T) {
+func TestSyncBranchesAdoptsABranchThatAlreadyExistsOnGitHub(t *testing.T) {
 	store, ctx := openStore(t)
-	_, client := newSim(t, "acme", "widgets", "main")
+	sim, client := newSim(t, "acme", "widgets", "main")
 	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
 
-	// "main" already exists as the seeded default branch -- asking to
-	// create a fresh branch by that same name is exactly the collision
-	// GitHub itself answers 422 to (CreateBranch's own doc comment).
-	if _, err := store.CreateBranch(ctx, repo, "main", baseTime); err != nil {
+	// A branch somebody pushed by hand, ahead of main -- grain/task-176's
+	// own "if a branch already exists on a repo, we should be able to add
+	// it to grain."
+	pushBranch(t, sim.BareRepo, "myfeat")
+	existing := mustHead(t, client, "acme", "widgets", "myfeat")
+
+	if _, err := store.CreateBranch(ctx, repo, "myfeat", baseTime); err != nil {
 		t.Fatalf("create branch: %v", err)
 	}
-
-	// A branch-specific failure must not surface as a cycle error -- see
-	// syncBranch's own doc comment on why -- only get recorded onto the
-	// row for a UI to show, so the next cycle can retry (and keep
-	// failing the same way until a human notices and picks another
-	// name).
 	if err := orchestrator.SyncBranches(ctx, store, client, baseTime); err != nil {
 		t.Fatalf("SyncBranches: %v", err)
 	}
@@ -83,11 +80,66 @@ func TestSyncBranchesRecordsAnErrorWhenTheNameAlreadyExistsOnGitHub(t *testing.T
 	if err != nil || len(got) != 1 {
 		t.Fatalf("list branches: (%+v, %v)", got, err)
 	}
-	if got[0].Status != model.BranchPending {
-		t.Fatalf("got status %q, want still pending", got[0].Status)
+	if got[0].Status != model.BranchAdopted || got[0].LastError != "" {
+		t.Fatalf("got %+v, want adopted with no error", got[0])
 	}
-	if got[0].LastError == "" {
-		t.Fatal("expected an error recorded on the branch")
+	// Adoption is a bookkeeping act: the commits the branch already
+	// pointed at are still what it points at, not the default branch tip
+	// a create would have pinned it to.
+	if now := mustHead(t, client, "acme", "widgets", "myfeat"); now != existing {
+		t.Fatalf("got branch tip %q, want the existing %q left alone", now, existing)
+	}
+}
+
+func TestSyncBranchesIsIdempotentOnceAdopted(t *testing.T) {
+	store, ctx := openStore(t)
+	sim, client := newSim(t, "acme", "widgets", "main")
+	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
+
+	pushBranch(t, sim.BareRepo, "myfeat")
+	if _, err := store.CreateBranch(ctx, repo, "myfeat", baseTime); err != nil {
+		t.Fatalf("create branch: %v", err)
+	}
+	if err := orchestrator.SyncBranches(ctx, store, client, baseTime); err != nil {
+		t.Fatalf("first SyncBranches: %v", err)
+	}
+	// An adopted branch is as terminal as a created one: the next cycle
+	// finds nothing pending and goes nowhere near GitHub for it.
+	if err := orchestrator.SyncBranches(ctx, store, client, baseTime); err != nil {
+		t.Fatalf("second SyncBranches: %v", err)
+	}
+
+	got, err := store.ListBranches(ctx, repo)
+	if err != nil || len(got) != 1 {
+		t.Fatalf("list branches: (%+v, %v)", got, err)
+	}
+	if got[0].Status != model.BranchAdopted {
+		t.Fatalf("got status %q, want still adopted", got[0].Status)
+	}
+}
+
+func TestSyncBranchesAdoptsTheDefaultBranchItself(t *testing.T) {
+	store, ctx := openStore(t)
+	_, client := newSim(t, "acme", "widgets", "main")
+	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
+
+	// "main" is the seeded default branch, and asking to create a fresh
+	// branch by that name used to be the collision GitHub answers 422 to
+	// (CreateBranch's own doc comment) and grain recorded as an error
+	// forever. It is now the plainest case of adopting what is there.
+	if _, err := store.CreateBranch(ctx, repo, "main", baseTime); err != nil {
+		t.Fatalf("create branch: %v", err)
+	}
+	if err := orchestrator.SyncBranches(ctx, store, client, baseTime); err != nil {
+		t.Fatalf("SyncBranches: %v", err)
+	}
+
+	got, err := store.ListBranches(ctx, repo)
+	if err != nil || len(got) != 1 {
+		t.Fatalf("list branches: (%+v, %v)", got, err)
+	}
+	if got[0].Status != model.BranchAdopted || got[0].LastError != "" {
+		t.Fatalf("got %+v, want adopted with no error", got[0])
 	}
 }
 
