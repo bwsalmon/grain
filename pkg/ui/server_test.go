@@ -572,6 +572,36 @@ func TestConfigEndpointReportsTaskDefaults(t *testing.T) {
 	}
 }
 
+// grain/task-202: the new-task form's "Add to backlog" picker opens on
+// the end the last task added chose, so GET /api/config -- the one call
+// the frontend makes before its first paint -- has to carry it. Filing a
+// task through the API is what moves it, not only the Settings pane.
+func TestConfigEndpointReportsWhereNewTasksJoinTheBacklog(t *testing.T) {
+	srv, client := testServer(t)
+	ctx := context.Background()
+
+	type backlogEnd struct {
+		NewestFirst bool `json:"newestFirst"`
+	}
+	rec := do(t, srv, http.MethodGet, "/api/config", "")
+	if decode[backlogEnd](t, rec).NewestFirst {
+		t.Fatalf("newestFirst = true with nothing configured, want the end of the backlog")
+	}
+
+	if _, err := client.UpdateSettings(ctx, firstSettings()); err != nil {
+		t.Fatal(err)
+	}
+	atFront := true
+	if _, err := client.CreateTask(ctx, ui.CreateTaskRequest{Title: "run this next", AtFront: &atFront}); err != nil {
+		t.Fatal(err)
+	}
+
+	rec = do(t, srv, http.MethodGet, "/api/config", "")
+	if !decode[backlogEnd](t, rec).NewestFirst {
+		t.Fatalf("newestFirst = false after a task was filed at the front, want it remembered")
+	}
+}
+
 func TestSubmitUnknownTaskIs404(t *testing.T) {
 	srv, _ := testServer(t)
 	if rec := do(t, srv, http.MethodPost, "/api/tasks/404/submit", ""); rec.Code != http.StatusNotFound {

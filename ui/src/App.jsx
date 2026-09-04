@@ -164,6 +164,18 @@ export default function App() {
     setConfig(await api("/api/config"));
   }, []);
 
+  // refreshAfterCreate is what the new-task form is given instead of
+  // refreshList alone: filing a task now also writes a setting this
+  // response carries. Picking which end of the backlog it joins is
+  // remembered as the deployment's default for the next one
+  // (ui.CreateTaskRequest.AtFront, config.newestFirst), and the form
+  // seeds its picker from that -- so without re-reading the config here,
+  // the choice would only show up on the next full page load.
+  const refreshAfterCreate = useCallback(async () => {
+    await refreshList();
+    await refreshConfig();
+  }, [refreshList, refreshConfig]);
+
   const toggleSelect = useCallback((id) => {
     setSelected((prev) => {
       const next = new Set(prev);
@@ -590,7 +602,7 @@ export default function App() {
           config={config}
           defaultRepo={newTaskRepo !== null ? newTaskRepo : openRepo}
           onClose={() => setShowNewTask(false)}
-          onCreated={refreshList}
+          onCreated={refreshAfterCreate}
           onOpenTask={openTask}
           showError={showError}
         />
