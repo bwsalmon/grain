@@ -130,7 +130,7 @@ Written once, at create. Four things:
 ```json
 {
   "contract": 1,
-  "framework": "claude",
+  "framework": { "name": "claude", "credential": "sk-ant-oat01-..." },
   "shape": { "cpus": 2, "memoryMB": 8192, "diskGB": 30 },
   "setup": "git clone http://10.0.2.1:8080/bwsalmon/grain.git /w && cd /w && git checkout -b grain/task-311 && ./scripts/setup.sh && git rev-parse HEAD",
   "placements": [
@@ -171,11 +171,37 @@ container as configuration at create and never travels in a Spec. The
 sandbox cannot read it because of where the agent runs, not because of a
 field here.
 
-**`framework` is a name, not a configuration.** How that CLI is launched,
-which flags it takes and whether it needs a private HOME are facts about
-the binary, and the binary is in this image. `grain contract` reports
-which profiles an image carries, so a task naming one it lacks fails at
-create rather than inside a guest.
+**`framework` is a name, a credential, and nothing else.** How that CLI is
+launched, which flags it takes, whether it needs a private HOME and —
+the reason this is an object rather than a string — *where its credential
+goes* are facts about the binary, and the binary is in this image. The
+controller hands over an opaque key; the profile knows whether claude
+wants a file at a path, agy wants a private HOME, or codex wants an
+environment variable. `grain contract` reports which profiles an image
+carries, so a task naming one it lacks fails at create rather than inside
+a guest.
+
+The credential travels here rather than as container configuration for two
+reasons. Which one a grain needs follows from the framework its *task*
+chose (`model.Task.AgentFramework`), so static config would mean shipping
+every credential into every container. And container configuration is
+readable where this is not: an environment variable shows in `docker
+inspect` and `/proc/1/environ`, and on Kubernetes it is in the pod spec,
+which means etcd and any `kubectl describe`. Over `grain configure`'s
+stdin it is in none of those.
+
+It is not a placement, which is why dropping `dest` cost nothing: a
+placement is path-addressed, written where the controller says because
+something else expects it there — a prompt naming `geminikey`'s
+`KeyPath`, a git command. This has no path the controller could name.
+
+**`setup` must never embed a credential.** The clone above reaches the
+proxy with a plain URL and git finds its token in the placement beside it
+— which is why that token is a placement rather than interpolated into
+the script. `Spec.Redacted()` blanks material for logging and leaves
+`setup` alone deliberately, since a failed run is diagnosed by reading
+exactly what its setup tried to do, so a secret in here is a secret in
+every log that quotes it.
 
 **`setup` is opaque to the shim**, which runs it and reports its exit code
 and output without reading either. That is also how the two-phase start

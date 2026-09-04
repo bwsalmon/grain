@@ -75,12 +75,20 @@ exists and nothing produces one; `run.go:1832` skips it, "not written
 anywhere".
 
 So placements are all guest-side and carry no side at all. The agent's own
-credential never travels in a Spec: it is deployment-wide rather than
-per-run — a Claude Code OAuth token or a Gemini key set once in Settings,
-which is why `Deps.Framework` can fail for want of it — so it reaches the
-container as configuration at create, beside the framework profile that
-reads it. The sandbox still cannot read it, for the structural reason
-above.
+credential travels beside the framework name instead —
+`"framework": {"name": "claude", "credential": "..."}` — because only the
+profile in the image knows where that CLI expects it, and because which
+credential a grain needs follows from the framework its *task* chose
+(`model.Task.AgentFramework`), so container configuration would mean
+shipping every deployment's every credential into every container. It is
+not path-addressed, which is what distinguishes it from a placement and
+why dropping `dest` cost nothing.
+
+Delivered over `grain configure`'s stdin it is also in fewer places than
+container configuration would put it: an environment variable shows in
+`docker inspect` and `/proc/1/environ`, and on Kubernetes in the pod spec,
+which means etcd. The sandbox still cannot read it either way, for the
+structural reason above.
 
 The residual: the agent process can read its own token and could write it
 into the guest. That is unchanged from today, and it is not what the VM
@@ -363,7 +371,9 @@ Everything task-shaped reaches it in one of three shapes instead:
 - **in `setup`**, a script the controller composes — the clone included;
 - **in a `placement`**, which is where a credential the work needs goes,
   git's among them — all guest-side, since that is the only side any of
-  grain's capabilities has ever used.
+  grain's capabilities has ever used. The agent's own credential is the
+  exception and rides with the framework name, because it has no path the
+  controller could name.
 
 The boundary is worth more than the fields it saves. A shim that
 understood repositories would have to agree with the controller about

@@ -27,7 +27,7 @@ func marshal(t *testing.T, v any) string {
 func TestSpecWireFormat(t *testing.T) {
 	spec := grain.Spec{
 		Contract:  grain.Contract,
-		Framework: "claude",
+		Framework: grain.FrameworkSpec{Name: "claude", Credential: "sk-ant-oat01-..."},
 		Shape:     grain.Shape{CPUs: 2, MemoryMB: 8192, DiskGB: 30},
 		Setup:     "git clone http://10.0.2.1:8080/bwsalmon/grain.git /w && cd /w && ./scripts/setup.sh",
 		Placements: []grain.Placement{
@@ -39,7 +39,10 @@ func TestSpecWireFormat(t *testing.T) {
 
 	want := `{
   "contract": 1,
-  "framework": "claude",
+  "framework": {
+    "name": "claude",
+    "credential": "sk-ant-oat01-..."
+  },
   "shape": {
     "cpus": 2,
     "memoryMB": 8192,
@@ -88,8 +91,9 @@ func TestSpecWireFormat(t *testing.T) {
 // contract.
 func TestSpecCarriesNoTaskModel(t *testing.T) {
 	full := marshal(t, grain.Spec{
-		Contract: grain.Contract, Framework: "claude",
-		Shape: grain.Shape{CPUs: 2}, Setup: "true",
+		Contract:  grain.Contract,
+		Framework: grain.FrameworkSpec{Name: "claude", Credential: "sk-ant-oat01-..."},
+		Shape:     grain.Shape{CPUs: 2}, Setup: "true",
 		Placements: []grain.Placement{{Path: "/p", Mode: "0600"}},
 		MaxRuntime: grain.Duration(time.Hour),
 	})
@@ -205,5 +209,50 @@ func TestDurationRejectsNonsense(t *testing.T) {
 	}
 	if err := json.Unmarshal([]byte(`0`), &d); err != nil {
 		t.Fatalf("a bare 0 should be accepted as no limit: %v", err)
+	}
+}
+
+// A Spec exists to move credentials, so "never log it" cannot be a rule
+// everyone remembers. Redacted is the enforceable version, and this is
+// what stops a later field from quietly escaping it.
+func TestRedactedCarriesNoMaterial(t *testing.T) {
+	spec := grain.Spec{
+		Contract:  grain.Contract,
+		Framework: grain.FrameworkSpec{Name: "claude", Credential: "sk-ant-oat01-secret"},
+		Setup:     "git clone http://10.0.2.1:8080/bwsalmon/grain.git /w",
+		Placements: []grain.Placement{
+			{Path: "/home/agent/.git-credentials", Content: "https://x:sbx_tok@10.0.2.1:8080", Mode: "0600"},
+		},
+	}
+	out := marshal(t, spec.Redacted())
+
+	for _, secret := range []string{"sk-ant-oat01-secret", "https://x:sbx_tok@10.0.2.1:8080"} {
+		if strings.Contains(out, secret) {
+			t.Errorf("Redacted still carries %q", secret)
+		}
+	}
+	// Lengths survive, because "arrived empty" is the common failure and
+	// a blank string cannot say so.
+	if !strings.Contains(out, "[redacted, 19 bytes]") {
+		t.Errorf("Redacted dropped the credential's length:\n%s", out)
+	}
+	// The original is untouched -- a redaction that mutated its receiver
+	// would blank the spec about to be sent.
+	if spec.Framework.Credential != "sk-ant-oat01-secret" {
+		t.Error("Redacted mutated the spec it was called on")
+	}
+
+	// Setup is deliberately NOT redacted, and that is only safe because a
+	// setup script must never embed a credential -- the clone URL above
+	// carries none, and git finds the token in the placement beside it.
+	// This is the rule that makes git's credential a placement rather
+	// than something interpolated into the script: a secret in Setup
+	// would survive Redacted, and Setup is exactly the field you need
+	// unblanked to diagnose a failed run.
+	if !strings.Contains(out, "git clone http://10.0.2.1:8080/bwsalmon/grain.git") {
+		t.Error("Redacted blanked setup, which is diagnosis rather than material")
+	}
+	if strings.Contains(spec.Setup, "@") {
+		t.Error("the setup script embeds credentials in a URL; they belong in a placement")
 	}
 }

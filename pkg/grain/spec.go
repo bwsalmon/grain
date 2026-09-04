@@ -1,5 +1,7 @@
 package grain
 
+import "fmt"
+
 // Spec is the whole declaration of one grain's work, written into the
 // container once at create and never updated -- what changes after that
 // arrives as a Signal.
@@ -35,26 +37,8 @@ type Spec struct {
 	// execs into one specific container to configure it, and the shim
 	// never needs to be told a name it makes no use of.
 
-	// Framework names an agent profile the sandbox image provides --
-	// "claude", "antigravity", "codex". It is a name and not a
-	// configuration on purpose: how that CLI is actually launched, which
-	// flags it takes, where its MCP config has to live and whether it
-	// needs a private HOME are facts about the binary, and the binary
-	// ships in this image.
-	//
-	// Today the daemon owns all of that (pkg/agent/claude, /antigravity,
-	// /codex -- and see antigravity's own doc comment on agy having no
-	// --mcp-config, so each run gets a private HOME holding one file).
-	// That knowledge sits in a different artifact from the CLI it
-	// describes, so upgrading the CLI can require upgrading the daemon.
-	// Moving it into the image versions the two together, and makes
-	// adding a framework an image change rather than a controller
-	// release.
-	//
-	// A controller can ask which profiles an image has before dispatching
-	// to one -- ContractReport.Frameworks -- so a task naming a framework
-	// this image lacks fails at create, naming it, rather than at launch.
-	Framework string `json:"framework"`
+	// Framework is which agent to run, and the credential it runs as.
+	Framework FrameworkSpec `json:"framework"`
 
 	// Shape is the guest this grain gets. A create-time argument and
 	// nothing resizes it: the root disk is a qcow2 overlay made with the
@@ -71,6 +55,14 @@ type Spec struct {
 	// git commands, and the controller already knows the proxy URL and
 	// the branch (model.BranchName's answer, deterministic and
 	// deliberately not something the agent influences).
+	//
+	// It must never embed a credential. A clone reaches the proxy with a
+	// plain URL and git finds its token in the placement beside it, which
+	// is why that token is a placement rather than something interpolated
+	// into this string. Redacted blanks material and deliberately leaves
+	// this alone -- a failed run is diagnosed by reading exactly what its
+	// setup tried to do -- so a secret in here is a secret in every log
+	// that quotes it.
 	//
 	// Its output is also how the two-phase start works: the controller
 	// wrote the script, so it can end it with whatever it needs to read
@@ -151,6 +143,57 @@ type Spec struct {
 	MaxRuntime Duration `json:"maxRuntime,omitempty"`
 }
 
+// FrameworkSpec selects an agent profile the sandbox image provides and
+// hands it the credential it runs as.
+//
+// A name and not a configuration, on purpose: how that CLI is launched,
+// which flags it takes, where its MCP config has to live, whether it needs
+// a private HOME, and -- the reason this type exists rather than a bare
+// string -- *where its credential goes* are all facts about the binary,
+// and the binary ships in this image.
+//
+// Today the daemon owns all of it (pkg/agent/claude, /antigravity,
+// /codex; see antigravity's own doc comment on agy having no
+// --mcp-config, so each run gets a private HOME holding one file). That
+// knowledge sits in a different artifact from the CLI it describes, so
+// upgrading the CLI can require upgrading the daemon. Moving it into the
+// image versions the two together, and makes adding a framework an image
+// change rather than a controller release.
+//
+// A controller can ask which profiles an image has before dispatching to
+// one -- ContractReport.Frameworks -- so a task naming a framework this
+// image lacks fails at create, naming it, rather than at launch.
+type FrameworkSpec struct {
+	// Name is the profile: "claude", "antigravity", "codex".
+	Name string `json:"name"`
+	// Credential is what that agent authenticates to its model API with
+	// -- a Claude Code OAuth token, a Gemini API key -- opaque here, and
+	// placed by the profile, which is the only thing that knows whether
+	// this CLI wants a file at a particular path, an environment
+	// variable, or a login already performed.
+	//
+	// It travels in the Spec rather than reaching the container as
+	// configuration at create, for two reasons. Which credential a grain
+	// needs follows from the framework its *task* chose
+	// (model.Task.AgentFramework, and Deps.Framework resolving it), so
+	// static container config would mean shipping every deployment's
+	// every credential into every container. And container configuration
+	// is readable where this is not: an environment variable is in
+	// `docker inspect` and /proc/1/environ, and on Kubernetes it is in
+	// the pod spec, which means etcd and any `kubectl describe`. Handed
+	// over `grain configure`'s stdin it is in none of those.
+	//
+	// It is not a Placement, and that is why removing Placement.Dest cost
+	// nothing: a placement is path-addressed, written where the
+	// controller says because something else -- a prompt naming
+	// geminikey's KeyPath, a git command -- expects it there. This has no
+	// path the controller could name, because only the profile knows one.
+	//
+	// Material, with model.Placement's rule: never logged, never in a
+	// prompt, never in an error.
+	Credential string `json:"credential,omitempty"`
+}
+
 // Shape is how big a guest this grain asked for.
 type Shape struct {
 	CPUs     int `json:"cpus,omitempty"`
@@ -174,4 +217,34 @@ type Placement struct {
 	Path    string `json:"path"`
 	Content string `json:"content"`
 	Mode    string `json:"mode"`
+}
+
+// Redacted returns this Spec with every piece of material blanked --
+// the framework credential, and every placement's content -- so that a
+// spec can be logged, echoed into an error, or written beside a failed
+// run without carrying secrets there.
+//
+// It exists because "never logged" is otherwise a rule enforced by
+// everyone remembering it, in a type whose whole purpose is to move
+// credentials. The lengths are kept: a spec that failed to apply is
+// routinely one whose credential arrived empty, and "credential: 0 bytes"
+// is the diagnosis where a blank string is a mystery.
+func (s Spec) Redacted() Spec {
+	s.Framework.Credential = redact(s.Framework.Credential)
+	if len(s.Placements) > 0 {
+		out := make([]Placement, len(s.Placements))
+		for i, p := range s.Placements {
+			p.Content = redact(p.Content)
+			out[i] = p
+		}
+		s.Placements = out
+	}
+	return s
+}
+
+func redact(v string) string {
+	if v == "" {
+		return ""
+	}
+	return fmt.Sprintf("[redacted, %d bytes]", len(v))
 }
