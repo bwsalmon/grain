@@ -102,15 +102,19 @@ step() { printf '\n=== %s ===\n' "$*"; }
 # waiting included. The kubeconfig goes too: it is a throwaway file (below)
 # and leaving it behind would leave a stale context named after a cluster
 # that no longer exists.
-KUBECONFIG_FILE="$(mktemp -t gke-smoke-kubeconfig.XXXXXX)"
-export KUBECONFIG="$KUBECONFIG_FILE"
 # get-credentials writes into $KUBECONFIG, so pointing it at a temporary file
 # is what keeps this script from editing the caller's own ~/.kube/config --
 # it otherwise adds a context and *switches to it*, silently redirecting any
 # kubectl the caller runs afterwards at a cluster this script has deleted.
+# A directory rather than a mktemp'd file, because the file must not exist
+# yet: gcloud reads it first, calls an empty one corrupt ("Unable to load
+# default kubeconfig: Empty file"), and copies it aside as a .backup that
+# then outlives the run.
+KUBECONFIG_DIR="$(mktemp -d -t gke-smoke.XXXXXX)"
+export KUBECONFIG="$KUBECONFIG_DIR/kubeconfig"
 cleanup() {
   local rc=$?
-  rm -f "$KUBECONFIG_FILE"
+  rm -rf "$KUBECONFIG_DIR"
   if [[ $KEEP -eq 1 ]]; then
     echo
     echo "--keep: cluster $CLUSTER left running in $ZONE. Delete it with:"
