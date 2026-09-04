@@ -125,7 +125,9 @@ func TestLiveAgyLoadsGrainsHookConfig(t *testing.T) {
 // therefore be a run that can call none of grain's own tools. The rules
 // being loaded is the cheap half of that question and this answers it
 // nightly; whether the mode change is safe is the expensive half, and it
-// needs a live turn.
+// needs a live turn -- which TestLiveRunWithoutThePermissionOverride now
+// spends, in this same nightly, by running a real dispatch's framework
+// with the flag dropped.
 func TestLiveAgyLoadsGrainsPermissionRules(t *testing.T) {
 	agyPath := liveAgyBinary(t)
 	home := liveRunHome(t, buildGrainBinary(t))

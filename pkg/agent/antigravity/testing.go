@@ -97,6 +97,32 @@ func HooksConfigPathForTest(home string) string { return filepath.Join(home, hoo
 // out without them; see permissionRules.
 func CLISettingsPathForTest(home string) string { return filepath.Join(home, cliSettingsRelPath) }
 
+// WithoutPermissionOverrideForTest drops the
+// --dangerously-skip-permissions Run passes on every dispatch, leaving
+// the run in whatever permission mode agy defaults to
+// (request-review), with the allow rules permissionRules wrote as the
+// only thing that could let a tool call through.
+//
+// It exists for one caller -- tests/e2e/live_permission_mode_test.go --
+// and for a question no smaller test can answer. permissionRules'
+// allow list names grain's own tools in their eagerly registered
+// spelling (mcp_grain-sandbox_run_command and friends), a live agy has
+// been watched loading those rules, and agy's changelog says a headless
+// run soft-denies anything needing confirmation while naming the allow
+// rule that would have permitted it. Whether that spelling is the one
+// agy's permission check compares against decides whether dropping the
+// flag leaves grain's runs working or leaves every dispatch unable to
+// touch its sandbox, and only a real agy driving a real model can say
+// which.
+//
+// A test-only option rather than a Framework field anybody can set,
+// because the answer is not in yet: until that probe comes back clean,
+// the override is what every dispatch depends on, and nothing outside
+// this measurement should be dropping it.
+func WithoutPermissionOverrideForTest() Option {
+	return func(f *Framework) { f.withoutPermissionOverride = true }
+}
+
 // NewForTest returns a Framework that runs script instead of the real agy
 // binary, for callers outside this package that need to drive the
 // tool-call loop without a live credential -- pkg/gitproxy's live_test.go,
