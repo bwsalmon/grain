@@ -33,6 +33,7 @@ import {
 import AttachmentLinks from "./AttachmentLinks.jsx";
 import AttachmentPicker from "./AttachmentPicker.jsx";
 import AttemptTranscriptOverlay from "./AttemptTranscriptOverlay.jsx";
+import { GlyphLabel } from "./ItemGlyph.jsx";
 import Markdown from "./Markdown.jsx";
 import Overlay from "./Overlay.jsx";
 import PromptOverlay from "./PromptOverlay.jsx";
@@ -388,11 +389,19 @@ function Declared({ t }) {
   // after orchestrator.SyncReviews acts on it. The name is what somebody
   // picked it by; the bare id is the fallback for a template that has
   // since gone (ui.Task.reviewTemplateName).
+  //
+  // It is the one value in this column that names a template rather
+  // than describing this task, so it carries the templates glyph
+  // (ItemGlyph.jsx): "this came out of a template" said by the same
+  // figure the Templates page and the nav rail use, in front of the
+  // name it was picked by.
   if (t.reviewTemplateId) {
     const name = t.reviewTemplateName || t.reviewTemplateId;
     rows.push([
       "Review",
-      t.reviewTask ? `${name} (task ${t.reviewTask})` : name,
+      <GlyphLabel kind="templates" key="review">
+        {t.reviewTask ? `${name} (task ${t.reviewTask})` : name}
+      </GlyphLabel>,
     ]);
   }
   // Most tasks are not interactive, so this row only shows up for the

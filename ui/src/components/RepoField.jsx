@@ -1,4 +1,5 @@
 import { useState } from "react";
+import ItemGlyph from "./ItemGlyph.jsx";
 
 // CUSTOM is the select's escape hatch, not a real option a repo could
 // itself be named -- model.ParseRepo requires a "/", which this value
@@ -32,14 +33,17 @@ export default function RepoField({
   if (custom) {
     return (
       <div className="repo-field">
-        <input
-          name={name}
-          placeholder={placeholder}
-          defaultValue={defaultValue}
-          required={required}
-          autoComplete="off"
-          onChange={(e) => onChange?.(e.target.value)}
-        />
+        <div className="repo-field-control">
+          <RepoGlyph />
+          <input
+            name={name}
+            placeholder={placeholder}
+            defaultValue={defaultValue}
+            required={required}
+            autoComplete="off"
+            onChange={(e) => onChange?.(e.target.value)}
+          />
+        </div>
         {options.length > 0 && (
           <button
             type="button"
@@ -55,26 +59,44 @@ export default function RepoField({
 
   return (
     <div className="repo-field">
-      <select
-        name={name}
-        defaultValue={defaultValue}
-        required={required}
-        onChange={(e) => {
-          if (e.target.value === CUSTOM) {
-            setCustom(true);
-            return;
-          }
-          onChange?.(e.target.value);
-        }}
-      >
-        {!required && <option value="">—</option>}
-        {options.map((r) => (
-          <option key={r} value={r}>
-            {r}
-          </option>
-        ))}
-        <option value={CUSTOM}>Other…</option>
-      </select>
+      <div className="repo-field-control">
+        <RepoGlyph />
+        <select
+          name={name}
+          defaultValue={defaultValue}
+          required={required}
+          onChange={(e) => {
+            if (e.target.value === CUSTOM) {
+              setCustom(true);
+              return;
+            }
+            onChange?.(e.target.value);
+          }}
+        >
+          {!required && <option value="">—</option>}
+          {options.map((r) => (
+            <option key={r} value={r}>
+              {r}
+            </option>
+          ))}
+          <option value={CUSTOM}>Other…</option>
+        </select>
+      </div>
     </div>
+  );
+}
+
+// The repos figure in front of the field, not on each option: an
+// <option> can hold no markup, and this stays a native <select> for the
+// semantics its own tests and a phone's own picker rely on. In front of
+// the whole control the ring says the same thing once -- what this field
+// names -- for a picker whose caption is often the single word "Repo",
+// and it is the same figure the Repos page and the read-only repos
+// picker beside this one carry (ItemGlyph.jsx).
+function RepoGlyph() {
+  return (
+    <span className="repo-field-icon">
+      <ItemGlyph kind="repos" />
+    </span>
   );
 }

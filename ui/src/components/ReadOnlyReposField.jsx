@@ -12,6 +12,7 @@ import {
   TextField,
   Typography,
 } from "@mui/material";
+import { GlyphLabel } from "./ItemGlyph.jsx";
 
 // looksLikeRepo mirrors model.ParseRepo, which is what the server runs a
 // read-only repo through (ui.parseReads): owner/name, split on the first
@@ -240,6 +241,13 @@ export default function ReadOnlyReposField({
                     </Typography>
                   </MenuItem>
                 )}
+                {/* Every row here names a repo -- a known one, or the
+                    one being typed -- so each carries the repos figure
+                    (ItemGlyph.jsx), the same ring the nav rail and the
+                    Repos page use. It is what tells this popper apart
+                    from the task picker it is built out of, which drops
+                    an identically shaped list of ids under an
+                    identically shaped box. */}
                 {rows.map((row, i) => (
                   <MenuItem
                     key={row.key}
@@ -247,10 +255,12 @@ export default function ReadOnlyReposField({
                     onClick={() => pick(row)}
                     onMouseEnter={() => setHighlight(i)}
                   >
-                    <ListItemText
-                      primary={row.label}
-                      primaryTypographyProps={{ noWrap: true }}
-                    />
+                    <GlyphLabel kind="repos">
+                      <ListItemText
+                        primary={row.label}
+                        primaryTypographyProps={{ noWrap: true }}
+                      />
+                    </GlyphLabel>
                   </MenuItem>
                 ))}
               </MenuList>
