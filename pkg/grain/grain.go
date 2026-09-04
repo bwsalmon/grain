@@ -34,14 +34,23 @@
 // rebuilt, so a rebuild replays Spec.Placements rather than coordinating
 // a re-mint with a controller that holds the only copy.
 //
-// Everything else an agent can call comes from an ordinary MCP server the
-// controller runs, reached over the connection Attach opens. The shim
-// merges those tools into its own tools/list and relays their calls; it
-// holds no vocabulary for them and never sees a declaration it wrote. So
-// somebody extending a deployment writes a plain stdio MCP server against
-// the spec and any official SDK, lists it in the controller's own
-// mcpServers config, and its tools appear to every agent -- with no
-// awareness that a proxy, a container or a VM is in the path.
+// Everything else an agent can call comes from an MCP server the
+// controller runs, which the agent reaches *directly* over Streamable
+// HTTP at Spec.ControllerURL. The shim does not relay, merge or even know
+// about those tools: an MCP client speaks to several servers as a matter
+// of course, so the agent is simply configured with two -- the shim's own
+// stdio server for the sandbox, and a URL for everything else.
+//
+// Which means a dropped connection is the protocol's problem rather than
+// this package's. Streamable HTTP carries a session id and resumable SSE
+// (Last-Event-ID), so a client reconnects and picks up where it was;
+// there is nothing here to hold a call, replay one, or reattach.
+//
+// Somebody extending a deployment writes a plain MCP server against the
+// spec and any official SDK, and the controller serves or aggregates it.
+// That server is unaware of the container and the VM; which grain is
+// calling comes from the bearer token, so it needs no per-grain instance
+// for identity alone.
 //
 // That is the whole of what leaves the container, and it means the
 // container needs no daemon URL, no task ID and no bearer token of its
@@ -64,10 +73,7 @@
 // health.
 package grain
 
-import (
-	"context"
-	"io"
-)
+import "context"
 
 // ID names one grain. It is derived from the run it serves
 // (dispatch.RunID) and never allocated by a backend, because a controller
@@ -136,58 +142,6 @@ type Grain interface {
 	// both go through the API server and largely fail together. It is
 	// genuinely a second route only under docker.
 	Observe(ctx context.Context) (Status, error)
-
-	// Attach connects this grain to the controller's MCP server. The
-	// returned stream is one MCP stdio session with the *controller* as
-	// the server and the grain as the client: whatever `mcpServers` that
-	// deployment configured, launched per grain so a run's context
-	// arrives as ordinary launch arguments, aggregated, and served here.
-	//
-	// It is the one call that is not poll-shaped, and it earns that. The
-	// objections that ruled out held connections elsewhere were about
-	// what they carried -- push, where silence is ambiguous and edges get
-	// lost; the trajectory, which needs buffering and replay. Tool calls
-	// are synchronous request/response, low volume, and fail visibly, so
-	// none of it transfers. Direction is unchanged either way: the
-	// controller opens this, and the grain never dials out.
-	//
-	// It blocks for the life of the connection and returns when it drops.
-	// A controller reattaches on any tick that finds Upstream.Attached
-	// false, and the shim holds calls in between (see Upstream).
-	//
-	// A grain waits for the first attach before starting its agent, and
-	// says so in Status.Activity (AwaitingUpstreamNote) while it does.
-	//
-	// It waits rather than starting with only the built-ins because **an
-	// absent tool is not an error**. An agent never told that
-	// open_pull_request exists does not call it and fail; it finishes its
-	// work, pushes a branch with run_command, and opens no pull request.
-	// The run looks fine and nothing is wrong until somebody looks. To
-	// return errors instead, the shim would have to advertise tools it
-	// has not been told about -- which means being configured with their
-	// names and schemas, the mounted declarations this replaced. MCP's
-	// notifications/tools/list_changed does not close the gap either: it
-	// is gated on a client capability, support across CLIs is uneven, and
-	// a client that ignores it loses those tools silently, which is the
-	// same failure with more machinery.
-	//
-	// It is barely a wait in practice. The agent does not start until the
-	// guest has booted and Setup has run, which is minutes; the attach
-	// lands milliseconds after create and runs concurrently with all of
-	// it. What the rule really buys is that a genuinely absent controller
-	// fails loudly -- the grain sits in PhaseProvisioning until
-	// Policy.ProvisionBudget, an ending that already has a rule -- rather
-	// than producing a run that quietly did less than it should have.
-	//
-	// A grain survives a controller dying *mid*-run on the list it
-	// cached; only the first attach is required.
-	//
-	// Held calls are replayed on reattach, so an upstream server must
-	// tolerate seeing one twice: the connection can drop after it acted
-	// and before its answer arrived. Grain's own pull request path
-	// already does -- EnsurePullRequest is find-or-create -- and where
-	// that is not achievable the controller dedupes by call id.
-	Attach(ctx context.Context) (io.ReadWriteCloser, error)
 
 	// Transcript reads this run's trajectory from a cursor -- the
 	// sequence number of the last record the caller saw, Status.Seq's own

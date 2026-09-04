@@ -71,11 +71,6 @@ type Observed struct {
 type ActionKind string
 
 const (
-	// ActionAttach connects this grain to the controller's MCP server --
-	// Grain.Attach. Issued for any grain running without one, which is
-	// how a dropped connection is repaired and how a freshly created
-	// grain gets started at all.
-	ActionAttach ActionKind = "attach"
 	// ActionRecordActivity copies the grain's own phrase onto the task's
 	// row.
 	ActionRecordActivity ActionKind = "record-activity"
@@ -125,9 +120,9 @@ type Action struct {
 //     no signal for either.
 //  6. A provisioning grain past its budget is failed. Nothing else about
 //     a grain that cannot finish booting is worth doing.
-//  7. Otherwise, keep it connected: a grain with no upstream cannot serve
-//     any tool but its own, and one that has never had an upstream has
-//     not started its agent at all.
+//  7. Otherwise, keep its row honest -- which is the only thing left. A
+//     running grain wants nothing from the controller: it reaches the
+//     controller's tools itself, over its own HTTP connection.
 func Reconcile(o Observed, p Policy) []Action {
 	st := o.Status
 
@@ -205,12 +200,9 @@ func Reconcile(o Observed, p Policy) []Action {
 		}
 	}
 
-	// 7. Steady state: keep it attached and keep its row honest. Both are
-	// independent, and a tick with nothing to do returns nothing at all.
+	// 7. Steady state, which is almost always nothing at all: mirroring
+	// what the grain says it is doing onto the task's row.
 	var out []Action
-	if !st.Upstream.Attached {
-		out = append(out, Action{Kind: ActionAttach})
-	}
 	if st.Activity != o.Run.Activity {
 		out = append(out, Action{Kind: ActionRecordActivity, Activity: st.Activity})
 	}

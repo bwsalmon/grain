@@ -519,6 +519,106 @@ still-provisioning grains; marginal, and recorded rather than built.
 outstanding call, `seq`. There is no native "ask the container what it is
 doing" short of exec, so the poll stays.
 
+## How the agent reaches the controller: three designs
+
+**1. Forwarding over a poll.** The shim held a tool call it could not
+serve, surfaced it as `status.call`, and a `grain answer` verb settled it.
+MCP over a poll. It re-implemented request/response over a channel not
+built for it, and needed a spool, ids, acknowledgement and an
+at-most-one-outstanding rule.
+
+**2. An exec-attached MCP server.** The controller attached by exec'ing
+`grain proxy` and served MCP over that pipe; the shim terminated the
+agent's session, merged tool lists, and held calls while detached.
+
+Better, but the failure mode shaped it and was not cheap. A shim that
+merely piped bytes would lose the agent those tools **for the rest of the
+run** on the first drop — MCP is session-oriented, a dead transport takes
+the session with it, and clients generally mark such a server failed
+rather than re-initializing. Terminating the session insulated against
+that, at the cost of: a hold buffer, replayed calls on reattach (so
+upstream servers had to tolerate seeing one twice), and a wait for the
+first attach before the agent could start, because a tool list is fixed at
+`initialize`.
+
+**3. Streamable HTTP, direct.** *Chosen.* The container has a working
+stack under NAT, so the agent reaches the controller's endpoint itself and
+the shim takes no part at all.
+
+MCP's remote transport already solves what design 2 was hand-rolling: a
+session id keeps state across requests, and resumable SSE (`Last-Event-ID`)
+replays what a client missed. So a drop is the protocol's problem. Gone
+with it: `grain proxy`, `SocketUpstream`, `Grain.Attach`,
+`Status.Upstream`, `ActionAttach`, the hold, the replay hazard, the
+wait-for-first-attach rule, the merging server, and `PhaseBlocked` — the
+shim cannot see an agent waiting on an HTTP request it made itself, and
+does not need to, since the controller is the far end and knows better.
+
+### What made it work: the token already exists
+
+An exec pipe authenticates by construction — the controller chose which
+container to exec into. An address does not, and needing "which grain is
+calling" is exactly the authorization surface argued against for push.
+
+It is already built. `gitproxy.SandboxTokenStore.EnsureToken` mints a
+per-grain token, `Revoke` drops it at reap, and `model.Store.GitScope`
+resolves it to a live run. The MCP endpoint is one more consumer, not a
+second surface. The same secret lands twice — container-side at
+`/grain/token` for the agent, guest-side as a placement for git — which is
+one value with two consumers on two sides of the vsock boundary.
+
+### What it costs
+
+**A network dependency between grain and controller** that exec did not
+have. Under NAT the container has a stack anyway (that is why NAT was
+chosen), and under flat the model-API tunnel carries TCP, so the same
+local listener serves both — it does not force the network decision.
+
+**Per-framework HTTP MCP support.** `claude` takes URL-type servers; agy
+and codex want verifying. A CLI that speaks only stdio would need the shim
+to bridge for that framework alone, which is design 2 for one case.
+
+### And the message-tool design, considered
+
+Briefly: drop MCP entirely and give the agent one built-in that leaves a
+message with an id, optional JSON and freeform text, then exits — the
+controller reads it and decides what to do, retrying or parking by id. It
+would have made a grain a single-shot function needing no controller at
+all while it runs.
+
+Rejected because it loses per-tool schemas (models produce better-formed
+arguments given one) and, more concretely, because reacting to CI would
+cost a full redispatch — VM boot, clone, re-derivation — where
+`open_pull_request` plus `wait_for_checks` do it inside one run today,
+deliberately: "instead of exiting blind and leaving the pull request to
+orchestrator's finish path." MCP exists for this, and reinventing a
+narrower version of it is not a saving.
+
+## What Kubernetes gives natively, and what it does not
+
+Checked when asking whether any of this duplicates something k8s already
+does.
+
+**`.status.containerStatuses[]`** — `state`, `ready`, `restartCount`, and
+for terminated ones `exitCode`/`reason`/`message`. This is what `List`
+already reads; on docker it is `docker ps`/`docker inspect`, and the
+information is the same.
+
+**The termination message** is the one genuine addition: a container
+writes `/dev/termination-log` and Kubernetes surfaces it in the pod
+status, so a finished grain's outcome arrives with the listing rather than
+needing an exec. Taken.
+
+**Probes are the wrong tool.** They are binary, they exist for the kubelet
+to act on rather than for an external reader, and liveness in particular
+*restarts* — which a grain must never be. A readiness probe could surface
+"provisioned" in the pod listing for free, letting `List` skip the exec for
+still-provisioning grains; marginal, and recorded rather than built.
+
+**What Kubernetes does not give** is mid-run rich state — activity, the
+outstanding call, `seq`. There is no native "ask the container what it is
+doing" short of exec, so the poll stays.
+
 ## Forwarding calls, replaced by a real MCP connection
 
 For a while the controller was an out-of-band executor: the shim held a

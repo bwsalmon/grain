@@ -26,20 +26,23 @@ func marshal(t *testing.T, v any) string {
 
 func TestSpecEnvAndFiles(t *testing.T) {
 	spec := grain.Spec{
-		Version:    grain.Version,
-		Framework:  grain.FrameworkSpec{Name: "claude", Credential: "sk-ant-oat01-..."},
-		Shape:      grain.Shape{CPUs: 2, MemoryMB: 8192, DiskGB: 30},
-		Prompt:     "You are working on task-311...\n",
-		Setup:      "#!/bin/sh\nset -eu\ngit clone http://10.0.2.1:8080/bwsalmon/grain.git /w\ncd /w && ./scripts/setup.sh\ngit rev-parse HEAD\n",
-		Placements: []grain.Placement{{Path: "/home/agent/.git-credentials", Content: "https://x:tok@10.0.2.1:8080"}},
-		MaxRuntime: grain.Duration(2 * time.Hour),
+		Version:       grain.Version,
+		Framework:     grain.FrameworkSpec{Name: "claude", Credential: "sk-ant-oat01-..."},
+		Shape:         grain.Shape{CPUs: 2, MemoryMB: 8192, DiskGB: 30},
+		Prompt:        "You are working on task-311...\n",
+		ControllerURL: "http://10.0.2.1:8081/mcp",
+		Token:         "sbx_9f3c1a",
+		Setup:         "#!/bin/sh\nset -eu\ngit clone http://10.0.2.1:8080/bwsalmon/grain.git /w\ncd /w && ./scripts/setup.sh\ngit rev-parse HEAD\n",
+		Placements:    []grain.Placement{{Path: "/home/agent/.git-credentials", Content: "https://x:tok@10.0.2.1:8080"}},
+		MaxRuntime:    grain.Duration(2 * time.Hour),
 	}
 
 	// Scalars only: no material in the environment at all.
 	wantEnv := map[string]string{
-		"GRAIN_WIRE_VERSION": "v1",
-		"GRAIN_FRAMEWORK":    "claude",
-		"GRAIN_MAX_RUNTIME":  "2h0m0s",
+		"GRAIN_WIRE_VERSION":   "v1",
+		"GRAIN_FRAMEWORK":      "claude",
+		"GRAIN_MAX_RUNTIME":    "2h0m0s",
+		"GRAIN_CONTROLLER_URL": "http://10.0.2.1:8081/mcp",
 		// kontur's own, passed through and never read back.
 		"CHV_CPUS":         "2",
 		"CHV_MEMORY_MB":    "8192",
@@ -66,6 +69,7 @@ func TestSpecEnvAndFiles(t *testing.T) {
 	}
 	wantFiles := map[string]grain.File{
 		"/grain/credential": {Content: "sk-ant-oat01-...", Mode: "0600"},
+		"/grain/token":      {Content: "sbx_9f3c1a", Mode: "0600"},
 		"/grain/prompt":     {Content: spec.Prompt, Mode: "0644"},
 		"/grain/setup":      {Content: spec.Setup, Mode: "0755"},
 		"/grain/placements/home/agent/.git-credentials": {
@@ -89,6 +93,13 @@ func TestSpecEnvAndFiles(t *testing.T) {
 	back, err := grain.SpecFromEnv(func(k string) string { return env[k] })
 	if err != nil {
 		t.Fatalf("SpecFromEnv: %v", err)
+	}
+	if back.ControllerURL != spec.ControllerURL {
+		t.Errorf("ControllerURL round-tripped as %q", back.ControllerURL)
+	}
+	// The token is material, so it is a file and never in the environment.
+	if back.Token != "" {
+		t.Errorf("SpecFromEnv recovered a token from the environment: material belongs in files")
 	}
 	if time.Duration(back.MaxRuntime) != 2*time.Hour || back.Framework.Name != "claude" {
 		t.Errorf("scalars round-tripped as %+v", back)
@@ -225,16 +236,11 @@ func TestStatusWireFormat(t *testing.T) {
 	st := grain.Status{
 		Version:  grain.Version,
 		ID:       "task-311-2", // set by the backend, never on the wire
-		Phase:    grain.PhaseBlocked,
+		Phase:    grain.PhaseRunning,
 		Since:    time.Date(2026, 9, 4, 19, 41, 12, 0, time.UTC),
 		Activity: "waiting for CI",
 		Rebuilds: 1,
 		Setup:    &grain.SetupResult{Output: "9f3c1a2\n"},
-		Upstream: grain.Upstream{
-			Attached: true,
-			Pending:  1,
-			Since:    time.Date(2026, 9, 4, 19, 40, 0, 0, time.UTC),
-		},
 		Health: grain.Health{
 			Container: grain.ContainerHealth{Running: true},
 			Guest: grain.GuestHealth{
@@ -247,18 +253,13 @@ func TestStatusWireFormat(t *testing.T) {
 
 	want := `{
   "version": "v1",
-  "phase": "blocked",
+  "phase": "running",
   "since": "2026-09-04T19:41:12Z",
   "activity": "waiting for CI",
   "rebuilds": 1,
   "setup": {
     "exitCode": 0,
     "output": "9f3c1a2\n"
-  },
-  "upstream": {
-    "attached": true,
-    "pending": 1,
-    "since": "2026-09-04T19:40:00Z"
   },
   "health": {
     "container": {
@@ -320,6 +321,7 @@ func TestRedactedCarriesNoMaterial(t *testing.T) {
 	spec := grain.Spec{
 		Version:   grain.Version,
 		Framework: grain.FrameworkSpec{Name: "claude", Credential: "sk-ant-oat01-secret"},
+		Token:     "sbx_tok_controller",
 		Setup:     "git clone http://10.0.2.1:8080/bwsalmon/grain.git /w",
 		Placements: []grain.Placement{
 			{Path: "/home/agent/.git-credentials", Content: "https://x:sbx_tok@10.0.2.1:8080", Mode: "0600"},
@@ -327,7 +329,7 @@ func TestRedactedCarriesNoMaterial(t *testing.T) {
 	}
 	out := marshal(t, spec.Redacted())
 
-	for _, secret := range []string{"sk-ant-oat01-secret", "https://x:sbx_tok@10.0.2.1:8080"} {
+	for _, secret := range []string{"sk-ant-oat01-secret", "https://x:sbx_tok@10.0.2.1:8080", "sbx_tok_controller"} {
 		if strings.Contains(out, secret) {
 			t.Errorf("Redacted still carries %q", secret)
 		}

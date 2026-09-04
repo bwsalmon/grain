@@ -1,7 +1,6 @@
 package grain_test
 
 import (
-	"strings"
 	"testing"
 	"time"
 
@@ -9,11 +8,6 @@ import (
 )
 
 var start = time.Date(2026, 9, 4, 12, 0, 0, 0, time.UTC)
-
-// attached is the ordinary steady state: a grain the controller is
-// already connected to. Cases that do not set it get an attach action,
-// which is correct and would otherwise noise up every expectation.
-func attached() grain.Upstream { return grain.Upstream{Attached: true} }
 
 func live() *grain.RunRow {
 	return &grain.RunRow{ID: "task-7-1", TaskID: "task-7", Live: true}
@@ -118,10 +112,9 @@ func TestReconcile(t *testing.T) {
 		// converging.
 		name: "rebuilds within the cap are left alone",
 		obs: grain.Observed{
-			Status: grain.Status{Phase: grain.PhaseRunning, Since: start, Rebuilds: 3,
-				Upstream: attached()},
-			Run: live(),
-			Now: start.Add(time.Minute),
+			Status: grain.Status{Phase: grain.PhaseRunning, Since: start, Rebuilds: 3},
+			Run:    live(),
+			Now:    start.Add(time.Minute),
 		},
 		want: nil,
 	}, {
@@ -154,7 +147,7 @@ func TestReconcile(t *testing.T) {
 		want: []grain.ActionKind{grain.ActionFail, grain.ActionRelease},
 	}, {
 		// A grain being stopped is not also reattached.
-		name: "a cancelled grain is not also attached to",
+		name: "a cancelled grain is failed and destroyed",
 		obs: grain.Observed{
 			Status: grain.Status{Phase: grain.PhaseRunning, Since: start, Activity: "building"},
 			Run:    &grain.RunRow{ID: "task-7-1", Live: true, TaskClosed: true},
@@ -164,10 +157,9 @@ func TestReconcile(t *testing.T) {
 	}, {
 		name: "a boot within budget is waited on",
 		obs: grain.Observed{
-			Status: grain.Status{Phase: grain.PhaseProvisioning, Since: start,
-				Upstream: attached()},
-			Run: live(),
-			Now: start.Add(9 * time.Minute),
+			Status: grain.Status{Phase: grain.PhaseProvisioning, Since: start},
+			Run:    live(),
+			Now:    start.Add(9 * time.Minute),
 		},
 		want: nil,
 	}, {
@@ -186,7 +178,7 @@ func TestReconcile(t *testing.T) {
 		name: "a provisioning grain within budget is left to get on with it",
 		obs: grain.Observed{
 			Status: grain.Status{Phase: grain.PhaseProvisioning, Since: start,
-				Activity: "cloning acme/widgets", Upstream: attached()},
+				Activity: "cloning acme/widgets"},
 			Run: &grain.RunRow{ID: "task-7-1", Live: true, Activity: "cloning acme/widgets"},
 			Now: start.Add(2 * time.Minute),
 		},
@@ -194,20 +186,19 @@ func TestReconcile(t *testing.T) {
 	}, {
 		name: "a running grain with nothing outstanding needs nothing",
 		obs: grain.Observed{
-			Status: grain.Status{Phase: grain.PhaseRunning, Since: start, Activity: "building",
-				Upstream: attached()},
-			Run: &grain.RunRow{ID: "task-7-1", Live: true, Activity: "building"},
-			Now: start.Add(time.Minute),
-		},
-		want: nil,
-	}, {
-		name: "a detached grain is attached to and its activity mirrored",
-		obs: grain.Observed{
-			Status: grain.Status{Phase: grain.PhaseBlocked, Since: start, Activity: "waiting for CI"},
+			Status: grain.Status{Phase: grain.PhaseRunning, Since: start, Activity: "building"},
 			Run:    &grain.RunRow{ID: "task-7-1", Live: true, Activity: "building"},
 			Now:    start.Add(time.Minute),
 		},
-		want: []grain.ActionKind{grain.ActionAttach, grain.ActionRecordActivity},
+		want: nil,
+	}, {
+		name: "a running grain's activity is mirrored onto its row",
+		obs: grain.Observed{
+			Status: grain.Status{Phase: grain.PhaseRunning, Since: start, Activity: "waiting for CI"},
+			Run:    &grain.RunRow{ID: "task-7-1", Live: true, Activity: "building"},
+			Now:    start.Add(time.Minute),
+		},
+		want: []grain.ActionKind{grain.ActionRecordActivity},
 	}}
 
 	for _, tc := range cases {
@@ -225,10 +216,9 @@ func TestReconcile(t *testing.T) {
 // that drifted on a second look would make skipping a tick unsafe.
 func TestReconcileIsLevelTriggered(t *testing.T) {
 	obs := grain.Observed{
-		Status: grain.Status{Phase: grain.PhaseRunning, Since: start, Activity: "building",
-			Upstream: grain.Upstream{Attached: false, Pending: 1}},
-		Run: live(),
-		Now: start.Add(time.Minute),
+		Status: grain.Status{Phase: grain.PhaseRunning, Since: start, Activity: "building"},
+		Run:    live(),
+		Now:    start.Add(time.Minute),
 	}
 	first := kinds(grain.Reconcile(obs, grain.DefaultPolicy()))
 	second := kinds(grain.Reconcile(obs, grain.DefaultPolicy()))
@@ -242,8 +232,7 @@ func TestReconcileIsLevelTriggered(t *testing.T) {
 // whole of orphan reaping -- there is no separate pass.
 func TestEveryOrphanPhaseIsReleased(t *testing.T) {
 	phases := []grain.Phase{
-		grain.PhaseProvisioning, grain.PhaseRunning,
-		grain.PhaseBlocked, grain.PhaseSucceeded, grain.PhaseFailed,
+		grain.PhaseProvisioning, grain.PhaseRunning, grain.PhaseSucceeded, grain.PhaseFailed,
 		grain.PhaseCancelled, grain.PhaseLost,
 	}
 	for _, p := range phases {
@@ -254,58 +243,5 @@ func TestEveryOrphanPhaseIsReleased(t *testing.T) {
 		if !equal(got, []grain.ActionKind{grain.ActionRelease}) {
 			t.Errorf("orphan in phase %q: Reconcile = %v, want [release]", p, got)
 		}
-	}
-}
-
-// A grain the controller is not connected to cannot serve any tool but
-// its own six, and one that has never been connected has not started its
-// agent at all -- so attaching is what a tick does about it, every tick,
-// until it takes.
-func TestReconcileAttachesADetachedGrain(t *testing.T) {
-	obs := grain.Observed{
-		Status: grain.Status{Phase: grain.PhaseRunning, Since: start, Activity: "building",
-			Upstream: grain.Upstream{Attached: false, Pending: 2}},
-		Run: &grain.RunRow{ID: "task-7-1", Live: true, Activity: "building"},
-		Now: start.Add(time.Minute),
-	}
-	got := kinds(grain.Reconcile(obs, grain.DefaultPolicy()))
-	if !equal(got, []grain.ActionKind{grain.ActionAttach}) {
-		t.Fatalf("Reconcile = %v, want [attach]", got)
-	}
-
-	// And stops once it has: attaching twice would displace a live
-	// connection the agent is mid-call on.
-	obs.Status.Upstream = attached()
-	if got := kinds(grain.Reconcile(obs, grain.DefaultPolicy())); len(got) != 0 {
-		t.Fatalf("Reconcile on an attached grain = %v, want nothing", got)
-	}
-}
-
-// A grain waits for its first attach before starting its agent, because
-// an absent tool is not an error: an agent never told open_pull_request
-// exists finishes without opening one and reports success. So the wait
-// has to be visible, and it has to end -- loudly -- rather than becoming
-// a run that quietly did less than it should have.
-func TestAGrainNeverAttachedToIsAttachedThenEventuallyFailed(t *testing.T) {
-	waiting := grain.Observed{
-		Status: grain.Status{Phase: grain.PhaseProvisioning, Since: start,
-			Activity: grain.AwaitingUpstreamNote},
-		Run: &grain.RunRow{ID: "task-7-1", Live: true, Activity: grain.AwaitingUpstreamNote},
-		Now: start.Add(time.Minute),
-	}
-	if got := kinds(grain.Reconcile(waiting, grain.DefaultPolicy())); !equal(got, []grain.ActionKind{grain.ActionAttach}) {
-		t.Fatalf("Reconcile = %v, want [attach] for a grain nobody has connected to", got)
-	}
-
-	// Past the budget it is failed and released, and the detail carries
-	// the phrase -- which is what turns "provisioning timed out" into
-	// "nobody ever attached".
-	waiting.Now = start.Add(11 * time.Minute)
-	actions := grain.Reconcile(waiting, grain.DefaultPolicy())
-	if got := kinds(actions); !equal(got, []grain.ActionKind{grain.ActionFail, grain.ActionRelease}) {
-		t.Fatalf("Reconcile = %v, want [fail release] past the provision budget", got)
-	}
-	if !strings.Contains(actions[0].Detail, grain.AwaitingUpstreamNote) {
-		t.Errorf("the failure detail does not say what it was waiting for: %q", actions[0].Detail)
 	}
 }

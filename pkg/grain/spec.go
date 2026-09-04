@@ -121,6 +121,35 @@ type Spec struct {
 	// runs there.
 	Placements []Placement `json:"placements,omitempty"`
 
+	// ControllerURL is the controller's MCP endpoint, which the agent
+	// reaches directly over Streamable HTTP for every tool that is not a
+	// built-in. The shim writes it into its framework's MCP config and
+	// otherwise takes no part: an MCP client talks to several servers as
+	// a matter of course, so the agent simply has two.
+	//
+	// Empty leaves a grain with its six sandbox tools and no way to reach
+	// anything outside -- which is right for a HostGrains test and wrong
+	// for a real run.
+	ControllerURL string `json:"controllerURL,omitempty"`
+
+	// Token authenticates this grain to that endpoint. It is the *same*
+	// per-grain token the git proxy already mints
+	// (gitproxy.SandboxTokenStore.EnsureToken), revoked by the same
+	// Revoke at reap and resolved to a live run by the same
+	// model.Store.GitScope -- one more consumer of machinery that exists,
+	// rather than a second authorization surface to build and get wrong.
+	//
+	// An exec pipe authenticated by construction: the controller chose
+	// which container to exec into. An address does not, so something has
+	// to say which grain is calling, and this is it. It is also what
+	// spares the controller a server instance per grain for identity
+	// alone.
+	//
+	// Container-side, at FileToken -- unlike the git credential, which is
+	// the same secret placed in the guest because git runs there. Same
+	// value, two consumers, two sides of the vsock boundary.
+	Token string `json:"token,omitempty"`
+
 	// MaxRuntime is how long the agent may run before the shim stops it
 	// and reports a terminal Phase. Zero means no bound of the grain's
 	// own.
@@ -242,7 +271,8 @@ type Placement struct {
 }
 
 // Redacted returns this Spec with every piece of material blanked --
-// the framework credential, and every placement's content -- so that a
+// the framework credential, the controller token, and every placement's
+// content -- so that a
 // spec can be logged, echoed into an error, or written beside a failed
 // run without carrying secrets there.
 //
@@ -253,6 +283,7 @@ type Placement struct {
 // is the diagnosis where a blank string is a mystery.
 func (s Spec) Redacted() Spec {
 	s.Framework.Credential = redact(s.Framework.Credential)
+	s.Token = redact(s.Token)
 	if len(s.Placements) > 0 {
 		out := make([]Placement, len(s.Placements))
 		for i, p := range s.Placements {

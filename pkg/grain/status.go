@@ -22,11 +22,11 @@ const (
 	PhaseProvisioning Phase = "provisioning"
 	// PhaseRunning is the agent CLI executing in the container.
 	PhaseRunning Phase = "running"
-	// PhaseBlocked is the agent waiting on an upstream tool call -- a
-	// question for a human, a secret, a pull request. Distinct from
-	// PhaseRunning because a grain blocked for an hour is waiting on
-	// someone, and one running for an hour is working.
-	PhaseBlocked Phase = "blocked"
+	// There is no blocked phase. An agent waiting on a controller tool is
+	// waiting on an HTTP request it made itself, which the shim cannot
+	// see -- and does not need to. The controller is the far end of that
+	// request, so it already knows which grains are waiting on it, and
+	// knows it better than a shim inferring from the outside could.
 
 	PhaseSucceeded Phase = "succeeded"
 	PhaseFailed    Phase = "failed"
@@ -53,19 +53,6 @@ func (p Phase) Terminal() bool {
 	}
 	return false
 }
-
-// AwaitingUpstreamNote is what a grain puts in Activity while it waits
-// for its first attach.
-//
-// Named here because a controller reads it to tell "this grain is
-// booting" from "this grain is booted and nobody has connected to it" --
-// the difference between waiting and a controller that will never
-// arrive. A grain that has read "provisioning" for ten minutes should not
-// need its logs consulted to say which.
-//
-// The ordinary state for a fraction of a second, and a diagnosis after
-// that.
-const AwaitingUpstreamNote = "waiting for the controller to attach"
 
 // Status is the whole of what one poll returns. Every field is here
 // rather than behind its own call because the poll is the only read: a
@@ -108,10 +95,6 @@ type Status struct {
 	// It is the diagnosis for a grain that failed before its agent ever
 	// ran, which is the case a bare outcome explains worst.
 	Setup *SetupResult `json:"setup,omitempty"`
-	// Upstream is this grain's connection to the controller's MCP
-	// server, which is where every tool but BuiltinTools comes from.
-	Upstream Upstream `json:"upstream"`
-
 	// Result is set exactly when Phase is terminal.
 	Result *Result `json:"result,omitempty"`
 	Health Health  `json:"health"`
@@ -140,40 +123,6 @@ type SetupResult struct {
 	// script's diagnosis is routinely interleaved across both, and the
 	// controller is reading it to find out what went wrong.
 	Output string `json:"output,omitempty"`
-}
-
-// Upstream is the state of a grain's connection to the controller's MCP
-// server -- the one the controller attaches by exec'ing `grain proxy`,
-// and over which every tool that is not a built-in is served.
-//
-// The shim terminates the agent's own MCP session rather than proxying it
-// through, which is what makes a dropped upstream survivable. MCP is
-// session-oriented: a client initializes once and a dead transport takes
-// the whole session with it, and clients generally mark such a server
-// failed rather than re-initializing. A grain that merely piped bytes
-// would therefore lose those tools for the rest of the run -- an hour in,
-// silently -- rather than for a tick. Terminating means the agent's
-// connection is to the shim, the shim never closes it, and a drop is
-// something only the shim sees.
-//
-// What the shim does while detached is hold: in-flight and new calls to
-// upstream tools wait rather than failing, so the agent goes on working
-// with the sandbox tools -- most of what it does -- and blocks only if it
-// reaches for an upstream one. The controller reattaches on its next tick
-// and the held calls go through. If it never returns, Spec.MaxRuntime
-// ends the grain like any other stall.
-type Upstream struct {
-	// Attached is whether a controller is connected right now. A grain
-	// running with this false is one to attach to, which is a reconcile
-	// row.
-	Attached bool `json:"attached"`
-	// Pending is how many calls the shim is holding for a controller that
-	// is not there. Reported because a grain with calls piling up and
-	// nobody attached is a situation worth seeing, and the phase alone
-	// does not say it.
-	Pending int `json:"pending,omitempty"`
-	// Since is when Attached last changed.
-	Since time.Time `json:"since,omitempty"`
 }
 
 // Outcome vocabulary, matching what model.Store.FinishRun already

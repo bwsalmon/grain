@@ -63,6 +63,12 @@ const (
 	// human can cat in an incident -- rather than a string that has to
 	// survive shell quoting on its way through a runtime's env handling.
 	FileSetup = Root + "/setup"
+	// FileToken is the bearer token this grain authenticates to
+	// Spec.ControllerURL with -- container-side, because the agent is
+	// what uses it. The same secret also reaches the guest as a
+	// placement, where git needs it; same value, two consumers, two sides
+	// of the vsock boundary.
+	FileToken = Root + "/token"
 	// DirPlacements holds the files to copy into the guest, in a tree
 	// that mirrors their guest paths: a placement at /home/agent/.netrc
 	// is mounted at /grain/placements/home/agent/.netrc.
@@ -89,18 +95,6 @@ const (
 // before it could write one. Under docker nothing reads this file, and
 // writing it anyway costs a few hundred bytes.
 const FileTerminationLog = "/dev/termination-log"
-
-// SocketUpstream is where `grain proxy` connects to hand the supervisor
-// its stream to the controller's MCP server.
-//
-// A socket the supervisor listens on, rather than the proxy owning the
-// connection, because they are separate processes: `grain run` is PID 1
-// and `grain proxy` is what the controller starts with an exec, and
-// passing a file descriptor between them would need SCM_RIGHTS where
-// copying bytes needs nothing. So proxy dials this and pumps its own
-// stdin and stdout across, and when the exec dies the socket connection
-// closes and the supervisor knows it is detached.
-const SocketUpstream = "/run/grain/upstream.sock"
 
 // ModeSetup is the mode FileSetup is written with. Executable, because a
 // script that has to be invoked through an interpreter cannot carry its
@@ -132,6 +126,9 @@ func (s Spec) Files() (map[string]File, error) {
 	}
 	if s.Setup != "" {
 		out[FileSetup] = File{Content: s.Setup, Mode: ModeSetup}
+	}
+	if s.Token != "" {
+		out[FileToken] = File{Content: s.Token, Mode: "0600"}
 	}
 	for _, p := range s.Placements {
 		at, err := PlacementPath(p.Path)
