@@ -1,0 +1,216 @@
+# Installs the agy a freshly built image would carry, interrogates it, and
+# writes down everything it says about itself -- so that "what can agy be
+# configured to do?" costs one dispatch instead of a re-derivation.
+#
+# The question keeps coming back. pkg/agent/antigravity depends on facts
+# about agy that live nowhere but in the binary: three config paths, a
+# hook contract whose reply spellings each mean something different, a
+# flag set with no way to empty the native tool roster, a model catalog
+# whose names carry their reasoning effort. agy is a ~200MB stripped Go
+# binary with no published documentation, and the Dockerfile installs it
+# unpinned, so the answer can change on a day nobody touched this
+# repository.
+#
+# And the place those questions are asked cannot answer them. A grain
+# agent sandbox has no network beyond the git proxy and no agy in its
+# image, so every task that has needed this has re-derived it -- most
+# recently by pushing a throwaway workflow to a branch, installing agy on
+# a runner, interrogating it, and deleting the workflow again. That is
+# this file, kept: scripts/agy-surface.sh is the same set of questions
+# written down, and this job is the runner that can ask them.
+#
+# # Where the answer goes, and why it is a file in the tree
+#
+# Both, but the file is the point. The artifact is for a human reading the
+# run; docs/agy-surface.md is for everyone else, and it is what makes this
+# worth having:
+#
+#   - a sandboxed agent can read it. It cannot download an artifact --
+#     that needs the API and a token it does not have -- but its checkout
+#     already contains the file, and `git fetch origin agy-surface` is a
+#     thing the git proxy allows.
+#   - drift becomes a diff. A capture nobody can compare against the last
+#     one only answers "what does agy do today"; a committed one also
+#     answers "what changed", which is the question behind every one of
+#     these dispatches. scripts/agy-surface.sh is written to make that
+#     mean something: no dates, no run ids, no temporary paths, every list
+#     sorted, so two runs against one agy produce identical bytes.
+#
+# The push goes to a branch of its own -- `agy-surface`, force-pushed, one
+# commit on top of whatever ref was dispatched -- and never to the ref
+# itself. So a regeneration is a pull request a human merges, on a
+# repository where main is protected, rather than a commit that appears on
+# main because somebody clicked a button.
+#
+# # What it holds
+#
+# No secret and no environment: nothing here needs a credential, which is
+# what keeps this file out of the argument live-agent.yml and gcp-smoke.yml
+# have to make about theirs. The one privilege it does need -- writing the
+# `agy-surface` branch -- is held by a *second* job that never runs agy:
+# the capture job has `contents: read` and hands its output over as an
+# artifact, and the publish job takes the token and touches nothing but
+# that artifact and git. Same shape as build-artifacts.yml logging in to
+# GHCR only after the suite that drives the image has finished.
+#
+# workflow_dispatch alone, deliberately. Not a schedule: unlike the
+# nightly jobs, nothing here is a check that can fail, so a nightly
+# capture would produce a pull request a day whether or not agy moved, and
+# nobody is waiting on the answer between the tasks that ask for it. Not a
+# push either -- the answer is about the installed agy, not about the
+# commit. And dispatching takes write access, which is the same access it
+# takes to push the branch this job writes.
+name: agy-surface
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Push the regenerated docs/agy-surface.md to the agy-surface branch"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+# Two dispatches force-pushing one branch would leave it holding whichever
+# finished last rather than whichever started last; never cancelled, so a
+# capture already past the install is allowed to finish.
+concurrency:
+  group: agy-surface
+  cancel-in-progress: false
+
+jobs:
+  capture:
+    name: read agy's surface
+    runs-on: ubuntu-latest
+    # The install and a few dozen probes, each of them capped by the
+    # script's own per-command timeout.
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.install.outputs.version }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # The same installer the Dockerfile runs, deliberately unpinned in
+      # both places, and word for word what live-agent.yml does: what this
+      # job should be reading is the agy a freshly built image would
+      # carry, not one this file froze months ago. The binary is found
+      # rather than assumed (its path is documented only by Google), and
+      # `agy --version` is what makes "found something named agy" mean
+      # "installed something that runs".
+      - name: Install the agy CLI
+        id: install
+        run: |
+          set -euo pipefail
+          curl -fsSL --max-time 120 https://antigravity.google/cli/install.sh -o /tmp/agy-install.sh
+          test -s /tmp/agy-install.sh
+          bash /tmp/agy-install.sh
+          rm -f /tmp/agy-install.sh
+          agy="$(find "$HOME" -type f -name agy -perm -u+x 2>/dev/null | head -n1 || true)"
+          test -n "$agy"
+          sudo ln -sf "$agy" /usr/local/bin/agy
+          agy --version
+          echo "version=$(agy --version 2>&1 | head -n1)" >> "$GITHUB_OUTPUT"
+
+      # The script tolerates every probe failing -- a binary that stopped
+      # answering is a finding it writes down rather than an error (see its
+      # header) -- so this step succeeding says nothing on its own, and the
+      # check below is what makes it mean something.
+      - name: Read agy's surface
+        run: ./scripts/agy-surface.sh -o docs/agy-surface.md
+
+      # A capture that lost its sections, or that came back a few hundred
+      # bytes long because agy refused everything, must not be published
+      # over a good one. Same argument the real-VM job's `--- PASS` grep
+      # makes: a job that can only be green is not a check.
+      - name: The capture has to have captured something
+        run: |
+          set -euo pipefail
+          bytes=$(wc -c < docs/agy-surface.md)
+          echo "docs/agy-surface.md is $bytes bytes"
+          if [ "$bytes" -lt 4096 ]; then
+            echo "::error::the capture is $bytes bytes: agy answered almost nothing, and publishing this would replace a real capture with an empty one" >&2
+            exit 1
+          fi
+          for heading in '## The binary' '## Commands and flags' '## Which paths it reads'; do
+            if ! grep -qF -- "$heading" docs/agy-surface.md; then
+              echo "::error::the capture has no \"$heading\" section; scripts/agy-surface.sh did not run to the end" >&2
+              exit 1
+            fi
+          done
+
+      # Held for whoever dispatched this, whether or not the branch below
+      # is written -- a dispatch with publish off is a way to look at an
+      # agy without proposing anything.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agy-surface
+          path: docs/agy-surface.md
+          if-no-files-found: error
+
+  publish:
+    name: publish the capture
+    needs: capture
+    if: ${{ inputs.publish }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # The whole reason this is a second job: the token that can write a
+    # branch is never in the job that ran a 200MB binary nobody in this
+    # repository built.
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: agy-surface
+          path: docs
+
+      # Nothing to publish is the good case, and it is reported rather
+      # than pushed: the ref this was dispatched from already holds this
+      # exact capture, so agy has not moved since whoever last merged one.
+      - name: Push the capture, if it differs from what is committed
+        # Through the environment rather than interpolated into the shell:
+        # this string came off a third-party binary, and `version='${{ ...
+        # }}'` would let a quote in it become script.
+        env:
+          AGY_VERSION: ${{ needs.capture.outputs.version }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # Staged before the comparison, so that a first capture -- a file
+          # this ref does not have yet, which `git diff` says nothing about
+          # -- reads as drift rather than as no change at all.
+          git add docs/agy-surface.md
+          if git diff --cached --quiet -- docs/agy-surface.md; then
+            echo "no drift: ${GITHUB_REF_NAME}'s docs/agy-surface.md already matches ${AGY_VERSION}" \
+              | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          git commit -F - <<EOF
+          Regenerate docs/agy-surface.md against ${AGY_VERSION}
+
+          Captured by scripts/agy-surface.sh, run by
+          .github/workflows/agy-surface.yml on ${GITHUB_REF_NAME}: every flag,
+          subcommand, changelog entry, model name, unpacked guide and config
+          key the installed agy will admit to. The diff against the committed
+          capture is what agy changed -- the script writes nothing
+          run-specific, so a diff is drift and nothing else.
+          EOF
+          # Force, because this branch is a regenerated snapshot rather
+          # than a history: it is one commit on top of the dispatched ref
+          # every time, so that the pull request it opens is exactly the
+          # drift and nothing that has landed since.
+          git push --force origin "HEAD:refs/heads/agy-surface"
+          {
+            echo "Pushed \`agy-surface\` (${AGY_VERSION}), one commit on top of \`${GITHUB_REF_NAME}\`."
+            echo
+            echo "Open the pull request: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/compare/${GITHUB_REF_NAME}...agy-surface?expand=1"
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -19,6 +19,7 @@
 package deploy
 
 import (
+	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
@@ -625,6 +626,113 @@ func TestTheSmokeWorkflowRunsTheScriptsAsTheyAre(t *testing.T) {
 	contains(t, smoke, "ZONE: ${{ inputs.zone || 'us-central1-a' }}")
 	for _, script := range []string{gce, gke} {
 		contains(t, script, `ZONE="${ZONE:-`)
+	}
+}
+
+// The introspection job is dispatch-only, holds nothing, and keeps the
+// token that can write a branch out of the job that runs agy.
+//
+// agy-surface.yml exists because a grain sandbox cannot answer questions
+// about agy -- no network beyond the git proxy, no agy in the image -- and
+// a runner can (docs/agy-surface.md, scripts/agy-surface.sh). Three things
+// about its shape are load-bearing rather than incidental.
+//
+// The trigger. A schedule would open a pull request a day whether or not
+// agy moved, and a `push` would re-answer a question about the *installed*
+// agy on every commit; dispatching, meanwhile, takes the same write access
+// that pushing this job's branch does, which is what makes `contents:
+// write` here no wider than the person who clicked it already has.
+//
+// The credential, of which there is none. live-agent.yml's header explains
+// at length why a repository secret is readable by any workflow on any
+// branch push whichever file declares it; nothing here needs one, and the
+// way to keep that true is to assert it.
+//
+// And the split. The job that runs a 200MB binary nobody in this
+// repository built has `contents: read` and hands its output on as an
+// artifact; the job that holds the write token never runs agy at all --
+// the same "hold the credential for the shortest span that gets the work
+// published" build-artifacts.yml applies to its GHCR login.
+func TestTheAgySurfaceJobIsDispatchOnlyAndHoldsNoCredential(t *testing.T) {
+	surface := stripComments(agySurfaceWorkflow(t))
+
+	triggers := upTo(t, surface, "jobs:")
+	contains(t, triggers, "workflow_dispatch:")
+	for _, forbidden := range []string{"push:", "pull_request:", "schedule:"} {
+		if strings.Contains(triggers, forbidden) {
+			t.Errorf("agy-surface.yml triggers on %s: it publishes a branch with the repository's own token, and dispatch is what keeps that behind somebody who already has write access", forbidden)
+		}
+	}
+	if strings.Contains(surface, "secrets.") || strings.Contains(surface, "environment:") {
+		t.Error("agy-surface.yml reads a credential: it installs and runs a third-party binary, and holding nothing worth stealing is the whole of its safety argument")
+	}
+
+	// By their indented job headers, not by bare names: `publish` is also
+	// the dispatch input that decides whether the branch is written at
+	// all, and it appears above both jobs.
+	capture := between(t, surface, "\n  capture:", "\n  publish:")
+	contains(t, capture, "contents: read")
+	contains(t, capture, "./scripts/agy-surface.sh")
+	if strings.Contains(capture, "contents: write") {
+		t.Error("the job that runs agy holds a write token; that token belongs to the publish job, which touches nothing but the artifact and git")
+	}
+
+	publish := from(t, surface, "\n  publish:")
+	contains(t, publish, "contents: write")
+	contains(t, publish, "needs: capture")
+	if strings.Contains(publish, "agy") && strings.Contains(publish, "install.sh") {
+		t.Error("the publish job installs agy: the point of the split is that the token is never in the job that runs it")
+	}
+
+	// The branch, not the ref it was dispatched from: a capture becomes a
+	// pull request somebody merges, never a commit that appears on main
+	// because a button was clicked.
+	contains(t, publish, "HEAD:refs/heads/agy-surface")
+	if strings.Contains(publish, "HEAD:refs/heads/main") || strings.Contains(publish, "push origin main") {
+		t.Error("agy-surface.yml pushes to main")
+	}
+}
+
+// The introspection job installs the agy an image would carry, and runs
+// the script that is in the tree.
+//
+// Unpinned in three places on purpose -- the Dockerfile, the nightly live
+// run and this one: what each is asking about is the agy a freshly built
+// image would have, not one a workflow file froze months ago. That only
+// holds while all three fetch the same installer, and a URL that moves in
+// one of them is invisible to everything else here.
+//
+// The script gets the same treatment gcp-smoke.yml's two get, and for the
+// same reason: this workflow fires only when somebody dispatches it, so a
+// renamed script or a lost +x bit would first be reported by the person
+// who dispatched it, at the moment they wanted an answer.
+func TestTheAgySurfaceJobInstallsTheAgyAnImageWouldAndRunsTheScriptAsItIs(t *testing.T) {
+	const installer = "https://antigravity.google/cli/install.sh"
+	surface := stripComments(agySurfaceWorkflow(t))
+
+	contains(t, read(t, "Dockerfile"), installer)
+	contains(t, stripComments(liveAgentWorkflow(t)), installer)
+	contains(t, surface, installer)
+	// Found, not assumed: agy's install path is documented only by
+	// Google, so a layout change on their side should move the symlink
+	// rather than fail this job for a binary that is actually there.
+	contains(t, surface, `-name agy -perm -u+x`)
+	contains(t, surface, "agy --version")
+
+	contains(t, surface, "./scripts/agy-surface.sh")
+	executable(t, "scripts", "agy-surface.sh")
+	out, err := exec.Command("bash", "-n", filepath.Join(repoRoot(t), "scripts", "agy-surface.sh")).CombinedOutput()
+	if err != nil {
+		t.Errorf("bash -n scripts/agy-surface.sh: %v\n%s", err, out)
+	}
+
+	// One path, agreed on by the script's invocation, the commit the
+	// publish job makes, and the file in the tree that a sandboxed agent
+	// reads instead of asking. The capture is worth committing only
+	// because it lands somewhere findable.
+	contains(t, surface, "docs/agy-surface.md")
+	if _, err := os.Stat(filepath.Join(repoRoot(t), "docs", "agy-surface.md")); err != nil {
+		t.Errorf("docs/agy-surface.md is missing: %v -- the workflow publishes over it, and README points at it", err)
 	}
 }
 
