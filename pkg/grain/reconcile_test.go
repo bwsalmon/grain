@@ -97,8 +97,8 @@ func TestReconcile(t *testing.T) {
 		},
 		want: []grain.ActionKind{grain.ActionFinish, grain.ActionRelease},
 	}, {
-		// Case 3 before case 5: a result that already exists beats a
-		// signal nothing is left to read.
+		// Case 3 before case 5: a result that already exists beats
+		// destroying the grain that holds it.
 		name: "a finished grain whose task was closed is still finished with",
 		obs: grain.Observed{
 			Status: grain.Status{Phase: grain.PhaseFailed, Since: start,
@@ -126,8 +126,10 @@ func TestReconcile(t *testing.T) {
 		},
 		want: []grain.ActionKind{grain.ActionFail, grain.ActionRelease},
 	}, {
-		// Signalled, not released: the grain gets to end on its own terms
-		// and report a Result, and the next tick releases it via case 3.
+		// Killed, in one tick. SIGTERM plus a grace period is the graceful
+		// path -- it is what the shim needs to end the run and write its
+		// Result -- so there is nothing a separate cancel would buy. The
+		// controller supplies the outcome because SIGKILL may win.
 		name: "a closed task is failed and destroyed in one tick",
 		obs: grain.Observed{
 			Status: grain.Status{Phase: grain.PhaseRunning, Since: start},

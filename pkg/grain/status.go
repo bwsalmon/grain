@@ -124,16 +124,15 @@ type Status struct {
 	// per-record sequence is the one cursor both a log stream and a plain
 	// file can honour.
 	Seq int64 `json:"seq"`
-	// Consumed are the Answer and Signal ids this grain has taken
-	// delivery of, so a controller stops resending them.
+	// Consumed are the Answer ids this grain has taken delivery of, so a
+	// controller stops resending them.
 	//
 	// It is the acknowledgement half of a spool that is deliberately
-	// at-least-once: `grain answer` and `grain signal` are separate
-	// processes from the supervisor that acts on them, so they hand over
-	// through a directory rather than a call, and a controller cannot
-	// tell a write it made from one the supervisor has read. Echoing the
-	// ids back is what closes that, and it is why both verbs take an id
-	// even though a Signal is a reply to nothing.
+	// at-least-once: `grain answer` is a separate process from the
+	// supervisor that acts on it, so it hands over through a directory
+	// rather than a call, and a controller cannot tell a write it made
+	// from one the supervisor has read. Echoing the ids back is what
+	// closes that.
 	//
 	// Bounded rather than complete: a grain need only remember far enough
 	// back that a controller polling every tick cannot still be holding

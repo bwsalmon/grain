@@ -115,8 +115,8 @@ type Action struct {
 //     that itself.
 //  3. A grain that has finished is finished with, even if its task was
 //     closed or the deployment paused in the meantime. Acting on a
-//     result that already exists beats delivering a signal nothing will
-//     read.
+//     result that already exists beats destroying the grain that holds
+//     it.
 //  4. Thrashing is checked before the budget: a grain rebuilding in a
 //     loop is failing for a reason worth naming, not merely slow.
 //  5. Cancellation and pause come before the ordinary steady state, so

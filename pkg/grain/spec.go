@@ -3,8 +3,9 @@ package grain
 import "fmt"
 
 // Spec is the whole declaration of one grain's work, delivered as the
-// container's environment at create and never updated -- what changes
-// after that arrives as a Signal. See Env and SpecFromEnv for how it
+// container's environment and mount at create and never updated: a grain
+// is configured once and then only observed, answered, or destroyed. See
+// Env, Files and SpecFromEnv for how it
 // crosses, and env.go's own comment for why it crosses that way rather
 // than as a document on some stdin.
 //
@@ -15,7 +16,7 @@ import "fmt"
 // one of those reaches it in one of three shapes instead:
 //
 //   - in the prompt, which the controller assembles from its store and
-//     delivers by Signal once the sandbox is real;
+//     writes to FilePrompt at create;
 //   - in Setup, a script the controller composes -- the clone included,
 //     since a clone is git commands in the guest and nothing more;
 //   - in Placements, which is where a credential goes, git's among them.
