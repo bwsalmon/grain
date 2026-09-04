@@ -2157,14 +2157,38 @@ decomposition fills the queue with issues) and it is the right cost.
 
 Five rules, each of which is a decision that could go the other way:
 
-**Children inherit the target repo and base, not the grants.** The common
-decomposition is "same repo, smaller piece", so `RepoBinding.INHERITED`
-is the default and an explicit `/repo` on the child overrides it.
-Capabilities do *not* inherit, and this is the load-bearing one: an agent
-granted `self-repair` once, whose children inherited it, would have
-converted a single human grant into an unbounded number of uses of that
-grant. Every child asks for its capabilities on its own issue, where a
-human can see the request and decide — which is the same reason
+**Children inherit the target repo, not the base and not the grants.**
+The common decomposition is "same repo, smaller piece", so
+`RepoBinding.INHERITED` is the default and an explicit `/repo` on the
+child overrides it.
+
+The base deliberately does not travel down with it: `relayProposedTasks`
+files a child with no base of its own, so it lands on the target repo's
+default branch whatever branch its parent works against, and a human who
+wants it elsewhere retargets it with `/base` before approving it. Filing
+the child against the parent's base instead — so that the two really are
+the same branch — is worse than it looks, because a proposal sits
+unapproved for as long as a human takes and the branches tasks work
+against are not all long-lived. A fix task's base is the pull request
+branch it repairs, which is gone once that pull request merges, and
+`prepareCheckout` refuses to start a run whose base has vanished. A child
+pointed at the trunk and left for a human to retarget is dispatchable
+whenever they get to it; one pointed at a branch that has since merged is
+not dispatchable at all.
+
+What that costs is auto-merge, and paying it is the point. Auto-merge is
+a permission a human gave *one* branch to take commits nobody reviewed,
+so a child inherits it only when it lands where its parent does —
+`model.SameBranch`, the second half of the trust gate `GrantsSubsetOf`
+opens. A parent with a `/base` of its own therefore passes on no
+auto-merge, and says so on the child it files rather than downgrading it
+silently.
+
+Capabilities do *not* inherit either, and this is the load-bearing one:
+an agent granted `self-repair` once, whose children inherited it, would
+have converted a single human grant into an unbounded number of uses of
+that grant. Every child asks for its capabilities on its own issue,
+where a human can see the request and decide — which is the same reason
 `propose_task` files with `needs_approval_label` instead of
 `trigger_label`.
 
@@ -2215,7 +2239,7 @@ configurable, are enough — the failure this prevents is a runaway, not a
 legitimate deep tree.
 
 **The parent's own PR is not the children's.** Each child that implements
-something opens its own PR against the same base. Serializing children
+something opens its own PR, off its own branch. Serializing children
 onto one branch would make them undispatchable in parallel, which is the
 entire reason to decompose in the first place.
 
