@@ -550,8 +550,9 @@ type Task struct {
 	// It is also where grain writes down its own ordering, rather than
 	// keeping a second one to itself: Store.MoveToFrontOfBacklog puts the
 	// tasks waiting on a repo's merge queue at the front of the backlog in
-	// the order they will land, and orchestrator.fileFixTask files a
-	// repair at the very head of it. Everything that decides what happens
+	// the order they will land -- which is also what dispatches a repair
+	// promptly, since the task being repaired is the head of that queue
+	// (orchestrator.requeueForRepair). Everything that decides what happens
 	// next -- Ready, ListTasks, orchestrator.queueOrder -- then reads that
 	// one column, which is the one a human can see and drag.
 	OrderKey float64

@@ -72,7 +72,7 @@ func firingTag(scheduleID string) string { return "schedule:" + scheduleID }
 // SCHEDULED special case dissolves" is why -- a schedule is itself a
 // human's standing approval, written once and editable like any other
 // declaration, so a firing needs no approval flag of its own the way
-// fileFixTask's own automatic fix needs none either.
+// the merge queue's own automatic repair needs none either.
 //
 // sched.TemplateID (bwsalmon/agents#516), if set, is resolved here --
 // fresh, against the store, not against whatever sched.Title/Body/

@@ -2414,8 +2414,10 @@ func (s *Store) State(ctx context.Context, taskID string) (State, error) {
 // unrelated new work", since the longer it waits the more likely
 // something else lands on the branch it targets and the fix has to be
 // refiled rather than simply merged. That priority is a position now
-// rather than a sort: orchestrator.fileFixTask files the task at the very
-// head of the backlog (OrderKeyForNewTask, atFront), where a human can
+// rather than a sort: the task being repaired is its repo's queue head,
+// which showQueueAtFrontOfBacklog has already moved to the front of the
+// backlog (and a fix task, back when the queue filed those, was filed at
+// the very head with OrderKeyForNewTask's atFront), where a human can
 // see it sitting first, see why the queue behind it is waiting, and drag
 // it elsewhere if they disagree. A rule that lived only in this ORDER BY
 // could do none of that -- the list said one thing and the dispatcher did

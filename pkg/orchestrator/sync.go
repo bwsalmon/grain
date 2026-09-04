@@ -44,15 +44,16 @@ import (
 //
 // Pending deliberately outranks failing, so a red check alongside a
 // still-running one waits rather than escalating immediately. The queue
-// files exactly one automatic fix per PR (fileFixTask, escalateToUser),
-// so it is worth spending a cycle to file that one against CI's whole
-// verdict instead of against whichever job happened to go red first.
+// asks for exactly one automatic repair per PR (requeueForRepair,
+// escalateToUser), so it is worth spending a cycle to ask for that one
+// against CI's whole verdict instead of against whichever job happened to
+// go red first.
 //
 // Of the conclusions a completed run can carry, "failure", "timed_out"
 // and "startup_failure" (the last only ever from the Actions fallback,
 // where a workflow file too broken to run at all lands) read as
 // PrFailing: each is a check that ran, or tried to, and did not pass --
-// which is what a fix task exists to repair. "cancelled",
+// which is what a repair exists to fix. "cancelled",
 // "action_required", "neutral", "skipped" and "stale" do not: CheckRun's
 // own doc comment leaves which conclusions count as broken to the
 // caller, and treating every non-"success" run as failing would make a
@@ -793,9 +794,12 @@ func syncEntry(ctx context.Context, store *model.Store, client github.Client,
 	isHead := heads[ref.Repo.String()] == task.ID
 	blocked := e.obs != nil && e.obs.MergeQueueBlockedAt != nil
 	// A repair the queue asked for is still being worked on this very
-	// branch (requeueForRepair), so nothing below acts on it: merging it
-	// would land a tree an agent is still pushing to, and both ways of
-	// giving up are the repair's own clock to run, not this cycle's.
+	// branch (requeueForRepair), so a head in that state does not merge:
+	// its checks are green about a tree an agent is still pushing to, and
+	// waiting one cycle costs nothing next to landing half a resolution.
+	// It does not stop a *blocked* task merging, below -- there the queue
+	// has already given up on the repair and a clean pull request is
+	// somebody having fixed it by hand.
 	repairing := e.obs.RepairInFlight()
 
 	// A fix task -- the separate, stacked repair branch the queue used to
@@ -833,7 +837,7 @@ func syncEntry(ctx context.Context, store *model.Store, client github.Client,
 	// that reports it) rather than something wrong with any one of the
 	// pull requests it would otherwise comment on individually.
 	switch {
-	case health == model.PrClean && task.AutoMerge && !repairing && (isFixTask || isHead || blocked):
+	case health == model.PrClean && task.AutoMerge && (isFixTask || blocked || (isHead && !repairing)):
 		// Pinned to the commit the verdict above was computed for, not
 		// left to land on whatever the head branch points at by the time
 		// GitHub processes this. The two are the same commit right up
@@ -1046,8 +1050,8 @@ const (
 // failure genuine".
 //
 // One attempt per pull request, persisted
-// (Observation.MergeQueueRefreshedAt), mirroring fileFixTask's own
-// one-fix-then-a-person policy for the same reason: a refresh that lands
+// (Observation.MergeQueueRefreshedAt), mirroring requeueForRepair's own
+// one-repair-then-a-person policy for the same reason: a refresh that lands
 // and still leaves the branch red has told us the failure is real, and
 // re-merging every time the base moves again would spend writes re-asking
 // a question that has been answered. The attempt is recorded whether or
@@ -1057,7 +1061,7 @@ const (
 // A merge, not a rebase, and made by GitHub rather than by a clone here:
 // a rebase would need a force push to a branch an agent may still hold a
 // clone of, would move the base out from under any stacked fix branch
-// (fileFixTask's Base *is* this head branch), and would discard review
+// (a stacked fix task's Base *is* this head branch), and would discard review
 // history. The merge is also exactly what the agents were doing by hand.
 func refreshStaleHead(ctx context.Context, store *model.Store, client github.Client,
 	task model.Task, obs *model.Observation, ref model.PullRequestRef,

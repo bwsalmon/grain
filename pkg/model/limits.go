@@ -4,11 +4,13 @@ package model
 // split into the two kinds of work an agent is dispatched for
 // (grain/task-63).
 //
-// A *merger* is a run of a task the merge queue filed itself to repair a
-// pull request that will not land -- Origin.Reason == ReasonFix, the
-// stacked fix task orchestrator.fileFixTask creates and pre-approves. A
-// *worker* is a run of anything else: the ordinary backlog, a schedule,
-// a qualification, a suite pass, a task somebody just filed.
+// A *merger* is a run that repairs a pull request that will not land --
+// a task the merge queue has sent back to work on its own branch
+// (Observation.MergeQueueRepairAt), or one of the separate fix tasks it
+// used to file for that (Origin.Reason == ReasonFix). Store.mergerTaskSQL
+// is the one definition. A *worker* is a run of anything else: the
+// ordinary backlog, a schedule, a qualification, a suite pass, a task
+// somebody just filed.
 //
 // The split exists because the two compete for the same capacity while
 // being worth very different amounts. A merger is the last step of work

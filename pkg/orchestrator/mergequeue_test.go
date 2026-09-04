@@ -14,223 +14,145 @@ import (
 	"github.com/bwsalmon/grain/pkg/orchestrator"
 )
 
-func TestSyncPullRequestsFilesAnAutomaticFixForAConflictedQueueHead(t *testing.T) {
+// A conflicted queue head is not handed to a new task on a new branch
+// any more: the task itself goes back to working, on the branch its pull
+// request is already open from, so the resolution and the change share
+// one pull request and one round of CI.
+func TestSyncPullRequestsSendsAConflictedQueueHeadBackForRepair(t *testing.T) {
 	store, ctx := openStore(t)
 	sim, client := newSim(t, "acme", "widgets", "main")
 	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
-	task := filedTask(t, ctx, store, "t1", repo)
-	task.AutoMerge = true
-	task.CreatedAt = &baseTime
-	if err := store.PutTask(ctx, task); err != nil {
-		t.Fatal(err)
-	}
-	pushBranch(t, sim.BareRepo, model.BranchName(task.ID))
+	task, branch := queuedTaskWithPullRequest(t, ctx, store, sim, client, "t1", repo)
 
-	pr, err := orchestrator.EnsurePullRequest(ctx, store, client, task, baseTime)
-	if err != nil {
-		t.Fatal(err)
-	}
-	task.Links = append(task.Links, model.Link{
-		Kind: model.LinkFixes, Target: model.PullRequestRef{Repo: repo, Number: pr.Number}.String(),
-	})
-	if err := store.PutTask(ctx, task); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Observe(ctx, model.Observation{TaskID: task.ID, CompletedAt: &baseTime}); err != nil {
-		t.Fatal(err)
-	}
-
-	no := false
-	for i := range sim.PullRequests {
-		sim.PullRequests[i].Mergeable = &no
-	}
+	setMergeable(sim, false)
 
 	if err := orchestrator.SyncPullRequests(ctx, store, client, baseTime); err != nil {
 		t.Fatalf("SyncPullRequests: %v", err)
 	}
 
-	// The task itself is untouched -- still completed, PR still open, no
-	// approval was asked of anyone.
+	// The task is queued again -- dispatchable by the ordinary path, with
+	// nobody's approval asked for -- rather than parked as completed
+	// while something else repairs it.
 	st, err := store.State(ctx, task.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if st != model.StateCompleted {
-		t.Fatalf("state = %q, want still completed", st)
+	if st != model.StateQueued {
+		t.Fatalf("state = %q, want queued: the task itself is what repairs its branch now", st)
 	}
 
-	got, err := store.GetTask(ctx, task.ID)
+	obs, err := store.GetObservation(ctx, task.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	fixTaskID, hasFix := "", false
-	for _, l := range got.Links {
-		if l.Kind == model.LinkFixTask {
-			fixTaskID, hasFix = l.Target, true
+	if obs == nil || obs.MergeQueueRepairAt == nil {
+		t.Fatalf("observation = %+v, want MergeQueueRepairAt set", obs)
+	}
+	if obs.CompletedAt != nil {
+		t.Fatalf("CompletedAt = %v, want cleared: that is what requeues the task", obs.CompletedAt)
+	}
+	if !obs.RepairInFlight() {
+		t.Fatal("the repair does not read as in flight, so nothing will wait for it")
+	}
+	// Asking for the repair is asking for the attempt: a task sitting on
+	// a failure streak (a salvaged run keeps its "failed" outcome
+	// forever) would otherwise read 'failed' rather than 'queued' here.
+	if obs.RetryRequestedAt == nil {
+		t.Fatal("RetryRequestedAt was not set, so a task with a failure streak could not be repaired")
+	}
+
+	// No second task anywhere, and no branch but the one the pull request
+	// is already open from.
+	tasks, err := store.ListTasks(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tasks) != 1 {
+		t.Fatalf("expected the one task and no separate fix task, got %d", len(tasks))
+	}
+
+	// The comment is the whole of what the dispatched run is told, so it
+	// has to name the pull request, what is wrong with it, and the branch
+	// to push to.
+	bodies := commentBodies(t, ctx, store, task.ID)
+	if len(bodies) != 1 {
+		t.Fatalf("expected one comment asking for the repair, got %q", bodies)
+	}
+	for _, want := range []string{"acme/widgets#", "conflict", branch} {
+		if !strings.Contains(bodies[0], want) {
+			t.Errorf("the repair comment does not mention %q:\n%s", want, bodies[0])
 		}
 	}
-	if !hasFix {
-		t.Fatalf("expected a LinkFixTask on %+v", got.Links)
-	}
 
-	fixTask, err := store.GetTask(ctx, fixTaskID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if fixTask == nil {
-		t.Fatal("fix task not filed in the store")
-	}
-	if fixTask.Approval == nil {
-		t.Fatal("fix task was not pre-approved -- it should need no human approval")
-	}
-	if !fixTask.AutoMerge {
-		t.Fatal("fix task should carry auto-merge")
-	}
-	if fixTask.Base != "grain/task-"+task.ID {
-		t.Fatalf("fix task base = %q, want the original PR's own branch", fixTask.Base)
-	}
-	// Named after the task it repairs, not after the pull request that
-	// went red -- see fixTaskTitle. This is the fix's pull request title
-	// too, since EnsurePullRequest takes Title verbatim.
-	if want := "Resolve: " + task.Title; fixTask.Title != want {
-		t.Fatalf("fix task title = %q, want %q", fixTask.Title, want)
-	}
-	// The pull request it is filed for is still identified, in the body.
-	if !strings.Contains(fixTask.Body, "acme/widgets#") {
-		t.Fatalf("fix task body = %q, want it to name the pull request it repairs", fixTask.Body)
-	}
-	proposedBy, hasProposedBy := "", false
-	for _, l := range fixTask.Links {
-		if l.Kind == model.LinkProposedBy {
-			proposedBy, hasProposedBy = l.Target, true
-		}
-	}
-	if !hasProposedBy || proposedBy != task.ID {
-		t.Fatalf("fix task LinkProposedBy = (%q, %v), want (%q, true): the UI's generated-from reads it", proposedBy, hasProposedBy, task.ID)
-	}
-	fixState, err := store.State(ctx, fixTaskID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if fixState != model.StateQueued {
-		t.Fatalf("fix task state = %q, want queued (ready to dispatch with no approval step)", fixState)
-	}
-
-	if got := commentBodies(t, ctx, store, task.ID); len(got) != 1 {
-		t.Fatalf("expected one comment announcing the fix, got %q", got)
-	}
-
-	// Nothing filed a GitHub issue for the fix: it is a store row, and
-	// pre-approved, so dispatch.Cycle picks it up with no label anywhere.
+	// Nothing filed a GitHub issue for any of it: this is a store row and
+	// a comment, and dispatch.Cycle picks the task up with no label
+	// anywhere.
 	if len(sim.Issues) != 0 {
 		t.Fatalf("expected no GitHub issues at all, got %+v", sim.Issues)
 	}
 }
 
-func TestSyncPullRequestsDoesNotFileASecondFixWhileOneIsInFlight(t *testing.T) {
+// One repair per pull request, and one only: a cycle finding the repair
+// already in flight must not ask again, or a head whose agent is mid-run
+// would be re-requeued every tick.
+func TestSyncPullRequestsDoesNotAskForASecondRepairWhileOneIsInFlight(t *testing.T) {
 	store, ctx := openStore(t)
 	sim, client := newSim(t, "acme", "widgets", "main")
 	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
-	task := filedTask(t, ctx, store, "t1", repo)
-	task.AutoMerge = true
-	task.CreatedAt = &baseTime
-	if err := store.PutTask(ctx, task); err != nil {
-		t.Fatal(err)
-	}
-	pushBranch(t, sim.BareRepo, model.BranchName(task.ID))
-	pr, err := orchestrator.EnsurePullRequest(ctx, store, client, task, baseTime)
-	if err != nil {
-		t.Fatal(err)
-	}
-	task.Links = append(task.Links, model.Link{
-		Kind: model.LinkFixes, Target: model.PullRequestRef{Repo: repo, Number: pr.Number}.String(),
-	})
-	if err := store.PutTask(ctx, task); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Observe(ctx, model.Observation{TaskID: task.ID, CompletedAt: &baseTime}); err != nil {
-		t.Fatal(err)
-	}
-	no := false
-	for i := range sim.PullRequests {
-		sim.PullRequests[i].Mergeable = &no
-	}
+	task, _ := queuedTaskWithPullRequest(t, ctx, store, sim, client, "t1", repo)
+	setMergeable(sim, false)
 
 	if err := orchestrator.SyncPullRequests(ctx, store, client, baseTime); err != nil {
 		t.Fatalf("first SyncPullRequests: %v", err)
 	}
-	if err := orchestrator.SyncPullRequests(ctx, store, client, baseTime); err != nil {
+	asked := repairAskedAt(t, ctx, store, task.ID)
+	if err := orchestrator.SyncPullRequests(ctx, store, client, baseTime.Add(time.Minute)); err != nil {
 		t.Fatalf("second SyncPullRequests: %v", err)
 	}
 
-	// The original task and its one fix -- a second cycle finding the fix
-	// already in flight must not file a second one.
 	tasks, err := store.ListTasks(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tasks) != 2 {
-		t.Fatalf("expected exactly one fix task filed (two tasks total), got %d", len(tasks))
+	if len(tasks) != 1 {
+		t.Fatalf("expected no task to have been filed at all, got %d", len(tasks))
 	}
 	if got := commentBodies(t, ctx, store, task.ID); len(got) != 1 {
-		t.Fatalf("expected exactly one fix-filed comment, got %q", got)
+		t.Fatalf("expected exactly one repair comment, got %q", got)
+	}
+	if again := repairAskedAt(t, ctx, store, task.ID); !again.Equal(asked) {
+		t.Fatalf("MergeQueueRepairAt moved from %v to %v: the repair was asked for twice", asked, again)
 	}
 }
 
-func TestSyncPullRequestsEscalatesWhenTheFixTaskFinishesButThePrIsStillBroken(t *testing.T) {
+// The repair ran, the task completed again, and the pull request is still
+// conflicted: the automatic attempt did not stick, and the queue asks a
+// person rather than dispatching the same repair a second time.
+func TestSyncPullRequestsEscalatesWhenTheRepairFinishesButThePrIsStillBroken(t *testing.T) {
 	store, ctx := openStore(t)
 	sim, client := newSim(t, "acme", "widgets", "main")
 	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
-	task := filedTask(t, ctx, store, "t1", repo)
-	task.AutoMerge = true
-	task.CreatedAt = &baseTime
-	if err := store.PutTask(ctx, task); err != nil {
-		t.Fatal(err)
-	}
-	pushBranch(t, sim.BareRepo, model.BranchName(task.ID))
-	pr, err := orchestrator.EnsurePullRequest(ctx, store, client, task, baseTime)
-	if err != nil {
-		t.Fatal(err)
-	}
-	task.Links = append(task.Links, model.Link{
-		Kind: model.LinkFixes, Target: model.PullRequestRef{Repo: repo, Number: pr.Number}.String(),
-	})
-	if err := store.PutTask(ctx, task); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Observe(ctx, model.Observation{TaskID: task.ID, CompletedAt: &baseTime}); err != nil {
-		t.Fatal(err)
-	}
-	no := false
-	for i := range sim.PullRequests {
-		sim.PullRequests[i].Mergeable = &no
-	}
+	task, _ := queuedTaskWithPullRequest(t, ctx, store, sim, client, "t1", repo)
+	setMergeable(sim, false)
 
 	if err := orchestrator.SyncPullRequests(ctx, store, client, baseTime); err != nil {
-		t.Fatalf("filing the fix: %v", err)
+		t.Fatalf("asking for the repair: %v", err)
 	}
-	got, err := store.GetTask(ctx, task.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var fixTaskID string
-	for _, l := range got.Links {
-		if l.Kind == model.LinkFixTask {
-			fixTaskID = l.Target
-		}
-	}
-	if fixTaskID == "" {
-		t.Fatal("expected a fix task to have been filed")
+	if !repairInFlightNow(t, ctx, store, task.ID) {
+		t.Fatal("expected a repair to have been asked for")
 	}
 
-	// The fix task's own PR is closed without ever merging -- it ran and
-	// gave up, standing in for a run that could not actually resolve the
-	// conflict. The original PR is still conflicted throughout.
-	if err := store.Observe(ctx, model.Observation{TaskID: fixTaskID, ClosedAt: &baseTime}); err != nil {
+	// The repair run finishes -- pushing something, or nothing -- and the
+	// task completes again, standing in for a run that could not actually
+	// resolve the conflict. The pull request is conflicted throughout.
+	finished := baseTime.Add(time.Hour)
+	if err := store.ObserveField(ctx, task.ID, finished, func(o *model.Observation) {
+		o.CompletedAt = &finished
+	}); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := orchestrator.SyncPullRequests(ctx, store, client, baseTime); err != nil {
+	if err := orchestrator.SyncPullRequests(ctx, store, client, finished); err != nil {
 		t.Fatalf("second SyncPullRequests (should escalate): %v", err)
 	}
 
@@ -239,50 +161,45 @@ func TestSyncPullRequestsEscalatesWhenTheFixTaskFinishesButThePrIsStillBroken(t 
 		t.Fatal(err)
 	}
 	if obs == nil || obs.MergeQueueBlockedAt == nil {
-		t.Fatal("expected the original task to be marked as needing user input")
+		t.Fatal("expected the task to be marked as needing user input")
 	}
 
 	if got := commentBodies(t, ctx, store, task.ID); len(got) != 2 {
-		t.Fatalf("expected the fix-filed comment plus one escalation comment, got %q", got)
+		t.Fatalf("expected the repair comment plus one escalation comment, got %q", got)
 	}
 
-	// No third SyncPullRequests call refiles another fix -- the task
-	// stays linked to exactly the one fix task it already tried.
-	if err := orchestrator.SyncPullRequests(ctx, store, client, baseTime); err != nil {
+	// No third cycle asks for another repair -- the task keeps the one
+	// MergeQueueRepairAt it already has, and the queue has moved on.
+	if err := orchestrator.SyncPullRequests(ctx, store, client, finished.Add(time.Minute)); err != nil {
 		t.Fatalf("third SyncPullRequests: %v", err)
 	}
-	got, err = store.GetTask(ctx, task.ID)
+	if got := commentBodies(t, ctx, store, task.ID); len(got) != 2 {
+		t.Fatalf("the queue said something a third time: %q", got)
+	}
+	tasks, err := store.ListTasks(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	fixLinks := 0
-	for _, l := range got.Links {
-		if l.Kind == model.LinkFixTask {
-			fixLinks++
-		}
-	}
-	if fixLinks != 1 {
-		t.Fatalf("expected exactly one LinkFixTask, got %d: %+v", fixLinks, got.Links)
+	if len(tasks) != 1 {
+		t.Fatalf("expected no fix task to have been filed, got %d tasks", len(tasks))
 	}
 }
 
-// The fix that never finishes. Once a fix task is filed, its parent does
-// nothing at all until that task reaches closed -- and nothing else times
-// the wait: the parent reads CONFLICTED (not PENDING) for as long as it
-// is waiting, so the check-stall deadline never looks at it, and the fix
-// task's own pull request is not a queue member, so nothing looks at that
-// either. A fix task that never finishes -- its checks wedged, a dispatch
-// that fails without closing it, an agent run that never comes back --
-// would hold the head of its repo's queue for the life of the deployment,
-// with everything behind it waiting: the same stall the check-stall
-// deadline closes, reached from the other side.
+// The repair that never finishes. Once one is asked for, its head does
+// nothing at all until the task completes again -- and nothing else times
+// the wait: the head reads CONFLICTED (not PENDING) for as long as it is
+// waiting, so the check-stall deadline never looks at it. A repair that
+// never finishes -- a dispatch that never happens, an agent run that
+// never comes back -- would hold the head of its repo's queue for the
+// life of the deployment, with everything behind it waiting: the same
+// stall the check-stall deadline closes, reached from the other side.
 //
-// orchestrator.FixTaskDeadline is the bound, measured from the moment the
-// fix was filed. Past it the queue says so, names the fix it was waiting
-// for, and gets on with the next task -- while the head it gave up on
-// still merges the moment it reads clean.
-func TestSyncPullRequestsGivesUpOnAQueueHeadWhoseFixTaskNeverFinishes(t *testing.T) {
-	deadline := orchestrator.FixTaskDeadline
+// orchestrator.RepairDeadline is the bound, measured from the moment the
+// repair was asked for. Past it the queue says so and gets on with the
+// next task -- while the head it gave up on still merges the moment it
+// reads clean.
+func TestSyncPullRequestsGivesUpOnAQueueHeadWhoseRepairNeverFinishes(t *testing.T) {
+	deadline := orchestrator.RepairDeadline
 
 	store, ctx := openStore(t)
 	sim, client := newSim(t, "acme", "widgets", "main")
@@ -290,45 +207,40 @@ func TestSyncPullRequestsGivesUpOnAQueueHeadWhoseFixTaskNeverFinishes(t *testing
 	stuck, stuckBranch := queuedTaskWithPullRequest(t, ctx, store, sim, client, "t1", repo)
 	behind, _ := queuedTaskWithPullRequest(t, ctx, store, sim, client, "t2", repo)
 
-	// The head is conflicted, so the queue files a fix for it. The task
-	// behind it is perfectly mergeable and is held up only by being
+	// The head is conflicted, so the queue sends it back for repair. The
+	// task behind it is perfectly mergeable and is held up only by being
 	// second.
 	setMergeable(sim, true)
 	setBranchMergeable(sim, stuckBranch, false)
 	if err := orchestrator.SyncPullRequests(ctx, store, client, baseTime); err != nil {
-		t.Fatalf("SyncPullRequests filing the fix: %v", err)
+		t.Fatalf("SyncPullRequests asking for the repair: %v", err)
 	}
-	got, err := store.GetTask(ctx, stuck.ID)
-	if err != nil {
-		t.Fatal(err)
+	if !repairInFlightNow(t, ctx, store, stuck.ID) {
+		t.Fatal("expected a repair to have been asked of the conflicted head")
 	}
-	fixTaskID, ok := fixTaskLinkOf(got)
-	if !ok {
-		t.Fatal("expected a fix task to have been filed for the conflicted head")
-	}
-	// Nothing ever dispatches that fix task, and nothing ever closes it.
-	// That is the whole of the failure: it simply sits there, while the
-	// head goes on reading conflicted every cycle.
+	// Nothing ever dispatches it, and it never completes. That is the
+	// whole of the failure: the task simply sits there, while the head
+	// goes on reading conflicted every cycle.
 	//
 	// Well inside the deadline: the queue is still waiting, and has said
-	// nothing beyond the comment announcing the fix. This is the same
-	// cycle a fix that is simply taking a while gets.
+	// nothing beyond the comment asking for the repair. This is the same
+	// cycle a repair that is simply taking a while gets.
 	if err := orchestrator.SyncPullRequests(ctx, store, client, baseTime.Add(deadline/2)); err != nil {
 		t.Fatalf("SyncPullRequests inside the deadline: %v", err)
 	}
 	if bodies := commentBodies(t, ctx, store, stuck.ID); len(bodies) != 1 {
-		t.Fatalf("expected only the fix-filed comment inside the deadline, got %q", bodies)
+		t.Fatalf("expected only the repair comment inside the deadline, got %q", bodies)
 	}
 	obs, err := store.GetObservation(ctx, stuck.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if obs != nil && obs.MergeQueueBlockedAt != nil {
-		t.Fatal("gave up on the queue head while its fix was still inside the deadline")
+		t.Fatal("gave up on the queue head while its repair was still inside the deadline")
 	}
 
-	// Past it. The queue gives up, names the fix task a person should go
-	// and look at, and files no second fix.
+	// Past it. The queue gives up, says how long it waited, and asks for
+	// no second repair.
 	if err := orchestrator.SyncPullRequests(ctx, store, client, baseTime.Add(deadline)); err != nil {
 		t.Fatalf("SyncPullRequests past the deadline: %v", err)
 	}
@@ -337,21 +249,21 @@ func TestSyncPullRequestsGivesUpOnAQueueHeadWhoseFixTaskNeverFinishes(t *testing
 		t.Fatal(err)
 	}
 	if obs == nil || obs.MergeQueueBlockedAt == nil {
-		t.Fatal("the queue never gave up on a head whose fix task never finished")
+		t.Fatal("the queue never gave up on a head whose repair never finished")
 	}
 	bodies := commentBodies(t, ctx, store, stuck.ID)
 	if len(bodies) != 2 {
-		t.Fatalf("expected the fix-filed comment plus one escalation, got %q", bodies)
+		t.Fatalf("expected the repair comment plus one escalation, got %q", bodies)
 	}
-	if !strings.Contains(bodies[1], fixTaskID) {
-		t.Errorf("the escalation does not name the fix task it was waiting on:\n%s", bodies[1])
+	if !strings.Contains(bodies[1], "never finished") {
+		t.Errorf("the escalation does not say the repair never finished:\n%s", bodies[1])
 	}
 	tasks, err := store.ListTasks(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tasks) != 3 {
-		t.Fatalf("expected two queued tasks and exactly one fix task, got %d", len(tasks))
+	if len(tasks) != 2 {
+		t.Fatalf("expected the two queued tasks and no fix task at all, got %d", len(tasks))
 	}
 
 	// And the queue has moved on: the task behind the stuck one is head
@@ -369,8 +281,9 @@ func TestSyncPullRequestsGivesUpOnAQueueHeadWhoseFixTaskNeverFinishes(t *testing
 
 	// Giving up is not abandoning. A person resolves the conflict by
 	// hand, and the pull request the queue stopped driving merges on its
-	// own -- no second escalation, no further fix task, no human step
-	// beyond the push.
+	// own -- no second escalation, no further repair, no human step
+	// beyond the push. The unfinished repair does not hold that merge
+	// back: the queue has already given up on it.
 	setBranchMergeable(sim, stuckBranch, true)
 	if err := orchestrator.SyncPullRequests(ctx, store, client, baseTime.Add(deadline+2*time.Minute)); err != nil {
 		t.Fatalf("SyncPullRequests once the conflict was resolved: %v", err)
@@ -455,20 +368,11 @@ func TestSyncPullRequestsOnlyActsOnTheQueueHeadNotLaterEntries(t *testing.T) {
 		t.Fatalf("SyncPullRequests: %v", err)
 	}
 
-	gotHead, err := store.GetTask(ctx, head.ID)
-	if err != nil {
-		t.Fatal(err)
+	if !repairInFlightNow(t, ctx, store, head.ID) {
+		t.Fatal("expected the queue head to have been sent back for repair")
 	}
-	if _, ok := fixTaskLinkOf(gotHead); !ok {
-		t.Fatal("expected a fix task filed for the queue head")
-	}
-
-	gotSecond, err := store.GetTask(ctx, second.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, ok := fixTaskLinkOf(gotSecond); ok {
-		t.Fatal("did not expect a fix task for the second queue entry while the head is still unresolved")
+	if repairInFlightNow(t, ctx, store, second.ID) {
+		t.Fatal("did not expect a repair for the second queue entry while the head is still unresolved")
 	}
 }
 
@@ -558,13 +462,10 @@ func TestSyncPullRequestsWaitsForRunningChecksBeforeMerging(t *testing.T) {
 		t.Fatalf("state = %q, want still completed: nothing has happened yet", st)
 	}
 	// Waiting is not the same as giving up on: an unfinished check is not
-	// a broken one, so nothing is filed and nobody is told anything.
-	got, err := store.GetTask(ctx, task.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, ok := fixTaskLinkOf(got); ok {
-		t.Fatal("a fix task was filed for a pull request whose checks had not finished")
+	// a broken one, so nothing is asked of anyone and nobody is told
+	// anything.
+	if repairInFlightNow(t, ctx, store, task.ID) {
+		t.Fatal("a repair was asked for a pull request whose checks had not finished")
 	}
 	if bodies := commentBodies(t, ctx, store, task.ID); len(bodies) != 0 {
 		t.Fatalf("expected no comments while simply waiting for CI, got %q", bodies)
@@ -610,12 +511,8 @@ func TestSyncPullRequestsFilesAFixOnceRunningChecksFinishFailing(t *testing.T) {
 	if err := orchestrator.SyncPullRequests(ctx, store, client, baseTime); err != nil {
 		t.Fatalf("SyncPullRequests with CI still running: %v", err)
 	}
-	got, err := store.GetTask(ctx, task.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, ok := fixTaskLinkOf(got); ok {
-		t.Fatal("a fix task was filed before the rest of the checks had reported")
+	if repairInFlightNow(t, ctx, store, task.ID) {
+		t.Fatal("a repair was asked for before the rest of the checks had reported")
 	}
 
 	sim.CheckRuns[branch] = []github.CheckRun{
@@ -631,42 +528,28 @@ func TestSyncPullRequestsFilesAFixOnceRunningChecksFinishFailing(t *testing.T) {
 			t.Fatal("a pull request with failing checks was merged")
 		}
 	}
-	got, err = store.GetTask(ctx, task.ID)
-	if err != nil {
-		t.Fatal(err)
+	if !repairInFlightNow(t, ctx, store, task.ID) {
+		t.Fatal("expected the failing queue head to have been sent back for repair")
 	}
-	fixTaskID, ok := fixTaskLinkOf(got)
-	if !ok {
-		t.Fatalf("expected a fix task for the failing queue head, links: %+v", got.Links)
+	bodies := commentBodies(t, ctx, store, task.ID)
+	if len(bodies) != 1 {
+		t.Fatalf("expected one comment asking for the repair, got %q", bodies)
 	}
-	fixTask, err := store.GetTask(ctx, fixTaskID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if fixTask == nil {
-		t.Fatal("fix task not filed in the store")
-	}
-	if fixTask.Approval == nil || !fixTask.AutoMerge || fixTask.Base != branch {
-		t.Fatalf("fix task = %+v, want pre-approved, auto-merging, based on %q", fixTask, branch)
-	}
-	for _, want := range []string{"unit tests", "e2e"} {
-		if !strings.Contains(fixTask.Body, want) {
-			t.Errorf("fix task body does not name the failing check %q:\n%s", want, fixTask.Body)
+	for _, want := range []string{"unit tests", "e2e", branch} {
+		if !strings.Contains(bodies[0], want) {
+			t.Errorf("the repair comment does not name %q:\n%s", want, bodies[0])
 		}
-	}
-	if bodies := commentBodies(t, ctx, store, task.ID); len(bodies) != 1 {
-		t.Fatalf("expected one comment announcing the fix, got %q", bodies)
 	}
 }
 
-// Naming the failing job is where the fix task used to stop, and for the
-// agent it dispatches that is barely a starting point: a sandbox is not a
-// CI runner, and this deployment's sandboxes reach nothing but the git
-// proxy, so an agent told "the `go` job is red" cannot go and read what
-// the `go` job said. It has to arrive with the task. That is the
-// difference between a fix and a guess, and a merge fix that is a guess
-// costs the queue another cycle.
-func TestSyncPullRequestsPutsTheFailingJobsOwnLogIntoTheFixTask(t *testing.T) {
+// Naming the failing job is where the queue's own message used to stop,
+// and for the agent it dispatches that is barely a starting point: a
+// sandbox is not a CI runner, and this deployment's sandboxes reach
+// nothing but the git proxy, so an agent told "the `go` job is red"
+// cannot go and read what the `go` job said. It has to arrive with the
+// task. That is the difference between a repair and a guess, and a repair
+// that is a guess costs the queue another cycle.
+func TestSyncPullRequestsPutsTheFailingJobsOwnLogIntoTheRepairComment(t *testing.T) {
 	store, ctx := openStore(t)
 	sim, client := newSim(t, "acme", "widgets", "main")
 	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
@@ -692,38 +575,30 @@ func TestSyncPullRequestsPutsTheFailingJobsOwnLogIntoTheFixTask(t *testing.T) {
 		t.Fatalf("SyncPullRequests once CI failed: %v", err)
 	}
 
-	got, err := store.GetTask(ctx, task.ID)
-	if err != nil {
-		t.Fatal(err)
+	if !repairInFlightNow(t, ctx, store, task.ID) {
+		t.Fatal("expected the failing queue head to have been sent back for repair")
 	}
-	fixTaskID, ok := fixTaskLinkOf(got)
-	if !ok {
-		t.Fatalf("expected a fix task for the failing queue head, links: %+v", got.Links)
-	}
-	fixTask, err := store.GetTask(ctx, fixTaskID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if fixTask == nil {
-		t.Fatal("fix task not filed in the store")
+	bodies := commentBodies(t, ctx, store, task.ID)
+	if len(bodies) != 1 {
+		t.Fatalf("expected one comment asking for the repair, got %q", bodies)
 	}
 	for _, want := range []string{
 		"--- FAIL: TestQueueHead",
 		"sync_test.go:42: got 3, want 4",
 	} {
-		if !strings.Contains(fixTask.Body, want) {
-			t.Errorf("fix task body does not carry %q from the failing job's log:\n%s", want, fixTask.Body)
+		if !strings.Contains(bodies[0], want) {
+			t.Errorf("the repair comment does not carry %q from the failing job's log:\n%s", want, bodies[0])
 		}
 	}
 	// Actions stamps every line with the same timestamp. It says nothing
 	// about the failure and costs about a quarter of every line.
-	if strings.Contains(fixTask.Body, "2026-01-02T03:04:05") {
-		t.Errorf("fix task body kept Actions' per-line timestamps:\n%s", fixTask.Body)
+	if strings.Contains(bodies[0], "2026-01-02T03:04:05") {
+		t.Errorf("the repair comment kept Actions' per-line timestamps:\n%s", bodies[0])
 	}
 	// The job that passed is not evidence of anything, and its log is
 	// never fetched: FailedJobLogs filters at every step.
-	if strings.Contains(fixTask.Body, "terraform: no changes") {
-		t.Errorf("fix task body carries a passing job's log:\n%s", fixTask.Body)
+	if strings.Contains(bodies[0], "terraform: no changes") {
+		t.Errorf("the repair comment carries a passing job's log:\n%s", bodies[0])
 	}
 }
 
@@ -738,12 +613,12 @@ func (c logsUnreadable) FailedJobLogs(owner, repo, headSHA string) ([]github.Job
 	return nil, errors.New("403 Forbidden")
 }
 
-// The log is an annotation on the fix task, not the fix task. Failing the
+// The log is an annotation on the repair, not the repair. Failing the
 // cycle over an unreadable log would cost the queue head the one
-// automatic fix it gets, over the part of the body that is a bonus --
-// so the read is best effort, and its failure leaves exactly the fix
-// task this queue filed before logs were ever fetched.
-func TestSyncPullRequestsStillFilesAFixWhenTheJobLogsCannotBeRead(t *testing.T) {
+// automatic repair it gets, over the part of the comment that is a bonus
+// -- so the read is best effort, and its failure leaves exactly the
+// message this queue sent before logs were ever fetched.
+func TestSyncPullRequestsStillAsksForARepairWhenTheJobLogsCannotBeRead(t *testing.T) {
 	store, ctx := openStore(t)
 	sim, client := newSim(t, "acme", "widgets", "main")
 	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
@@ -758,26 +633,18 @@ func TestSyncPullRequestsStillFilesAFixWhenTheJobLogsCannotBeRead(t *testing.T) 
 		t.Fatalf("SyncPullRequests with unreadable job logs: %v", err)
 	}
 
-	got, err := store.GetTask(ctx, task.ID)
-	if err != nil {
-		t.Fatal(err)
+	if !repairInFlightNow(t, ctx, store, task.ID) {
+		t.Fatal("no repair was asked for when the job logs could not be read")
 	}
-	fixTaskID, ok := fixTaskLinkOf(got)
-	if !ok {
-		t.Fatalf("no fix task was filed when the job logs could not be read, links: %+v", got.Links)
+	bodies := commentBodies(t, ctx, store, task.ID)
+	if len(bodies) != 1 {
+		t.Fatalf("expected one comment asking for the repair, got %q", bodies)
 	}
-	fixTask, err := store.GetTask(ctx, fixTaskID)
-	if err != nil {
-		t.Fatal(err)
+	if !strings.Contains(bodies[0], "its checks are failing (`go`)") {
+		t.Errorf("the repair comment no longer names the failing check:\n%s", bodies[0])
 	}
-	if fixTask == nil {
-		t.Fatal("fix task not filed in the store")
-	}
-	if !strings.Contains(fixTask.Body, "its checks are failing (`go`)") {
-		t.Errorf("fix task body no longer names the failing check:\n%s", fixTask.Body)
-	}
-	if strings.Contains(fixTask.Body, "What CI printed") {
-		t.Errorf("fix task body has an empty log section:\n%s", fixTask.Body)
+	if strings.Contains(bodies[0], "What CI printed") {
+		t.Errorf("the repair comment has an empty log section:\n%s", bodies[0])
 	}
 }
 
@@ -816,12 +683,8 @@ func TestSyncPullRequestsWaitsForCiToRegisterBeforeMergingAFreshPullRequest(t *t
 		}
 	}
 	// Waiting, not giving up: an unregistered check is not a broken one.
-	got, err := store.GetTask(ctx, task.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, ok := fixTaskLinkOf(got); ok {
-		t.Fatal("a fix task was filed for a pull request whose CI had not reported yet")
+	if repairInFlightNow(t, ctx, store, task.ID) {
+		t.Fatal("a repair was asked for a pull request whose CI had not reported yet")
 	}
 	if bodies := commentBodies(t, ctx, store, task.ID); len(bodies) != 0 {
 		t.Fatalf("expected no comments while simply waiting for CI to register, got %q", bodies)
@@ -967,12 +830,8 @@ func TestSyncPullRequestsGivesUpOnAQueueHeadWhoseChecksNeverFinish(t *testing.T)
 	if obs == nil || obs.MergeQueueBlockedAt == nil {
 		t.Fatal("the queue never gave up on a head whose checks never finished")
 	}
-	got, err := store.GetTask(ctx, stuck.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, ok := fixTaskLinkOf(got); ok {
-		t.Error("filed an automatic fix for a pull request nothing had said was broken")
+	if repairInFlightNow(t, ctx, store, stuck.ID) {
+		t.Error("asked for an automatic repair of a pull request nothing had said was broken")
 	}
 	bodies := commentBodies(t, ctx, store, stuck.ID)
 	if len(bodies) != 1 {
@@ -1188,10 +1047,12 @@ func placeInBacklog(t *testing.T, ctx context.Context, store *model.Store, task 
 // TestSyncPullRequestsMovesTheQueueToTheFrontOfTheBacklog is the merge
 // queue's own ordering made visible. The tasks whose pull requests are
 // waiting to land go to the front of the backlog in the order the queue
-// will act on them, and the fix task filed for the head of that queue
-// goes to the very head -- so a task list answers "what is grain about to
+// will act on them -- so a task list answers "what is grain about to
 // finish, and in what order" without anyone opening a task, and answers
-// it with the same order Store.Ready dispatches from.
+// it with the same order Store.Ready dispatches from. That is also what
+// dispatches a repair promptly, now that the repair is the head task
+// itself going back to work rather than a separate row filed in front of
+// it.
 func TestSyncPullRequestsMovesTheQueueToTheFrontOfTheBacklog(t *testing.T) {
 	store, ctx := openStore(t)
 	sim, client := newSim(t, "acme", "widgets", "main")
@@ -1205,27 +1066,21 @@ func TestSyncPullRequestsMovesTheQueueToTheFrontOfTheBacklog(t *testing.T) {
 	second, _ := queuedTaskWithPullRequest(t, ctx, store, sim, client, "t2", repo)
 	second = placeInBacklog(t, ctx, store, second, 300)
 
-	// Both pull requests are conflicted: the head gets an automatic fix
-	// filed for it and neither of them merges, so the whole queue is
-	// still there to be looked at afterwards.
+	// Both pull requests are conflicted: the head is sent back for repair
+	// and neither of them merges, so the whole queue is still there to be
+	// looked at afterwards.
 	setMergeable(sim, false)
 
 	if err := orchestrator.SyncPullRequests(ctx, store, client, baseTime); err != nil {
 		t.Fatalf("SyncPullRequests: %v", err)
 	}
-
-	got, err := store.GetTask(ctx, head.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	fixID, ok := fixTaskLinkOf(got)
-	if !ok {
-		t.Fatalf("expected a fix task filed for the queue head, links = %+v", got.Links)
+	if !repairInFlightNow(t, ctx, store, head.ID) {
+		t.Fatal("expected the queue head to have been sent back for repair")
 	}
 
-	want := []string{fixID, head.ID, second.ID, ordinary.ID}
+	want := []string{head.ID, second.ID, ordinary.ID}
 	if backlog := backlogIDs(t, ctx, store); !reflect.DeepEqual(backlog, want) {
-		t.Fatalf("backlog = %v, want %v -- the fix at the very head, then the queue, then ordinary work", backlog, want)
+		t.Fatalf("backlog = %v, want %v -- the queue in order, then ordinary work", backlog, want)
 	}
 }
 
@@ -1255,32 +1110,41 @@ func TestSyncPullRequestsTakesItsQueueHeadFromTheBacklogOrder(t *testing.T) {
 		t.Fatalf("SyncPullRequests: %v", err)
 	}
 
-	gotSecond, err := store.GetTask(ctx, second.ID)
-	if err != nil {
-		t.Fatal(err)
+	if !repairInFlightNow(t, ctx, store, second.ID) {
+		t.Fatal("expected the repair asked of the task dragged to the front of the backlog")
 	}
-	if _, ok := fixTaskLinkOf(gotSecond); !ok {
-		t.Fatal("expected the fix filed for the task dragged to the front of the backlog")
-	}
-	gotFirst, err := store.GetTask(ctx, first.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, ok := fixTaskLinkOf(gotFirst); ok {
-		t.Fatal("did not expect a fix for the task now behind it in the backlog")
+	if repairInFlightNow(t, ctx, store, first.ID) {
+		t.Fatal("did not expect a repair for the task now behind it in the backlog")
 	}
 }
 
 func strPtr(s string) *string { return &s }
 
-func fixTaskLinkOf(task *model.Task) (string, bool) {
-	if task == nil {
-		return "", false
+// repairAskedAt is when the merge queue asked this task to repair its own
+// branch (model.Observation.MergeQueueRepairAt), and fails the test if it
+// never did.
+func repairAskedAt(t *testing.T, ctx context.Context, store *model.Store, taskID string) time.Time {
+	t.Helper()
+	obs, err := store.GetObservation(ctx, taskID)
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, l := range task.Links {
-		if l.Kind == model.LinkFixTask {
-			return l.Target, true
-		}
+	if obs == nil || obs.MergeQueueRepairAt == nil {
+		t.Fatalf("no repair was asked of %s", taskID)
 	}
-	return "", false
+	return *obs.MergeQueueRepairAt
+}
+
+// repairInFlightNow is model.Observation.RepairInFlight read fresh from
+// the store -- "has the queue sent this task back to repair its own
+// branch, and has that repair not finished yet", which is what most of
+// these tests assert instead of the fix-task link the queue used to
+// write.
+func repairInFlightNow(t *testing.T, ctx context.Context, store *model.Store, taskID string) bool {
+	t.Helper()
+	obs, err := store.GetObservation(ctx, taskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return obs.RepairInFlight()
 }

@@ -2683,7 +2683,7 @@ func TestMoveToFrontOfBacklogCarriesTheQueuePastOrdinaryWork(t *testing.T) {
 }
 
 // TestMoveToFrontOfBacklogStaysBehindAFixTaskAtTheHead is the other half
-// of the ordering: a merge task the queue filed (orchestrator.fileFixTask)
+// of the ordering: one of the separate merge tasks the queue used to file
 // sits at the very head, so the queue it repairs goes in front of the
 // ordinary backlog but behind that.
 func TestMoveToFrontOfBacklogStaysBehindAFixTaskAtTheHead(t *testing.T) {
@@ -2782,10 +2782,9 @@ func TestMoveToFrontOfBacklogRejectsAnUnknownID(t *testing.T) {
 
 // TestReadyDispatchesAFixTaskInBacklogOrderLikeAnythingElse pins the
 // carve-out Store.Ready used to make for Origin.Reason == ReasonFix being
-// gone: a fix task is dispatched first because
-// orchestrator.fileFixTask puts it at the head of the backlog, and one a
-// human has since dragged behind other work waits its turn there like
-// anything else. Dispatch order is the order on screen, both ways round.
+// gone: a fix task is dispatched first because it was filed at the head
+// of the backlog, and one a human has since dragged behind other work
+// waits its turn there like anything else. Dispatch order is the order on screen, both ways round.
 func TestReadyDispatchesAFixTaskInBacklogOrderLikeAnythingElse(t *testing.T) {
 	store, _, ctx := openStore(t)
 	putOrdered(t, store, ctx, map[string]float64{"ordinary": 10})
