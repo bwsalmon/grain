@@ -2897,6 +2897,25 @@ aside alongside the store on a schema bump so the daemon re-seeds it.
 The encrypted secrets file is carried across rather than archived with
 it: it is the one thing in there that cannot be regenerated.
 
+Not reaching the remote is a different fact, and the daemon treats it as
+one. "The repository holds something this build must not overwrite" --
+a schema stamp it cannot read, rows that will not import, a history that
+diverged and is somebody's to resolve -- stops the process, because
+starting would export today's database over it and push that. "The fetch
+did not complete" -- a network blip, an installation token that expired
+overnight, a repository renamed on GitHub -- says nothing about what the
+repository holds, and every deployment on GCP has a remote now, so
+exiting over it would take the UI down with the daemon and let systemd
+restart both into the same failure. So grain starts on the database it
+already has, with the working tree as the last fetch left it: the sync
+loop retries every 30s, and the State pane carries the reason until one
+works. `staterepo.ErrUnreachable` is what marks the second kind, and
+`fatalStateRepoLoad` in `cmd/grain` is where the decision is written
+down. The exception is a host with no copy of the repository at all --
+`ErrNoLocalCopy`, a fetch that failed with no commits in the working
+tree. There is nothing to carry on with there, and seeding one would
+commit a history the remote can never fast-forward onto.
+
 ### The remote is optional, by construction
 
 A `Config` with no `Remote` is a plain `git init` in the data directory:
@@ -3801,6 +3820,107 @@ being a **Ready** badge and nothing else. `grain settings
 -check-capability <id>` asks the same question from the host, which is
 where whoever is reading a failed task's error is usually already
 standing.
+
+### The question no button can ask: standing something up
+
+The check above is deliberately cheap and harmless, and that is also its
+ceiling. `gcp-key`'s is `Minter.ListKeys` — it proves the minter
+credential is alive and that GCP will still talk to it. It does not
+prove the *agent* account can create a VM, and those are different
+questions with different answers: the roles are different, the APIs are
+different, and an org policy or a dropped role binding can move one
+without touching the other.
+
+**Two scripts answer the larger question, and for a while nothing ran
+them.** `scripts/gce-vm-smoke.sh` creates a throwaway VM, ssh's into it
+and deletes it (about ninety seconds); `scripts/gke-cluster-smoke.sh`
+creates a cluster, runs a workload on it, resizes the node pool, relabels
+it and deletes it (about twelve minutes, a control plane and two
+`e2-medium` nodes). Both pass against a real project as
+`grain-main-agent`, and both are worth more than any assertion about
+configuration, because they exercise the same three verbs
+`terraform/gcp` and a `gcp-key` sandbox do. They also only ever answered
+when a human typed them, which is reliably *after* something has already
+failed in a way that reads as something else — the two `gcp-key`
+debugging sections above, twice over.
+
+**`.github/workflows/gcp-smoke.yml` runs both, nightly.** Nightly rather
+than weekly for `live-agent.yml`'s reason: what this samples drifts on
+somebody else's schedule — an org policy lands, a role binding is
+dropped, `constraints/iam.disableServiceAccountKeyCreation` gets
+enforced, a quota changes — so a longer interval buys nothing but a
+longer window in which every `gcp-key` task fails for a reason nobody has
+been told. A few cents a night, in a repository whose `tests.yml` already
+spends a 45-minute KVM job on every pull request.
+
+Two other homes were weighed. **Not a preflight in
+`terraform/gcp/deploy`**, which is the only shape that would *block* a
+deployment about to fail anyway: it would put twelve minutes in front of
+an interactive deploy to re-answer a question a few hours old, and it
+would answer it with the operator's own credential rather than with the
+agent account whose drift is the actual risk. **Not a grain schedule
+dispatching a task** either, tempting as it is to have grain watch its
+own credential: the answer would land as a task in the queue rather than
+as a red check, and a deployment whose `gcp-key` has stopped working is
+exactly the deployment that cannot dispatch the task that would say so.
+
+**Where the credential lives is the same boundary `live-agent.yml`
+draws**, and for the same reason — most branches here are pushed by
+grain's own agent runs, so a workflow file on a branch is code no human
+has read, and a *repository* secret is readable by any workflow on any
+branch push whichever file declares it. So a maintainer creates a
+`gcp-smoke` environment whose deployment branch policy names the default
+branch alone, holding `GCP_KEY_MINTER_KEY` as a secret and `GCP_PROJECT`
+and `GCP_AGENT_SERVICE_ACCOUNT` as variables. Until all three exist the
+"Require a credential" step fails every night with the instructions in
+the error, on purpose: it blocks no merge, and a job that skipped quietly
+would be this same gap in a new place.
+
+**It mints its own key rather than being handed one**, which is the part
+worth arguing. The obvious arrangement is a standing key for the agent
+account pasted into a secret; this authenticates as the same minter
+`pkg/capability/gcpkey` uses, mints a key for the agent account exactly
+the way a `gcp-key` grant does, and gives it back at the end of the run.
+That is what makes key creation itself part of what is sampled: the day
+`constraints/iam.disableServiceAccountKeyCreation` is enforced, every
+`gcp-key` task starts failing, and a job holding a static key would sail
+through it and report green. It also keeps CI's copy of the agent's power
+to the length of one run — and if the revoke never happens because a
+runner died, `gcpkey.Provider.Reap` deletes agent keys past
+`DefaultMaxKeyAge` on the deployment's own hourly sweep and does not care
+who minted them.
+
+**The `actAs` question is exposed rather than inherited.** Both scripts
+default to the self-acting shape — no service account on the VM, the
+calling account on the nodes — because the agent account has
+`iam.serviceAccounts.actAs` on itself alone, and attaching any other
+identity (including the default compute account gcloud reaches for on its
+own) needs `roles/iam.serviceAccountUser` **on that account**. That is
+what a real `gcp-key` sandbox can do, so it is what the nightly run
+samples. A `workflow_dispatch` input runs either leg the
+production-shaped way instead, which fails until somebody makes that
+grant — being able to ask on demand is the point, and making the nightly
+depend on a grant nobody has made yet is not.
+
+**Cleanup is the workflow's, not the scripts'.** Both delete what they
+made on every path out of themselves, Ctrl-C included, but a bash `EXIT`
+trap does not run when the runner kills the shell — which is what a
+cancelled job or a blown timeout does, and a leaked cluster bills all
+week. An `always()` step deletes anything carrying the scripts' own
+labels on either of two tests: created after this run minted its key, so
+it is this run's and goes now rather than billing until tomorrow; or more
+than two hours old, which no run of this job (about fifteen minutes) ever
+is, so that bound only ever decides about somebody else's leftovers — and
+is long enough not to take a cluster a human is standing in front of with
+`--keep`. By label rather than by name, so tonight's run clears last
+night's leak.
+
+`tests/deploy` holds the arrangement rather than trusting it — the
+trigger (no `push`, no `pull_request`), the `environment:`, both
+cleanup steps, and that the workflow names scripts that exist, are
+executable, parse under `bash -n`, and take the flags it passes them.
+What no test here can check is the one thing the workflow is for, which
+is why it is a schedule and not an assertion.
 
 ### The fourth credential: a named GitHub token
 

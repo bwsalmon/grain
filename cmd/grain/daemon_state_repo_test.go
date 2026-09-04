@@ -590,6 +590,121 @@ func TestADivergedStateRepositoryDoesNotStopTheDaemonFromStarting(t *testing.T) 
 	}
 }
 
+// A remote that cannot be reached at startup is the ordinary accident --
+// a network blip, an installation token that expired overnight, a
+// repository renamed on GitHub -- and it used to take the whole
+// deployment down with it: Load returned the fetch failure, run()
+// returned that, and systemd restarted the process into the same
+// failure, UI and all, with the reason only in the journal. The
+// database on this host is complete and the working tree is where the
+// last fetch left it, so there is nothing here that starting would lose.
+func TestAnUnreachableStateRepositoryDoesNotStopTheDaemonFromStarting(t *testing.T) {
+	dataDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dataDir, "secrets", "github"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dataDir, "secrets", "github", "credentials.json"),
+		[]byte(`{"*": "anonymous"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	remote := filepath.Join(t.TempDir(), "state.git")
+	if out, err := exec.Command("git", "init", "--bare", "--initial-branch=main", remote).CombinedOutput(); err != nil {
+		t.Fatalf("creating the remote: %v: %s", err, out)
+	}
+	if err := staterepo.SaveSettings(dataDir, staterepo.Settings{Remote: remote}); err != nil {
+		t.Fatal(err)
+	}
+
+	// A first daemon, long enough to clone the repository, file a task
+	// and push it -- so this host has a working tree it has loaded.
+	uiAddr := freeTCPAddr(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	runErr := make(chan error, 1)
+	go func() {
+		runErr <- run(ctx, config{
+			dataDir: dataDir, sandboxDir: t.TempDir(), maxWorkers: 1, pollInterval: time.Hour,
+			githubHost: "127.0.0.1:0", githubInsecureHTTP: true, uiAddr: uiAddr, actor: "tester",
+		})
+	}()
+	client := ui.NewHTTPClient("http://" + uiAddr)
+	waitForUI(t, ctx, client)
+	created, err := client.CreateTask(ctx, ui.CreateTaskRequest{
+		Title: "Filed before the remote stopped answering", Repo: "owner/payments-api",
+	})
+	if err != nil {
+		t.Fatalf("filing a task: %v", err)
+	}
+	if code, body := post(t, "http://"+uiAddr+"/api/state-repo/sync"); code != http.StatusOK {
+		t.Fatalf("sync returned %d: %s", code, body)
+	}
+	cancel()
+	<-runErr
+
+	// The remote goes away, and the deployment is restarted into it.
+	gone := remote + ".gone"
+	if err := os.Rename(remote, gone); err != nil {
+		t.Fatalf("taking the remote away: %v", err)
+	}
+	secondAddr := freeTCPAddr(t)
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	runErr2 := make(chan error, 1)
+	go func() {
+		runErr2 <- run(ctx2, config{
+			dataDir: dataDir, sandboxDir: t.TempDir(), maxWorkers: 1, pollInterval: time.Hour,
+			githubHost: "127.0.0.1:0", githubInsecureHTTP: true, uiAddr: secondAddr, actor: "tester",
+		})
+	}()
+	defer func() {
+		cancel2()
+		<-runErr2
+	}()
+	second := ui.NewHTTPClient("http://" + secondAddr)
+	// The UI answering at all is most of what is being tested: this is
+	// the process that used to exit before it ever bound the port.
+	waitForUI(t, ctx2, second)
+	if _, err := second.Task(ctx2, created.ID); err != nil {
+		t.Fatalf("the deployment came up without the state it had: %v", err)
+	}
+	// And it says so where an operator looks, from the first paint rather
+	// than after a tick of the sync loop: the pane carries the reason the
+	// load could not finish.
+	code, body := get(t, "http://"+secondAddr+"/api/state-repo")
+	if code != http.StatusOK {
+		t.Fatalf("status returned %d: %s", code, body)
+	}
+	var status ui.StateRepoStatus
+	if err := json.Unmarshal([]byte(body), &status); err != nil {
+		t.Fatalf("decoding the status: %v: %s", err, body)
+	}
+	if status.Error == "" {
+		t.Fatalf("the pane reports nothing wrong with a deployment out of touch with its remote: %+v", status)
+	}
+	if !strings.Contains(status.Error, "could not be reached") {
+		t.Fatalf("the pane does not say the remote is unreachable: %q", status.Error)
+	}
+
+	// The remote comes back, and the deployment catches up on demand --
+	// nothing had to be restarted for the outage to end.
+	if err := os.Rename(gone, remote); err != nil {
+		t.Fatalf("bringing the remote back: %v", err)
+	}
+	if _, err := second.CreateTask(ctx2, ui.CreateTaskRequest{
+		Title: "Filed while the remote was away", Repo: "owner/payments-api",
+	}); err != nil {
+		t.Fatalf("filing a task: %v", err)
+	}
+	if code, body := post(t, "http://"+secondAddr+"/api/state-repo/sync"); code != http.StatusOK {
+		t.Fatalf("sync returned %d: %s", code, body)
+	}
+	out, err := exec.Command("git", "--git-dir", remote, "show", "main:"+staterepo.TablesDir+"/task.json").CombinedOutput()
+	if err != nil {
+		t.Fatalf("reading the dump out of the remote: %v: %s", err, out)
+	}
+	if !strings.Contains(string(out), "Filed while the remote was away") {
+		t.Fatalf("what was written during the outage never reached the remote:\n%s", out)
+	}
+}
+
 func gitIn(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	cmd := exec.Command("git", args...)

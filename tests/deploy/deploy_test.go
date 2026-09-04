@@ -544,6 +544,90 @@ func TestOnlyTheScheduledLiveJobHoldsAModelCredential(t *testing.T) {
 	}
 }
 
+// The GCP credential lives in exactly one workflow too, and it is one no
+// branch can trigger.
+//
+// gcp-smoke.yml stands a real VM and a real GKE cluster up nightly
+// (scripts/gce-vm-smoke.sh, scripts/gke-cluster-smoke.sh), which means CI
+// holds a minter for the deployment's own agent service account. Every
+// part of live-agent.yml's argument applies, and the stakes are higher:
+// this credential can create machines and bill for them.
+//
+// Three things are asserted because they are what make the arrangement
+// safe rather than merely intended. The trigger: no `push` and no
+// `pull_request`, since a repository secret is readable by any workflow
+// on any branch push whichever file declares it. The `environment:`,
+// which is the only part GitHub itself enforces, through that
+// environment's branch policy. And the cleanup: a run that leaks is a run
+// that bills, so the minted key is revoked and the leftovers deleted on
+// every path out, `if: always()`.
+func TestOnlyTheScheduledSmokeJobHoldsAGCPCredential(t *testing.T) {
+	smoke := stripComments(gcpSmokeWorkflow(t))
+
+	contains(t, smoke, "schedule:")
+	contains(t, smoke, "workflow_dispatch:")
+	contains(t, smoke, "environment: gcp-smoke")
+	for _, forbidden := range []string{"push:", "pull_request:"} {
+		if strings.Contains(upTo(t, smoke, "jobs:"), forbidden) {
+			t.Errorf("gcp-smoke.yml triggers on %s: the minter it holds would then be readable by any branch, which is what the environment exists to prevent", forbidden)
+		}
+	}
+
+	// Minted per run rather than parked in a secret -- which is also the
+	// only way this job notices that minting itself has stopped working,
+	// the failure that breaks every gcp-key grant at once.
+	contains(t, smoke, "service-accounts keys create")
+
+	sweep := between(t, smoke, "Delete anything left behind", "- name: Revoke")
+	contains(t, sweep, "if: always()")
+	contains(t, sweep, "instances delete")
+	contains(t, sweep, "clusters delete")
+
+	revoke := from(t, smoke, "Revoke the minted key")
+	contains(t, revoke, "if: always()")
+	contains(t, revoke, "service-accounts keys delete")
+}
+
+// The nightly job runs the scripts that exist, with flags they take.
+//
+// Nothing else would catch a rename or a dropped flag: this workflow
+// fires from a schedule on the default branch, so the first report of a
+// broken command line is a red run at night, days after the commit that
+// caused it. Same reasoning as the `--- PASS` assertions the real-VM job
+// makes about its own suite.
+func TestTheSmokeWorkflowRunsTheScriptsAsTheyAre(t *testing.T) {
+	smoke := stripComments(gcpSmokeWorkflow(t))
+	gce := read(t, "scripts", "gce-vm-smoke.sh")
+	gke := read(t, "scripts", "gke-cluster-smoke.sh")
+
+	for _, script := range []string{"gce-vm-smoke.sh", "gke-cluster-smoke.sh"} {
+		contains(t, smoke, "./scripts/"+script)
+		executable(t, "scripts", script)
+		out, err := exec.Command("bash", "-n", filepath.Join(repoRoot(t), "scripts", script)).CombinedOutput()
+		if err != nil {
+			t.Errorf("bash -n scripts/%s: %v\n%s", script, err, out)
+		}
+	}
+
+	// The one shape decision the workflow exposes: `default` asks for the
+	// production-shaped identity -- the project's own default compute
+	// account, which needs roles/iam.serviceAccountUser on it -- rather
+	// than the self-acting default both scripts fall back to. Each script
+	// spells it differently because each attaches it to a different thing.
+	contains(t, smoke, "--service-account=default")
+	contains(t, gce, "--service-account)")
+	contains(t, smoke, "--node-service-account=default")
+	contains(t, gke, "--node-service-account)")
+
+	// The zone reaches both scripts through the environment rather than
+	// through a flag, which is the only reason one `env:` at the top of
+	// the workflow governs both legs.
+	contains(t, smoke, "ZONE: ${{ inputs.zone || 'us-central1-a' }}")
+	for _, script := range []string{gce, gke} {
+		contains(t, script, `ZONE="${ZONE:-`)
+	}
+}
+
 // A deployment is told nothing about its sandbox image.
 //
 // One image, not two: the guest a task runs and the container it runs in
