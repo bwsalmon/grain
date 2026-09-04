@@ -1005,22 +1005,23 @@ The `mcp.NewMockTools` escape hatches (`ask_question`, `request_secret`,
 `propose_task`, `add_review_comment`) a run's own MCP server wires
 internally are still discarded rather than acted on *while a run is
 live* — `ProcessResult` only ever inspects `agent.Result.ToolCalls`
-after a run finishes, and relays `ask_question`/`request_secret`/
-`comment_on_issue`/
-`propose_task` for real at that point (see the package tree entry
-above); giving `Framework.Run` (or its caller) a way to inject a live
-sink instead is still open, and `add_review_comment` calls are still
-just recorded and nothing more, since nothing yet dispatches with review
-intent for one to attach to. What the *agent* is told about all five is
+after a run finishes, and relays all five for real at that point (see the
+package tree entry above); giving `Framework.Run` (or its caller) a way
+to inject a live sink instead is still open. `add_review_comment` is
+relayed too now that a review dispatch exists to attach one to: on a
+review task's run its calls become a draft review on the pull request
+under review, repeated on that task's own conversation and taking it off
+automatic merge until a human has read them; on any other run they are
+relayed into that run's own task conversation. What the *agent* is told about all five is
 that relay rather than that sink: the tools' descriptions and
 confirmations used to answer every production run with "mocked — no
 GitHub comment was posted", and describe v1's issue, trigger label and
 issue-per-proposal, none of which has been true since tasks became rows
 (docs/agent-ergonomics.md, findings 1 and 2). They now say where the
 words really land — the task's own conversation, when the run
-finishes — and `add_review_comment` says the one true thing about
-itself, that nothing relays it anywhere and `comment_on_issue` is the
-call to make for feedback a human needs to read.
+finishes — and `add_review_comment` names both of its own destinations,
+the pull request under review and, failing that, this task's
+conversation.
 `pkg/mcp/mock_tools_test.go` is what holds them to it. Neither sandbox stand-in carries any real
 isolation: a real deployment still needs the actual host adapter
 (creating a real VM/container per task and running commands in it over
@@ -1070,11 +1071,12 @@ review instead of pushing) and `/depends` (cross-task ordering) all need a
 dispatch shape `RunDispatch`/`BuildPrompt` don't build yet — every task
 today is `IntentImplement`, fresh branch, no continuation — and are listed
 in `directives.go`'s own doc comment as exactly that, not silently
-dropped. `add_review_comment` calls from a run are recorded (`agent.
-Result.ToolCalls` carries them, the same seam `ProcessResult` reads
-`ask_question`/`comment_on_issue`/`propose_task` off of) but never turned
-into a real `CreateReview` call for the same reason: nothing yet dispatches
-with review intent for one to attach to. `propose_task`'s `depends_on` is
+dropped. `add_review_comment` calls from a run are read off the same seam
+(`agent.Result.ToolCalls`, where `ProcessResult` already finds
+`ask_question`/`comment_on_issue`/`propose_task`) and turned into a real
+`CreateReview` call whenever the run has a pull request behind it — which
+a review task's does, through the task it reviews
+(`relayReviewFeedback`). `propose_task`'s `depends_on` is
 resolved now: `relayProposedTasks` files each entry as a real
 `model.LinkDependsOn`, against an existing task id (the proposing task's
 own included, which is what a piece split out of the work in hand names)
@@ -1460,8 +1462,9 @@ builds and discards internally on every call, so nothing happens at the
 moment the agent makes one. `ProcessResult` only sees them after the
 fact, through the `agent.Result` `Run` returns, not while the run is
 live — and then relays a question, a secret request, a closing comment
-and a proposal into
-the store for real (`add_review_comment` alone goes nowhere). Giving
+and a proposal into the store for real, and a review comment onto the
+pull request under review (or, failing one, into the task's own
+conversation). Giving
 `Framework.Run` (or its caller) a way to inject a real sink, so the
 effect could happen while the run is still going, is still open.
 

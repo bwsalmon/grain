@@ -97,15 +97,26 @@ gets that feedback counted in its outcome detail and discarded.
   feedback really lands (this run's outcome, and nowhere else), so an
   agent can decide to put it in a `comment_on_issue` call instead.
 
-**Done** (grain/task-149), the second half. Both its description and its
-confirmation now say that nothing relays these — no draft review, no
-pull request, no comment on the task — and name `comment_on_issue` as
-the call to make for feedback that has to be read. The first half is
-deliberately not done: there is no review dispatch to set such a flag,
-so today it could only gate the tool off every run, and a run that is
-going to write review feedback anyway is better served by being told
-where it goes. `addReviewCommentTool`'s own doc comment says so, and the
-flag is worth adding the day something can set it.
+**Done** (grain/task-149), the second half: both its description and its
+confirmation stopped promising a draft review nobody would open.
+
+**Done** (grain/task-322), the thing behind it. Review dispatches exist
+now (grain/task-284), and a review task has a pull request two links
+away — `LinkProposedBy` to the task it reviews, `LinkFixes` from there to
+the pull request — so `orchestrator.relayReviewFeedback` posts a run's
+`add_review_comment` calls as a real draft review on it, repeats them on
+the reviewed task's own conversation (a draft is visible only to the
+credential that created it), and takes that change off automatic merge
+until a human has read them. A run with no pull request behind it has
+them relayed into its own task's conversation rather than dropped. The
+texts say both destinations.
+
+The first half — registering the review wording only for a dispatch that
+is actually a review, behind a `grain mcpserver` flag — is still not
+done, and is now worth doing for the first time: something could set that
+flag. What it would buy is a description that names *this* run's pull
+request instead of describing two cases, which is all a static
+description can do from a process that cannot see the store.
 
 ## 3. A `run_command` that timed out does not say so
 
