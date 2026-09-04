@@ -84,6 +84,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -610,37 +611,221 @@ func mcpConfigJSON(grainBinaryPath string, mcpArgs []string) ([]byte, error) {
 	})
 }
 
-// apiKeySettingsJSON is the content of agy's own settings file for a run
-// that authenticates with a Gemini API key: the one setting that makes
+// settingsJSON is the content of agy's own settings file: the permission
+// rules that tell agy which tools this run may use, plus -- for a run
+// that authenticates with a Gemini API key -- the one setting that makes
 // agy read GEMINI_API_KEY at all rather than expecting the OAuth session
 // a private HOME cannot have (see this package's doc comment).
 //
 // Nothing else is written into it. agy merges what it finds with its own
-// defaults, so naming only the setting this package actually depends on
+// defaults, so naming only the settings this package actually depends on
 // leaves every other CLI behaviour at whatever the installed binary
 // chose.
-func apiKeySettingsJSON() ([]byte, error) {
-	return json.Marshal(map[string]any{"modelProvider": apiKeyModelProvider})
+func settingsJSON(apiKeyAuth bool) ([]byte, error) {
+	settings := map[string]any{"permissions": permissionRules()}
+	if apiKeyAuth {
+		settings["modelProvider"] = apiKeyModelProvider
+	}
+	return json.Marshal(settings)
 }
 
-// The two paths, inside the private HOME writeAgyHome builds, that agy
-// reads its MCP servers and its own settings from. Named once, here,
-// because they are the whole of what this package depends on in agy's
-// on-disk layout rather than in its command line or its output: if a
-// future agy moves either file, these two vars are the change.
+// permissionRules is the "permissions" block of that settings file: agy's
+// own tools denied by name, grain's allowed by name.
 //
-// They are two different files in two different directories on purpose,
-// not an oversight: agy keeps MCP servers in ~/.gemini/config/
-// mcp_config.json (what `agy mcp add` edits and `agy mcp list` reads)
-// and CLI settings in ~/.gemini/antigravity-cli/settings.json. Written
-// anywhere else -- ~/.gemini/settings.json, say, which is where Gemini
-// CLI kept both -- they are silently ignored: `agy mcp list` reports "No
-// MCP servers configured", and a run authenticates as though no API key
-// had been configured at all.
+// The rules are real and they load. Measured against agy 1.1.26 by
+// writing this block into a private HOME and asking the binary what it
+// read back (`agy -p /permissions`, which print mode answers without an
+// agent turn), the reply is one tab-separated record per rule --
+// "global<TAB>deny<TAB>run_command" -- so the key is parsed, kept, and
+// carried at global scope, and a malformed value (`"deny": 12345`) is
+// dropped in silence with no rule and no complaint. That is the whole of
+// what has been proven, and it is deliberately less than "agy cannot run
+// these tools":
+//
+//   - Nothing here changes the roster. The same probe read the `init`
+//     event of a real (if unauthenticated) stream-json session with and
+//     without this block, and both advertise the identical 55 native
+//     tools. A denied tool is one the model still sees and still calls;
+//     the denial, if it lands at all, lands on the call.
+//   - Run passes --dangerously-skip-permissions, which puts the session in
+//     agy's "always-proceed" permission mode (that same `init` event
+//     reports permission_mode "always-proceed" with the flag and
+//     "request-review" without it), and agy's own interactive prompt calls
+//     an always-deny decision "overridden by dangerously-skip-permissions".
+//     Whether that override reaches a rule written here is not something a
+//     run without a model credential can be made to answer, so this
+//     package does not claim it either way.
+//
+// So this block is the cheap half of the answer and hookConfigJSON is the
+// half with teeth; what actually contains a native tool is still a kontur
+// sandbox. It is written anyway because it costs a run nothing, because
+// it is the documented place to say what a session may do, and because a
+// deny rule that starts being enforced is a deny rule already in place.
+//
+// The names are spelled bare (`run_command`, not `run_command(*)`), which
+// is how agy's own allow rules read for a whole tool rather than one
+// resource of it; both spellings survive the round trip above. Grain's
+// tools are allowed by their exact eagerly registered names rather than
+// by a `mcp_grain-sandbox_*` glob, because agy matches an approval rule
+// strictly rather than as a pattern unless it is prefixed `regex:`, and a
+// glob that matches nothing would allow nothing.
+func permissionRules() map[string]any {
+	var allow []string
+	for _, name := range publishedTools() {
+		allow = append(allow, mcp.AgyQualifiedToolName(name))
+	}
+	return map[string]any{
+		"allow": allow,
+		"deny":  append([]string(nil), withheldNativeTools...),
+	}
+}
+
+// The three paths, inside the private HOME writeAgyHome builds, that agy
+// reads its MCP servers, its own settings and its lifecycle hooks from.
+// Named once, here, because they are the whole of what this package
+// depends on in agy's on-disk layout rather than in its command line or
+// its output: if a future agy moves one of them, these three vars are the
+// change.
+//
+// They are not all in one directory, and that is not an oversight: agy
+// keeps MCP servers in ~/.gemini/config/mcp_config.json (what `agy mcp
+// add` edits and `agy mcp list` reads) and CLI settings in
+// ~/.gemini/antigravity-cli/settings.json. Written anywhere else --
+// ~/.gemini/settings.json, say, which is where Gemini CLI kept both --
+// they are silently ignored: `agy mcp list` reports "No MCP servers
+// configured", and a run authenticates as though no API key had been
+// configured at all. hooks.json sits beside mcp_config.json because both
+// are "customizations" in agy's own vocabulary, and ~/.gemini/config is
+// the global customization root its shipped guide names (the binary
+// unpacks that guide into a fresh HOME under
+// antigravity-cli/builtin/skills/agy-customizations/, which is where the
+// hook contract quoted in hookConfigJSON comes from).
 var (
 	mcpConfigRelPath   = filepath.Join(".gemini", "config", "mcp_config.json")
 	cliSettingsRelPath = filepath.Join(".gemini", "antigravity-cli", "settings.json")
+	hooksConfigRelPath = filepath.Join(".gemini", "config", "hooks.json")
 )
+
+// hookConfigJSON is the content of agy's hooks.json: one PreToolUse hook,
+// matching every tool, whose command is grain forking itself back into
+// HookDecision (cmd/grain's "agy-tool-hook" subcommand, the same
+// fork-myself trick mcpConfigJSON plays for the MCP server).
+//
+// This is the one denial agy documents as a denial. Its own shipped guide
+// (builtin/skills/agy-customizations/docs/hooks.md, unpacked into any
+// fresh HOME) gives PreToolUse the contract "use to gate, block, or audit
+// tool executions": the hook is handed {"toolCall": {"name": ..., "args":
+// ...}} on stdin before the tool runs, and a reply of {"decision":
+// "deny"} is spelled out as "hard block the execution immediately" --
+// which is a different mechanism from the permission prompt that
+// --dangerously-skip-permissions auto-approves, and the reason this is
+// here as well as permissionRules.
+//
+// The matcher is "*" rather than a list of tool names because the names
+// it matches on are agy's step types, and the name grain must decide on
+// is the one inside the payload; HookDecision reads that instead. See
+// there for why the decision is a deny list rather than an allow list,
+// and what a run does when this hook does not work at all.
+//
+// The schema is agy's own: a map from hook name to its per-event
+// configuration, each event a list of {matcher, hooks} groups. It is not
+// validated on load -- a hooks.json agy cannot make sense of leaves a run
+// with no hooks and no complaint -- so what proves this file is the shape
+// agy reads is `agy -p /hooks`, which prints the loaded hooks the way
+// -p /permissions prints the loaded rules.
+func hookConfigJSON(grainBinaryPath string) ([]byte, error) {
+	return json.Marshal(map[string]any{
+		hookName: map[string]any{
+			"PreToolUse": []any{map[string]any{
+				"matcher": "*",
+				"hooks": []any{map[string]any{
+					"type":    "command",
+					"command": shellQuote(grainBinaryPath) + " " + HookSubcommand,
+					// Seconds. A fork of grain that only reads stdin and
+					// writes a decision does not take one of these, but a
+					// loaded controller can be slow to start a process,
+					// and agy's own default is 30.
+					"timeout": 30,
+				}},
+			}},
+		},
+	})
+}
+
+// hookName is what this run's hook is called in hooks.json. agy merges
+// hooks from every source it finds by name, so a name of grain's own
+// keeps this one distinct from anything a future agy ships built in.
+const hookName = "grain-native-tool-denial"
+
+// HookSubcommand is the argv[1] cmd/grain matches to run HookDecision.
+// Named here rather than there because this package is what writes it
+// into agy's config, and the two must agree.
+const HookSubcommand = "agy-tool-hook"
+
+// shellQuote wraps a path for the `sh -c` agy runs a hook command
+// through. Deployments put grain in /usr/local/bin, but a path is not
+// grain's to assume.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// HookDecision answers one PreToolUse payload: it returns the JSON agy
+// reads back on stdout, and it is the whole of what cmd/grain's
+// "agy-tool-hook" subcommand does.
+//
+// It denies by name, from withheldNativeTools, rather than allowing by
+// name or by grain's prefix, and the asymmetry is the safety property.
+// This hook stands between the model and every tool call a run makes,
+// including grain's own; a rule of "deny anything not named
+// mcp_grain-sandbox_*" would turn any surprise in the payload -- a name
+// spelled differently than expected, an agy version that reports MCP
+// calls under a step type instead of a tool name -- into a run that can
+// do nothing at all, and a run's own transcript is a slow way to find
+// that out. A deny list can only ever fail the other way: a payload this
+// does not recognise gets no decision, and the call proceeds exactly as
+// it does today.
+//
+// The same reasoning covers a broken hook. An unparseable payload, a
+// missing name, a grain binary that is not there: agy takes an empty
+// decision as no opinion, so the failure mode is the behaviour this
+// repository already had, not a stalled run.
+func HookDecision(payload []byte) []byte {
+	var in struct {
+		ToolCall struct {
+			Name string `json:"name"`
+		} `json:"toolCall"`
+	}
+	if err := json.Unmarshal(payload, &in); err != nil {
+		return noOpinion
+	}
+	// The raw name, deliberately not mcp.BareToolName's: that would strip
+	// grain's own prefix and leave mcp_grain-sandbox_run_command matching
+	// the deny list as "run_command", which is precisely the name
+	// collision toolPreamble spends a paragraph on -- here it would deny
+	// the run the one tool that does reach its sandbox.
+	if !slices.Contains(withheldNativeTools, in.ToolCall.Name) {
+		return noOpinion
+	}
+	reply, err := json.Marshal(map[string]any{
+		"decision": "deny",
+		// Read by the model, so it says what to do instead rather than
+		// only what it may not do -- the same argument toolPreamble makes
+		// at greater length.
+		"reason": in.ToolCall.Name + " runs on the machine hosting this session rather than in your " +
+			"sandbox, so grain neither sees the call nor keeps what it does. Use " +
+			mcp.AgyQualifiedToolName(in.ToolCall.Name) + " instead, or another " +
+			mcp.AgyQualifiedToolName("") + "* tool.",
+	})
+	if err != nil {
+		return noOpinion
+	}
+	return reply
+}
+
+// noOpinion is the reply that leaves a tool call to whatever agy would
+// have done with it. It is what HookDecision returns for every name it
+// was not asked to deny, and for every payload it could not read.
+var noOpinion = []byte(`{}`)
 
 // apiKeyModelProvider is the "modelProvider" value that turns
 // GEMINI_API_KEY into a working credential. agy's other providers are
@@ -648,10 +833,11 @@ var (
 const apiKeyModelProvider = "gemini"
 
 // writeAgyHome builds the private HOME one run gets: a fresh directory
-// containing the config naming this run's own MCP server and, when this
-// run has an API key to authenticate with, the settings file that makes
-// agy use it. It returns that directory and a cleanup func the caller
-// defers.
+// containing the config naming this run's own MCP server, the settings
+// file carrying this run's permission rules (and, when this run has an
+// API key to authenticate with, the setting that makes agy use it), and
+// the hooks.json that puts grain in front of every tool call. It returns
+// that directory and a cleanup func the caller defers.
 //
 // A private HOME rather than `agy mcp add` is the whole point -- see this
 // package's own doc comment on why a per-user registration cannot express
@@ -664,13 +850,18 @@ func writeAgyHome(grainBinaryPath string, mcpArgs []string, apiKeyAuth bool) (ho
 	if err != nil {
 		return "", nil, fmt.Errorf("antigravity: building agy's mcp config: %w", err)
 	}
-	files := map[string][]byte{mcpConfigRelPath: mcpConfig}
-	if apiKeyAuth {
-		settings, err := apiKeySettingsJSON()
-		if err != nil {
-			return "", nil, fmt.Errorf("antigravity: building agy's settings: %w", err)
-		}
-		files[cliSettingsRelPath] = settings
+	settings, err := settingsJSON(apiKeyAuth)
+	if err != nil {
+		return "", nil, fmt.Errorf("antigravity: building agy's settings: %w", err)
+	}
+	hooks, err := hookConfigJSON(grainBinaryPath)
+	if err != nil {
+		return "", nil, fmt.Errorf("antigravity: building agy's hook config: %w", err)
+	}
+	files := map[string][]byte{
+		mcpConfigRelPath:   mcpConfig,
+		cliSettingsRelPath: settings,
+		hooksConfigRelPath: hooks,
 	}
 
 	home, err = os.MkdirTemp("", "grain-agy-home-*")
@@ -741,15 +932,26 @@ func workDir(cfg agent.RunConfig, home string) string {
 // (tests/e2e/live_test.go logs the whole of it), which is where a name
 // added to this list should come from too.
 //
-// It is deliberately not the whole roster. agy advertises 57 native
-// tools and pins none of them, so a hand-copied catalogue would drift
-// silently and read as authoritative while doing so; what the prompt
-// says after this list -- anything whose name does not carry grain's
-// prefix -- is the rule, and these are the examples that make it
-// concrete.
+// It is deliberately not the whole roster. agy advertises 55 native tools
+// (measured on 1.1.26's own init event) and pins none of them, so a
+// hand-copied catalogue would drift silently and read as authoritative
+// while doing so; what the prompt says after this list -- anything whose
+// name does not carry grain's prefix -- is the rule, and these are the
+// examples that make it concrete.
+//
+// It is the whole of the roster that reads, writes or executes, though,
+// because this list is no longer only prose: permissionRules denies these
+// names in agy's settings and HookDecision blocks a call to one, so a
+// name missing from here is a tool nothing stops. Everything else agy
+// carries -- its browser, its subagents, its knowledge store -- is left
+// alone deliberately: those do not touch the controller's filesystem, and
+// a denial nobody has watched work is safest kept to the tools that
+// motivate it.
 var withheldNativeTools = []string{
-	"run_command", "view_file", "write_to_file",
-	"replace_file_content", "grep_search", "find_by_name",
+	"run_command", "command_status", "send_command_input",
+	"view_file", "write_to_file", "replace_file_content",
+	"multi_replace_file_content", "sed_file", "list_dir",
+	"grep_search", "find_by_name", "notebook_edit", "notebook_execution",
 }
 
 // sandboxToolNames is the handful of grain tools that actually act on the
