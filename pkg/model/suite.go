@@ -172,9 +172,9 @@ type SuiteRun struct {
 	// off Base, and once it merges the next task to run (the next item
 	// in this pass, or the first item of the next pass) sees that
 	// change simply by cloning Base's own current tip -- the same
-	// stacking trick fileFixTask already uses with one task's own
-	// branch as Base, applied here with a fixed Base every task in the
-	// run shares instead.
+	// stacking trick the merge queue's own fix tasks used to play with
+	// one task's own branch as Base, applied here with a fixed Base every
+	// task in the run shares instead.
 	Base            string
 	Items           []SuiteItem
 	Mode            SuiteMode

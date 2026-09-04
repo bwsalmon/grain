@@ -257,6 +257,20 @@ func (m *stateManager) status(ctx context.Context) ui.StateRepoStatus {
 			out.SecretsError = err.Error()
 		}
 	}
+	// Read from the repository rather than from m.lastErr, because a
+	// refused workflow is not one: installWorkflow undoes its commit and
+	// lets the sync carry on, so nothing about it ever reaches the error
+	// this manager remembers -- deliberately, since a deployment must not
+	// stop pushing its settings over a file worth one CI step. The
+	// repository keeps the fact in a marker of its own, and this is where
+	// it comes back out into the pane.
+	if at, refused := m.repo.WorkflowRefusedAt(ctx); refused {
+		out.WorkflowRefused = true
+		out.WorkflowFile = staterepo.WorkflowFile
+		if !at.IsZero() {
+			out.WorkflowRefusedAt = &at
+		}
+	}
 	if m.lastErr != nil {
 		// A merge waiting to be loaded is a state, not a failure, and the
 		// pane says a different thing about it -- so it is reported as

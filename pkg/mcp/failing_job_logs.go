@@ -10,7 +10,7 @@ package mcp
 // not the runner and may not be able to run the failing suite at all.
 // github.JobLog's own doc comment is where that gap is written down
 // ("a check run says only that a job called 'go' did not pass"), and
-// orchestrator's fileFixTask already closes it for the other reader of a
+// orchestrator's requeueForRepair already closes it for the other reader of a
 // red build: the fix task the merge queue files carries the end of each
 // failing job's log in its body rather than a job name and an invitation
 // to go and find out what it said. A run watching its own CI now gets
@@ -68,7 +68,7 @@ func failingJobLogs(client PullRequestReader, scope PullRequestScope, sha string
 		}
 		// Four backticks, so a log that itself contains a fenced block --
 		// any Go test printing three backticks does -- cannot close this
-		// one early. fileFixTask fences the same way, for the same reason.
+		// one early. requeueForRepair fences the same way, for the same reason.
 		fmt.Fprintf(&b, "\n````\n%s\n````\n", github.JobLogExcerpt(l.Log))
 		if l.Truncated {
 			b.WriteString("\n(the tail of the log, not all of it -- the job's own page above " +

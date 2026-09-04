@@ -144,6 +144,37 @@ describe("StateRepoPanel", () => {
     expect(screen.getByText(/authored by someone/)).toBeInTheDocument();
   });
 
+  it("says when grain could not install the check that runs on pull requests", async () => {
+    api.mockResolvedValueOnce({
+      ...local,
+      mode: "remote",
+      remote: "https://example.invalid/x.git",
+      workflowRefused: true,
+      workflowRefusedAt: "2026-09-04T09:30:00Z",
+      workflowFile: ".github/workflows/grain-state-check.yml",
+    });
+    render(<StateRepoPanel showError={() => {}} />);
+
+    // The condition itself, and the two ways out of it: install the file
+    // by hand, or tell grain to stop offering it. A deployment syncing
+    // happily with nothing validating its pull requests is the whole
+    // reason this sentence exists.
+    expect(await screen.findByText(/are not being checked/i)).toBeInTheDocument();
+    expect(screen.getByText("grain state ci")).toBeInTheDocument();
+    expect(screen.getByText(".github/workflows/grain-state-check.yml")).toBeInTheDocument();
+  });
+
+  // Every other deployment: the check is installed, or was never offered
+  // in the first place, and a pane that mentioned it anyway would be
+  // teaching operators to ignore the one that means something.
+  it("says nothing about the check when there is nothing wrong with it", async () => {
+    api.mockResolvedValueOnce({ ...local, mode: "remote", remote: "https://example.invalid/x.git" });
+    render(<StateRepoPanel showError={() => {}} />);
+
+    await screen.findByText("https://example.invalid/x.git");
+    expect(screen.queryByText(/are not being checked/i)).not.toBeInTheDocument();
+  });
+
   it("warns when the repository was written by a different schema", async () => {
     api.mockResolvedValueOnce({ ...local, schemaVersion: 15, buildSchemaVersion: 16 });
     render(<StateRepoPanel showError={() => {}} />);

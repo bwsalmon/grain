@@ -179,6 +179,15 @@ body {
   border-bottom: 1px solid var(--border);
 }
 .content-header h2 { margin: 0; font-size: 1rem; font-weight: 600; }
+/* The page's item glyph, ahead of its title. Centred on the line rather
+   than on the header's baseline, which for a replaced element is its
+   bottom edge and would hang the figure a third of itself too high.
+   Same tone as the count beside it: the heading is the loud part. */
+.content-header .header-icon {
+  display: flex;
+  align-self: center;
+  color: var(--text-tertiary);
+}
 .content-header .count { color: var(--text-tertiary); font-size: 0.85rem; font-variant-numeric: tabular-nums; }
 
 /* ---------- Status dot: a small colored circle stands in for the state
@@ -200,6 +209,18 @@ body {
 .dot-completed { background: var(--state-completed); }
 .dot-closed { background: var(--state-closed); }
 .dot-blocked { background: var(--danger); }
+
+/* ---------- The sidebar nav's icon column. A state entry's marker is an
+   8px dot and a list entry's is a 16px glyph (ItemGlyph.jsx), so without
+   a fixed box the two groups' labels would start 8px apart from each
+   other down one rail. Same job as .badge-icon does for a task row. --- */
+.nav-icon {
+  width: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+}
 
 main { flex: 1; min-width: 0; padding: 0 0 2.5rem; overflow-y: auto; }
 
@@ -479,6 +500,16 @@ main.board { display: flex; flex-direction: column; overflow: hidden; padding-bo
 @media (prefers-reduced-motion: reduce) {
   .grain-mark-sheet { animation: none; }
 }
+
+/* A run that is the merge queue repairing a task's own pull request
+   branch rather than writing the change (StateDot's own `repairing`,
+   ui.Task.Repairing). The sheet is an alpha mask, so the whole
+   difference is one `background`: the same mark, moving the same way, in
+   state-completed's green instead of the accent's gold -- because a row
+   that has gone back to running has not gone back to the beginning, it
+   is a finished change being unstuck, and the two should not look alike
+   at a glance. */
+.grain-mark-sheet.grain-mark-repair { background: var(--state-completed); }
 
 /* .badge-mark is for a "running" badge showing a task's live status
    (bwsalmon/agents#586): StateDot renders the grain mark's animated
