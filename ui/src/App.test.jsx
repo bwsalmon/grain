@@ -482,6 +482,45 @@ describe("App", () => {
     expect(window.location.pathname).toBe("/repos/acme/other");
   });
 
+  // grain/task-287: the board is the same tasks as the list, in columns
+  // -- so it is reached from the rail, has a URL of its own, and feeds
+  // the same selection the batch-actions bar acts on.
+  it("switches to the board, laying the same tasks out in columns", async () => {
+    setupApi();
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByText("Fix bug");
+
+    await user.click(screen.getByRole("button", { name: "Board" }));
+
+    expect(await screen.findByRole("heading", { name: "Board" })).toBeInTheDocument();
+    expect(screen.getByText("Fix bug").closest(".board-column")).toHaveTextContent("Queued");
+    expect(screen.getByText("Add feature").closest(".board-column")).toHaveTextContent("Proposed");
+    expect(window.location.pathname).toBe("/board");
+  });
+
+  it("opens the board on a fresh load of /board", async () => {
+    window.history.replaceState(null, "", "/board");
+    setupApi();
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Board" })).toBeInTheDocument();
+    expect(window.location.pathname).toBe("/board");
+  });
+
+  it("selects a task from a board card and runs a batch action on it", async () => {
+    window.history.replaceState(null, "", "/board");
+    setupApi();
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByRole("heading", { name: "Board" });
+
+    await user.click(screen.getByRole("checkbox", { name: "Select 2" }));
+    await user.click(screen.getByRole("button", { name: "Approve" }));
+
+    await waitFor(() => expect(api).toHaveBeenCalledWith("/api/tasks/2/approve", { method: "POST" }));
+  });
+
   it("switches to the schedules pane, showing its own list and count in the sidebar", async () => {
     const schedule = { id: "sched-1", title: "Nightly dependency bump", description: "", repo: "acme/widgets", base: "", autoMerge: false, recurrence: { kind: "everyNHours", everyNHours: 24 }, enabled: true, nextRunAt: "2026-08-29T00:00:00Z" };
     setupApi(initialTasks, [schedule]);
