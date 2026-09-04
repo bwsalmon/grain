@@ -779,7 +779,7 @@ main.board {
   display: flex;
   flex-direction: column;
   flex: 1;
-  min-height: 26rem;
+  min-height: 32rem;
 }
 
 .empty {
