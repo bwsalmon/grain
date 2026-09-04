@@ -2,7 +2,9 @@
 
 > **Proposal.** Nothing in this document ships yet. `pkg/grain` carries
 > the interface and the controller's decision table (`Reconcile`) as
-> compiling, tested Go; everything else here is the argument for them and
+> compiling, tested Go, and [`docs/grain-cli.md`](grain-cli.md) is the
+> wire contract this design implies — the in-container CLI, its
+> documents, and the trajectory records; everything else here is the argument for them and
 > the work they imply. The network decision is recorded in "The network:
 > NAT or flat", with the alternatives kept beside it.
 
@@ -35,7 +37,7 @@ that VMM boots, with a shim as PID 1 holding them together.
 
 ```
 ┌─ grain container (one per run) ─────────────────────────────┐
-│  grain-shim (PID 1)                                         │
+│  grain run (PID 1)                                         │
 │   ├─ kontur (VMM) ── cloud-hypervisor ──┐                   │
 │   ├─ agent CLI (claude / agy / codex)   │                   │
 │   └─ mcpserver ─> /run/kontur/vsock.sock ┼─> guest VM       │ ← the sandbox
@@ -117,7 +119,7 @@ Two more things move inside by the same rule:
 **Decision: the controller polls, over the container runtime's exec.** The
 grain never initiates. Four options were weighed:
 
-1. **Poll via exec** — `grain-shim status` per grain per tick.
+1. **Poll via exec** — `grain status` per grain per tick.
 2. **Push with a credential** — the shim holds a token and posts to the
    daemon's REST API. This is what grain does today for `update_status`,
    `open_pull_request` and `recreate_sandbox`.
@@ -676,18 +678,20 @@ own control channel.
 2. **grain needs its own image.** kontur's final stage is `FROM scratch`
    with `ENTRYPOINT ["/usr/local/bin/kontur"]` — a node-based CLI cannot
    run there. grain ships a sandbox image: a real base, `COPY --from=kontur`
-   for the binaries and guest artifacts, the agent CLIs, and `grain-shim`
+   for the binaries and guest artifacts, the agent CLIs, and `grain run`
    as entrypoint. kontur keeps its scratch image; this is grain's
    Dockerfile, not a kontur change.
 3. **Verify kontur tolerates not being PID 1.** Its run mode currently
    boots the VMM as PID 1 of the container. As a child of the shim, signal
    forwarding and zombie reaping become the shim's job. Check, do not
    assume.
-4. **The Spec is now a versioned contract.** The shim ships in the image
-   rather than the daemon's binary, so a deployment can genuinely run a
-   controller and an image that disagree. `SpecVersion` exists for that: a
-   shim handed a version it does not know must refuse and report
-   `setup-failed` naming both, never interpret it on a best effort.
+4. **The whole wire is a versioned contract**, not just the Spec. The
+   in-container CLI, the documents crossing it and the trajectory records
+   all ship in the sandbox image while the controller ships in the daemon
+   binary, so a deployment can genuinely run two versions. `grain.Contract`
+   is stamped on every document in both directions, and a receiver that
+   does not recognise one must refuse it naming both versions rather than
+   interpret it on a best effort. See `docs/grain-cli.md`.
 5. **`HostGrains` is not optional.** Without a backend that runs the agent
    as a plain subprocess against a directory, every test needs a VM.
 6. **The mode is derived, not configured.** With both modes supported,
@@ -741,7 +745,7 @@ path and the agent's location, not of the task model.
 3. The controller loop — `Tick` over `List` + `Reconcile`, alongside the
    existing dispatch path behind a flag.
 4. kontur's NAT mode as a second selectable mode (the blocking ask
-   above), then `grain-shim` and the sandbox image. Steps 1–3 do not wait
+   above), then the in-container `grain` CLI and the sandbox image. Steps 1–3 do not wait
    on it: `HostGrains` needs no network of its own, so the interface and
    the controller loop can be proven while that lands.
 5. `KonturGrains`.

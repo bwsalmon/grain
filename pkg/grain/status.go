@@ -65,38 +65,40 @@ func (p Phase) Terminal() bool {
 // rather than behind its own call because the poll is the only read: a
 // field split out is a second exec per grain per tick.
 type Status struct {
-	ID        ID
-	Ref       TaskRef
-	Framework string
+	// Contract is the wire version this document is written to.
+	Contract  int     `json:"contract"`
+	ID        ID      `json:"id"`
+	Ref       TaskRef `json:"ref"`
+	Framework string  `json:"framework,omitempty"`
 
-	Phase Phase
+	Phase Phase `json:"phase"`
 	// Since is when Phase was entered. Every timeout the controller
 	// enforces is a subtraction against this, so a grain needs no clock
 	// agreement with the controller beyond it.
-	Since time.Time
+	Since time.Time `json:"since"`
 	// Activity is the grain's own short account of itself -- "cloning
 	// acme/widgets", "waiting for CI". It is what today's update_status
 	// tool writes, except that it is now read off this poll instead of
 	// posted to the daemon, so it costs the grain nothing and cannot
 	// fail.
-	Activity string
+	Activity string `json:"activity,omitempty"`
 	// Rebuilds counts the times this grain threw its guest away and built
 	// a fresh one. The decision is the grain's; the count is here so the
 	// controller can see a grain thrashing and end it.
-	Rebuilds int
+	Rebuilds int `json:"rebuilds,omitempty"`
 
 	// Checkout is set from PhaseProvisioned onwards: the facts about the
 	// working tree that only exist once there is one, and that the
 	// controller's prompt needs (previousAttemptsSection reads the
 	// commits earlier attempts pushed, which can only be read from the
 	// checkout they are in).
-	Checkout *CheckoutFacts
+	Checkout *CheckoutFacts `json:"checkout,omitempty"`
 	// Requests are the escape hatches this grain is waiting on. Only the
 	// ones needing the store, GitHub or a human ever appear here.
-	Requests []Request
+	Requests []Request `json:"requests,omitempty"`
 	// Result is set exactly when Phase is terminal.
-	Result *Result
-	Health Health
+	Result *Result `json:"result,omitempty"`
+	Health Health  `json:"health"`
 	// Seq is the sequence number of the last trajectory record this grain
 	// emitted, so a poller knows whether there is anything new without
 	// reading it.
@@ -107,15 +109,30 @@ type Status struct {
 	// are addressed by time and line rather than by byte. A monotonic
 	// per-record sequence is the one cursor both a log stream and a plain
 	// file can honour.
-	Seq int64
+	Seq int64 `json:"seq"`
+	// Consumed are the Answer and Signal ids this grain has taken
+	// delivery of, so a controller stops resending them.
+	//
+	// It is the acknowledgement half of a spool that is deliberately
+	// at-least-once: `grain answer` and `grain signal` are separate
+	// processes from the supervisor that acts on them, so they hand over
+	// through a directory rather than a call, and a controller cannot
+	// tell a write it made from one the supervisor has read. Echoing the
+	// ids back is what closes that, and it is why both verbs take an id
+	// even though a Signal is a reply to nothing.
+	//
+	// Bounded rather than complete: a grain need only remember far enough
+	// back that a controller polling every tick cannot still be holding
+	// an unacknowledged id, not for the life of the run.
+	Consumed []string `json:"consumed,omitempty"`
 }
 
 // CheckoutFacts is what the controller learns from a grain's working tree.
 type CheckoutFacts struct {
-	Head string
+	Head string `json:"head,omitempty"`
 	// Commits are what previous attempts on this branch pushed, oldest
 	// first, capped by the controller's own limit.
-	Commits []string
+	Commits []string `json:"commits,omitempty"`
 }
 
 // RequestID identifies one Request within one grain.
@@ -141,19 +158,21 @@ const (
 
 // Request is one thing a grain has asked the controller to do for it.
 type Request struct {
-	ID      RequestID
-	Kind    RequestKind
-	Payload json.RawMessage
-	Raised  time.Time
+	ID      RequestID       `json:"id"`
+	Kind    RequestKind     `json:"kind"`
+	Payload json.RawMessage `json:"payload,omitempty"`
+	Raised  time.Time       `json:"raised"`
 }
 
 // Answer settles a Request. A refusal is an answer: Err set and OK false
 // tells the agent it asked for something it will not get, which is a turn
 // it can act on, rather than leaving it blocked until its deadline.
 type Answer struct {
-	OK      bool
-	Payload json.RawMessage
-	Err     string
+	// Contract is the wire version this document is written to.
+	Contract int             `json:"contract"`
+	OK       bool            `json:"ok"`
+	Payload  json.RawMessage `json:"payload,omitempty"`
+	Err      string          `json:"err,omitempty"`
 }
 
 // SignalKind is what a Signal carries.
@@ -178,10 +197,12 @@ const (
 
 // Signal is something the controller delivers unasked.
 type Signal struct {
-	Kind    SignalKind
-	Prompt  string   // SignalPrompt
-	Addenda []string // SignalAddenda, oldest first
-	Reason  string   // SignalCancel, SignalPause
+	// Contract is the wire version this document is written to.
+	Contract int        `json:"contract"`
+	Kind     SignalKind `json:"kind"`
+	Prompt   string     `json:"prompt,omitempty"`  // SignalPrompt
+	Addenda  []string   `json:"addenda,omitempty"` // SignalAddenda, oldest first
+	Reason   string     `json:"reason,omitempty"`  // SignalCancel, SignalPause
 }
 
 // Outcome vocabulary, matching what model.Store.FinishRun already
@@ -206,34 +227,34 @@ const (
 
 // Result is how a grain ended.
 type Result struct {
-	Outcome string
-	Detail  string
+	Outcome string `json:"outcome"`
+	Detail  string `json:"detail,omitempty"`
 	// Pushed is the branch this grain got onto the remote, if any. It is
 	// here even on a failed grain, and that is the point: an agent that
 	// commits, pushes and then runs out of turns did the work and only
 	// the ending failed. Today salvaging that branch is a special case in
 	// runOne's error path; here it is a field the ordinary finish path
 	// reads.
-	Pushed *PushedBranch
+	Pushed *PushedBranch `json:"pushed,omitempty"`
 	// Deferred are the escape hatches the agent raised that nobody had to
 	// answer for it to finish -- a question it asked on its way out, a
 	// task it proposed.
-	Deferred []Request
-	Usage    Usage
+	Deferred []Request `json:"deferred,omitempty"`
+	Usage    Usage     `json:"usage"`
 }
 
 // PushedBranch is a branch and the commit at its head.
 type PushedBranch struct {
-	Branch string
-	Head   string
+	Branch string `json:"branch"`
+	Head   string `json:"head"`
 }
 
 // Usage is what this grain spent.
 type Usage struct {
-	Turns        int
-	InputTokens  int64
-	OutputTokens int64
-	Wall         time.Duration
+	Turns        int      `json:"turns,omitempty"`
+	InputTokens  int64    `json:"inputTokens,omitempty"`
+	OutputTokens int64    `json:"outputTokens,omitempty"`
+	Wall         Duration `json:"wall,omitempty"`
 }
 
 // Health is a grain's two halves, which fail independently and mean
@@ -241,29 +262,29 @@ type Usage struct {
 // is a grain that can repair itself, and the reverse is a grain that
 // cannot report anything at all.
 type Health struct {
-	Container ContainerHealth
-	Guest     GuestHealth
+	Container ContainerHealth `json:"container"`
+	Guest     GuestHealth     `json:"guest"`
 }
 
 // ContainerHealth is the grain itself, as the container runtime sees it.
 type ContainerHealth struct {
-	Running bool
+	Running bool `json:"running"`
 	// Err is why the container could not be reached just now, empty when
 	// Running is true.
-	Err string
+	Err string `json:"err,omitempty"`
 }
 
 // GuestHealth is the sandbox, read over vsock -- what
 // orchestrator.SandboxHealth reports today, per grain rather than per
 // deployment.
 type GuestHealth struct {
-	Ready         bool
-	Err           string
-	LoadAverage   string
-	MemoryUsedMB  int
-	MemoryTotalMB int
-	DiskUsedMB    int
-	DiskTotalMB   int
+	Ready         bool   `json:"ready"`
+	Err           string `json:"err,omitempty"`
+	LoadAverage   string `json:"loadAverage,omitempty"`
+	MemoryUsedMB  int    `json:"memoryUsedMB,omitempty"`
+	MemoryTotalMB int    `json:"memoryTotalMB,omitempty"`
+	DiskUsedMB    int    `json:"diskUsedMB,omitempty"`
+	DiskTotalMB   int    `json:"diskTotalMB,omitempty"`
 	// ConntrackCount and ConntrackMax are the pod namespace's connection
 	// tracking table, which the guest's traffic fills and the guest
 	// cannot see.
@@ -289,6 +310,6 @@ type GuestHealth struct {
 	// stays the right mode wherever nothing at the container layer needs
 	// network (docs/grain.md), so 0/0 is an ordinary reading and not a
 	// backend that failed to report.
-	ConntrackCount int
-	ConntrackMax   int
+	ConntrackCount int `json:"conntrackCount,omitempty"`
+	ConntrackMax   int `json:"conntrackMax,omitempty"`
 }

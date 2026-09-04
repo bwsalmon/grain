@@ -1,20 +1,5 @@
 package grain
 
-import "time"
-
-// SpecVersion is the schema version a controller stamps on every Spec it
-// creates, and the one a shim knows how to read.
-//
-// It exists because the shim now ships in the guest-carrying sandbox
-// image rather than in the daemon's own binary, so a deployment can
-// genuinely be running a controller and an image that disagree. A shim
-// handed a Spec whose Version it does not recognise must refuse it and
-// report PhaseFailed with OutcomeSetupFailed naming both versions --
-// never interpret it on a best effort. A refusal costs one run and says
-// exactly what is wrong; a misread Spec is a run that does the wrong
-// thing quietly.
-const SpecVersion = 1
-
 // Spec is the whole declaration of one grain's work: everything the shim
 // needs to run it, and everything a rebuild needs to put a fresh guest
 // back the way this one was. It is written into the container at Create
@@ -26,23 +11,25 @@ const SpecVersion = 1
 // Signal once the grain reports PhaseProvisioned -- see Status.Checkout
 // for why it cannot be assembled before the checkout exists.
 type Spec struct {
-	ID      ID
-	Version int
+	// Contract is the wire version this document is written to. See
+	// Contract's own doc comment for what a receiver does with it.
+	Contract int `json:"contract"`
+	ID       ID  `json:"id"`
 
-	Task      TaskRef
-	Framework string // "claude" | "antigravity" | "codex"; "" is the deployment default
-	Repo      RepoSpec
-	Shape     Shape
-	Limits    Limits
+	Task      TaskRef  `json:"task"`
+	Framework string   `json:"framework,omitempty"` // "claude" | "antigravity" | "codex"; "" is the deployment default
+	Repo      RepoSpec `json:"repo"`
+	Shape     Shape    `json:"shape"`
+	Limits    Limits   `json:"limits"`
 
 	// Setup is the repo's own setup command, run in the guest after the
 	// checkout and before the agent's first turn.
-	Setup string
+	Setup string `json:"setup,omitempty"`
 	// Grants names the capability grants whose whole effect is which
 	// tools this run gets -- "self-debug", "bootstrap-playbooks". The
 	// shim registers the matching tool sets locally; nothing here needs
 	// to reach the controller to do it.
-	Grants []string
+	Grants []string `json:"grants,omitempty"`
 	// Placements is the credential material this grain was granted,
 	// already minted by the controller. Dest is what the current
 	// orchestrator cannot express: everything a capability mints today
@@ -50,39 +37,41 @@ type Spec struct {
 	// itself needs, where the repo's own build can read them. Splitting
 	// the destination puts those container-side and leaves only what the
 	// checkout genuinely needs in the guest.
-	Placements []Placement
+	Placements []Placement `json:"placements,omitempty"`
 	// GitToken is the git-proxy bearer token identifying this grain,
 	// minted by the controller because it is the proxy's to mint, and
 	// placed by the shim. It dies with the grain, so a leaked one cannot
 	// be replayed by anything dispatched after it.
-	GitToken string
+	GitToken string `json:"gitToken,omitempty"`
 }
 
 // TaskRef is enough of the task to reattach to a grain and report on it
 // without the store -- what List can show about a grain whose run row the
 // controller has not looked up yet.
 type TaskRef struct {
-	ID      string
-	Title   string
-	Attempt int
+	ID      string `json:"id"`
+	Title   string `json:"title,omitempty"`
+	Attempt int    `json:"attempt"`
 }
 
 // RepoSpec is where this grain's checkout comes from and where it pushes.
 // Branch is model.BranchName's answer for this task: deterministic, and
 // deliberately not something the agent can influence.
 type RepoSpec struct {
-	Target    string // "owner/name"
-	Base      string
-	Branch    string
-	Reads     []string // read-only repos; grant nothing
-	ProxyBase string   // the git proxy's base URL, as reached from the guest
+	Target    string   `json:"target,omitempty"` // "owner/name"
+	Base      string   `json:"base,omitempty"`
+	Branch    string   `json:"branch,omitempty"`
+	Reads     []string `json:"reads,omitempty"`     // read-only repos; grant nothing
+	ProxyBase string   `json:"proxyBase,omitempty"` // the git proxy's base URL, as reached from the guest
 }
 
 // Shape is how big a guest this grain asked for. It is a create-time
 // argument and nothing resizes it: the VM's root disk is a qcow2 overlay
 // made with the VM, and a grain lives exactly as long as one run.
 type Shape struct {
-	CPUs, MemoryMB, DiskGB int
+	CPUs     int `json:"cpus,omitempty"`
+	MemoryMB int `json:"memoryMB,omitempty"`
+	DiskGB   int `json:"diskGB,omitempty"`
 }
 
 // IsZero reports whether a shape asks for nothing in particular, which is
@@ -108,10 +97,10 @@ const (
 // is an octal string (model.Placement.EffectiveMode's shape) and must
 // never be widened in transit.
 type Placement struct {
-	Dest    Dest
-	Path    string
-	Content string
-	Mode    string
+	Dest    Dest   `json:"dest"`
+	Path    string `json:"path"`
+	Content string `json:"content"`
+	Mode    string `json:"mode"`
 }
 
 // Limits bound one grain. MaxRuntime is enforced by the shim, which is
@@ -120,7 +109,7 @@ type Placement struct {
 // stop, and Policy.MaxRebuilds backstops MaxRebuilds here in case the
 // shim itself is the thing misbehaving.
 type Limits struct {
-	MaxTurns    int
-	MaxRuntime  time.Duration
-	MaxRebuilds int
+	MaxTurns    int      `json:"maxTurns,omitempty"`
+	MaxRuntime  Duration `json:"maxRuntime,omitempty"`
+	MaxRebuilds int      `json:"maxRebuilds,omitempty"`
 }
