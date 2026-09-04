@@ -636,13 +636,15 @@ func (f *Framework) Run(ctx context.Context, cfg agent.RunConfig) (*agent.Result
 }
 
 // runFailure says why a claude subprocess that exited non-zero failed,
-// preferring the stream's own account to the exit status. claude reports
-// a failed run as a terminal "result" event with is_error set (subtype
+// leading with the stream's own account of it. claude reports a failed
+// run as a terminal "result" event with is_error set (subtype
 // error_max_turns, error_during_execution, ...) written to stdout, then
 // exits 1 with nothing at all on stderr -- so runErr on its own renders
-// as the useless "exit status 1 (stderr: )". The stream knows better;
-// runErr is only the fallback for a subprocess that died before saying
-// anything (a missing binary, a signal, a cancelled context).
+// as the useless "exit status 1 (stderr: )". The stream knows better,
+// and agent.RunFailure keeps the exit status behind it rather than
+// throwing it away; runErr is all there is for a subprocess that died
+// before saying anything (a missing binary, a signal, a cancelled
+// context).
 func runFailure(stdout string, maxTurns int, runErr error) error {
 	p := parseEvents(stdout)
 	limit := usageLimitFromFailure(p.resultText, runErr)
@@ -670,10 +672,13 @@ func runFailure(stdout string, maxTurns int, runErr error) error {
 		// (agent.UsageLimit) and pauses dispatch rather than retrying
 		// into the same refusal.
 		return limit
-	case p.resultErr != nil:
-		return p.resultErr
 	}
-	return fmt.Errorf("claude: running claude: %w", runErr)
+	// Both halves when the stream had an account of its own: the
+	// sentence claude wrote leads, and the exit status follows it rather
+	// than being dropped, so that a reader can still tell a run claude
+	// ended deliberately from one that died under it. With no account at
+	// all this is the exit status alone, as before.
+	return agent.RunFailure("claude", "claude", p.resultErr, runErr)
 }
 
 // partialResult is what Run hands back alongside an error: whatever the

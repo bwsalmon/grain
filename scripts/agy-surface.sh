@@ -66,6 +66,28 @@ FENCE='``````'
 # depend on the locale of whoever ran it.
 export LC_ALL=C
 
+# A placeholder where agy expects a Gemini API key, and the single change
+# that turned four dead probes into answers. agy gates `models`,
+# `-p /permissions`, `-p /hooks` and the stream-json session behind having
+# *some* credential: with no settings at all it says "authentication
+# required. Run 'agy' to log in", and with `modelProvider: gemini` in
+# settings.json but no key in the environment it refuses before it reads
+# anything. It does not validate what it is given, though -- the first
+# capture established that a key of `not-a-real-key` gets the full model
+# catalog, the loaded permission rules, the loaded hooks and the whole
+# `init` event, and only the model call that follows them fails. So the
+# credential-shaped configuration is planted rather than a credential: it
+# is the same shape `writeAgyHome` builds for an API-key run, which is
+# also what makes those probes evidence about how grain runs agy.
+#
+# Not a secret, and deliberately not read from the environment: a real key
+# reaching this script would put a real conversation in the document.
+API_KEY_PLACEHOLDER='agy-surface-not-a-real-key'
+
+# The settings.json that goes with it, at the one path agy reads settings
+# from (`cliSettingsRelPath` in pkg/agent/antigravity).
+CLI_SETTINGS_REL='.gemini/antigravity-cli/settings.json'
+
 # Defaulted rather than assumed: scrub below rewrites $HOME out of every
 # capture, and a HOME-less environment would abort the script under -u
 # instead.
@@ -106,7 +128,12 @@ scrub() {
       -e 's/\r$//' \
       -e "s#${probe_root}#\$PROBE#g" \
       -e "s#${PWD}#\$PWD#g" \
-      -e "s#${HOME}#\$HOME#g"
+      -e "s#${HOME}#\$HOME#g" \
+      -e "s/${API_KEY_PLACEHOLDER}/\$GEMINI_API_KEY/g" \
+      -e 's/[0-9a-f]\{8\}-[0-9a-f]\{4\}-[0-9a-f]\{4\}-[0-9a-f]\{4\}-[0-9a-f]\{12\}/$UUID/g' \
+      -e 's/"duration_seconds":[0-9.e-]*/"duration_seconds":$SECONDS/g' \
+      -e 's/cli-[0-9]\{8\}_[0-9]\{6\}\.log/cli-$TIMESTAMP.log/g' \
+      -e 's/crash_[0-9]\{1,\}_/crash_$PID_/g'
 }
 
 # limit applies the two caps, announcing either in the document.
@@ -150,7 +177,9 @@ agy_output=""
 agy_status=0
 agy_run() {
   local home="$1"; shift
-  agy_output="$(HOME="$home" NO_COLOR=1 TERM=dumb CI=1 timeout "$TIMEOUT" "$AGY" "$@" 2>&1)"
+  agy_output="$(HOME="$home" NO_COLOR=1 TERM=dumb CI=1 \
+    GEMINI_API_KEY="$API_KEY_PLACEHOLDER" \
+    timeout "$TIMEOUT" "$AGY" "$@" 2>&1)"
   agy_status=$?
 }
 
@@ -169,6 +198,16 @@ fresh_home() {
   mktemp -d "$probe_root/home.XXXXXX"
 }
 
+# configured_home is a fresh HOME plus the one setting that makes agy
+# willing to answer at all: see API_KEY_PLACEHOLDER. Anything that would
+# otherwise come back "authentication required" is asked in one of these.
+configured_home() {
+  local home
+  home="$(fresh_home)"
+  plant "$home/$CLI_SETTINGS_REL" '{"modelProvider":"gemini"}'
+  printf '%s' "$home"
+}
+
 # plant writes a file and every directory above it.
 plant() {
   local path="$1" content="$2"
@@ -177,14 +216,22 @@ plant() {
 }
 
 # subcommands_of pulls command names out of a --help listing: the indented
-# rows under a "Commands:" heading, with `a, b` and `a/b` aliases split
+# rows under a subcommand heading, with `a, b` and `a/b` aliases split
 # apart. Deliberately generous about the heading, since the shape of that
 # listing is agy's to change -- and a discovery that finds nothing is
 # reported where it happens rather than leaving an empty section that
 # reads like "agy has no subcommands".
+#
+# The generosity was not generous enough, and the first capture is what
+# said so: 1.1.26 heads its listing "Available subcommands:", which a
+# pattern anchored on a capitalised "Commands:" does not match, so that
+# capture recorded its own failure ("No subcommands could be read out of
+# that listing") and held not one `agy <sub> --help`. Matching either
+# spelling of the word, in either case, is the fix.
 subcommands_of() {
   awk '
-    /^[A-Za-z ]*Commands:/ { inside = 1; next }
+    /^[A-Za-z ]*[Ss]ub[Cc]ommands:/ { inside = 1; next }
+    /^[A-Za-z ]*[Cc]ommands:/       { inside = 1; next }
     /^[^[:space:]]/        { inside = 0 }
     inside && /^[[:space:]]+[a-z][a-z0-9-]*/ {
       line = $0
@@ -201,19 +248,42 @@ subcommands_of() {
 # schema is read: agy is stripped, but a Go binary still carries every
 # struct tag, every JSON-schema description and every literal path its own
 # code names, and those are the keys a settings file may use.
+#
+# The table is read once into a file rather than once per pattern: it is
+# 1.8 million lines off a 200MB binary, and a dozen patterns each paying
+# for their own pass is most of this script's runtime.
 binary_path=""
+strings_file=""
 in_binary() {
   [[ -n "$binary_path" ]] || return 0
-  strings -n 4 -- "$binary_path" 2>/dev/null | grep -aoE "$1" | sort -u
+  if [[ -z "$strings_file" ]]; then
+    strings_file="$probe_root/strings.txt"
+    strings -n 4 -- "$binary_path" >"$strings_file" 2>/dev/null
+  fi
+  grep -aoE "$1" "$strings_file" | sort -u
 }
 
 # extract writes one string-table finding as its own block, under what it
 # is looking for in words and above the command that looked -- which is
 # the real pattern, so that a reader who doubts a finding can run it.
+#
+# The count is reported when a pattern matched more than the block can
+# hold, because the two ways a string-table read goes wrong look identical
+# in the output otherwise. A pattern that is too narrow shows a short list;
+# a pattern that is too broad shows a list truncated in alphabetical order,
+# which is not a sample of anything -- the first capture's `json:"..."`
+# block was 400 lines of the AWS SDK and a JSON-schema library, cut off in
+# the A's, under a heading promising the keys a settings file may use.
 extract() {
-  local label="$1" pattern="$2"
+  local label="$1" pattern="$2" found total
+  found="$(in_binary "$pattern")"
+  total="$(printf '%s' "$found" | grep -c . || true)"
   printf '**%s**\n\n' "$label"
-  block "strings -n 4 agy | grep -aoE '$pattern' | sort -u" 0 "$(in_binary "$pattern")"
+  if [[ "$total" -gt "$MAX_LINES" ]]; then
+    printf '%s distinct matches, of which the first %s are below. A list this long is a pattern that has caught the binary'"'"'s vendored dependencies as well as agy'"'"'s own types; narrow it in `scripts/agy-surface.sh` rather than reading it.\n\n' \
+      "$total" "$MAX_LINES"
+  fi
+  block "strings -n 4 agy | grep -aoE '$pattern' | sort -u" 0 "$found"
 }
 
 # ----------------------------------------------------------------- header
@@ -313,7 +383,7 @@ printf 'The changelog ships *in* the binary, which makes it the closest thing to
 agy_capture "$(fresh_home)" changelog
 
 printf 'The model catalog, whose names carry their reasoning effort. `antigravity.DefaultModel` has to be one of these, and so does anything a deployment puts in Settings.\n\n'
-agy_capture "$(fresh_home)" models
+agy_capture "$(configured_home)" models
 
 # ----------------------------------------------------------- a fresh HOME
 
@@ -321,10 +391,12 @@ printf '## A HOME agy has never seen\n\n'
 
 printf 'What the binary unpacks into an empty `HOME` the first time it runs there -- the layout `writeAgyHome` builds against, and where agy'"'"'s own customization guides come from.\n\n'
 
+printf 'The probe is `agy agents` rather than `agy --version`, because *which* command is run decides whether there is anything to look at: on 1.1.26 neither `--version` nor `--help` nor `mcp list` touches the filesystem at all -- the first capture ran `--version` and found an empty directory, and reported that agy unpacks nothing -- while `agy agents` writes the whole tree below and `agy changelog` writes four entries of it. So the answer this section gives is "what a command that reads its customizations unpacks", which is the case `writeAgyHome` is building for.\n\n'
+
 layout_home="$(fresh_home)"
-agy_run "$layout_home" --version
+agy_run "$layout_home" agents
 layout="$(cd "$layout_home" && find . -mindepth 1 -printf '%y %P\n' 2>/dev/null | sort)"
-block "find \$HOME -mindepth 1 -printf '%y %P' | sort" 0 "$layout"
+block "agy agents; find \$HOME -mindepth 1 -printf '%y %P' | sort" 0 "$layout"
 
 # Those guides are the only documentation agy publishes for the things
 # this repository configures -- hooks.md is where hookConfigJSON's
@@ -348,15 +420,21 @@ fi
 
 printf '## What it reads back\n\n'
 
-printf 'Print mode answers `/permissions` and `/hooks` without an agent turn or a credential, which is the only way this repository can check that the files `pkg/agent/antigravity` writes are files agy actually loads. All three are planted below in the shape that package writes them.\n\n'
+printf 'Print mode answers `/permissions` and `/hooks` without an agent turn, which is the only way this repository can check that the files `pkg/agent/antigravity` writes are files agy actually loads. All three are planted below in the shape that package writes them, in a HOME configured the way `writeAgyHome` configures an API-key run -- which is what it takes to get an answer at all: 1.1.26 asks for a credential before it will report what it loaded, and takes the placeholder one (see `API_KEY_PLACEHOLDER`).\n\n'
 
 read_home="$(fresh_home)"
-plant "$read_home/.gemini/antigravity-cli/settings.json" \
+plant "$read_home/$CLI_SETTINGS_REL" \
   '{"permissions":{"allow":["mcp_grain-sandbox_run_command"],"deny":["run_command","write_to_file"]},"modelProvider":"gemini"}'
 plant "$read_home/.gemini/config/hooks.json" \
   '{"agy-surface-probe":{"PreToolUse":[{"matcher":"*","hooks":[{"type":"command","command":"/bin/true","timeout":30}]}]}}'
+# `tools` is an object keyed by tool name, not a list -- the shape
+# eagerToolsConfig builds. The first capture planted `"tools": []` here and
+# `agy mcp list` answered "No MCP servers configured", which is not a
+# missing server but a *dropped* one: an entry whose `tools` is the wrong
+# JSON type takes the whole server down without a word. That silence is
+# recorded as a finding of its own further down.
 plant "$read_home/.gemini/config/mcp_config.json" \
-  '{"mcpServers":{"agy-surface-probe":{"command":"/bin/true","args":[],"timeoutSeconds":7200,"tools":[]}}}'
+  '{"mcpServers":{"agy-surface-probe":{"command":"/bin/true","args":[],"timeoutSeconds":7200,"tools":{"run_command":{"eager":true}}}}}'
 
 printf '### The permission rules it loaded\n\n'
 agy_capture "$read_home" -p /permissions
@@ -368,10 +446,11 @@ printf '### The MCP servers it loaded\n\n'
 agy_capture "$read_home" mcp list
 
 printf '### The session it opens\n\n'
-printf 'The same argv `Framework.Run` builds, against the same private-HOME shape, with a throwaway prompt. Without a credential the run itself fails -- what is wanted is the `init` event agy emits first, which carries the permission mode and the *native* tool roster that `withheldNativeTools` has to keep up with.\n\n'
+printf 'The same argv `Framework.Run` builds, against the same private-HOME shape, with a throwaway prompt. The placeholder key is not a key, so the model call fails and the run ends in an `error_message` step -- what is wanted is the `init` event agy emits before any of that, which carries the permission mode and the *native* tool roster that `withheldNativeTools` has to keep up with.\n\n'
 
 init_raw="$(printf '%s\n' '{"event":"user","message":{"role":"user","content":"hello"}}' |
-  HOME="$read_home" NO_COLOR=1 TERM=dumb CI=1 timeout "$TIMEOUT" "$AGY" \
+  HOME="$read_home" NO_COLOR=1 TERM=dumb CI=1 \
+  GEMINI_API_KEY="$API_KEY_PLACEHOLDER" timeout "$TIMEOUT" "$AGY" \
     --input-format stream-json --output-format stream-json \
     --dangerously-skip-permissions --disable-slash-commands \
     --print-timeout 20s 2>&1)"
@@ -380,7 +459,11 @@ block "agy --input-format stream-json --output-format stream-json --dangerously-
   "$init_status" "$init_raw"
 
 if command -v jq >/dev/null 2>&1; then
-  roster="$(printf '%s\n' "$init_raw" | jq -r 'select(.event=="init") | "permission_mode: " + (.init.permission_mode // "-"), (.init.tools // [] | sort | .[])' 2>/dev/null)"
+  # The count is printed as well as the names because it is the number
+  # this repository quotes in prose -- pkg/agent/antigravity's
+  # withheldNativeTools comment and the README both state it -- and a
+  # count in a document is checkable in a way a wall of names is not.
+  roster="$(printf '%s\n' "$init_raw" | jq -r 'select(.event=="init") | "permission_mode: " + (.init.permission_mode // "-"), "native tools: " + (.init.tools // [] | length | tostring), (.init.tools // [] | sort | .[])' 2>/dev/null)"
   block "that init event's own roster, sorted" 0 "$roster"
 fi
 
@@ -453,17 +536,145 @@ for i in "${!mcp_files[@]}"; do
 done
 block "which planted MCP config files were read" 0 "$summary"
 
+# Hooks were the section this document promised and did not have, and
+# they are the one where planting the candidates together and planting
+# them one at a time give *different* answers -- so both are asked. The
+# difference is the finding: hooks.json at the antigravity-cli path
+# replaces the one at the config path rather than merging with it, so a
+# file grain does not write, in a HOME grain does not own, would take
+# grain's hook out of a run in silence. (Agents and MCP servers were
+# checked the same way and answer identically either way, which is why
+# they are asked once.)
+hooks_files=(
+  ".gemini/config/hooks.json"
+  ".gemini/antigravity-cli/hooks.json"
+  ".gemini/hooks.json"
+  ".config/agy/hooks.json"
+  ".agy/hooks.json"
+)
+hook_json() {
+  printf '{"%s":{"PreToolUse":[{"matcher":"*","hooks":[{"type":"command","command":"/bin/true","timeout":30}]}]}}' "$1"
+}
+
+printf '### Hooks\n\n'
+printf 'The file `hookConfigJSON` writes, and the one denial in this whole document that agy documents as a denial. Planted in a HOME that also carries the settings agy needs before `-p /hooks` will answer.\n\n'
+
+hooks_home="$(configured_home)"
+hook_names=()
+for file in "${hooks_files[@]}"; do
+  name="probe-$(printf '%s' "$file" | tr './' '--')"
+  hook_names+=("$name")
+  plant "$hooks_home/$file" "$(hook_json "$name")"
+done
+
+agy_run "$hooks_home" -p /hooks
+hooks_out="$agy_output"
+block "agy -p /hooks" "$agy_status" "$hooks_out"
+
+summary=""
+for i in "${!hooks_files[@]}"; do
+  verdict="not listed"
+  [[ "$hooks_out" == *"${hook_names[$i]}"* ]] && verdict="READ"
+  summary+="$(printf '%-10s ~/%s' "$verdict" "${hooks_files[$i]}")"$'\n'
+done
+block "which planted hooks files were read, all planted together" 0 "$summary"
+
+printf 'And the same candidates one at a time, each in a HOME of its own. A path that reads `READ` here and `not listed` above is not a path agy ignores -- it is a path something else suppressed.\n\n'
+
+summary=""
+for file in "${hooks_files[@]}"; do
+  name="probe-$(printf '%s' "$file" | tr './' '--')"
+  alone_home="$(configured_home)"
+  plant "$alone_home/$file" "$(hook_json "$name")"
+  agy_run "$alone_home" -p /hooks
+  verdict="not listed"
+  [[ "$agy_output" == *"$name"* ]] && verdict="READ"
+  summary+="$(printf '%-10s ~/%s' "$verdict" "$file")"$'\n'
+done
+block "which planted hooks files were read, each on its own" 0 "$summary"
+
+# Settings is the shortest of the four and the one with the most history:
+# ~/.gemini/settings.json is where Gemini CLI kept this file, and a
+# deployment that writes there gets no rules, no modelProvider and no
+# complaint. The marker is a deny rule named after its own path, so
+# -p /permissions reporting it is what proves the file was read.
+printf '### Settings\n\n'
+printf 'The file `settingsJSON` writes. Each candidate holds a `permissions.deny` rule named after its own path *and* the `modelProvider` that lets agy answer at all -- so a path that is not read fails twice over, with neither its rule nor its credential setting taking effect.\n\n'
+
+settings_files=(
+  ".gemini/antigravity-cli/settings.json"
+  ".gemini/settings.json"
+  ".gemini/config/settings.json"
+  ".config/agy/settings.json"
+  ".agy/settings.json"
+)
+settings_home="$(fresh_home)"
+settings_names=()
+for file in "${settings_files[@]}"; do
+  name="probe-$(printf '%s' "$file" | tr './' '--')"
+  settings_names+=("$name")
+  plant "$settings_home/$file" "{\"permissions\":{\"deny\":[\"$name\"]},\"modelProvider\":\"gemini\"}"
+done
+
+agy_run "$settings_home" -p /permissions
+settings_out="$agy_output"
+block "agy -p /permissions" "$agy_status" "$settings_out"
+
+summary=""
+for i in "${!settings_files[@]}"; do
+  verdict="not listed"
+  [[ "$settings_out" == *"${settings_names[$i]}"* ]] && verdict="READ"
+  summary+="$(printf '%-10s ~/%s' "$verdict" "${settings_files[$i]}")"$'\n'
+done
+block "which planted settings files were read" 0 "$summary"
+
+# ------------------------------------------- what it drops without a word
+
+printf '## What it drops without a word\n\n'
+
+printf 'The failure mode this file opens with, as a measurement rather than a warning. Each row is one `mcp_config.json` differing from the one above it in a single key, and the question is whether `agy mcp list` still has a server to show: a *known* key given a value of the wrong JSON type does not produce an error, a warning or a partial load -- it takes the whole server entry with it. `eagerToolsConfig` writing `tools` as an object rather than a list is the difference between grain'"'"'s eleven MCP tools being there and a run having no tools at all, and nothing but this probe would say so.\n\n'
+
+summary=""
+drop_probe() {
+  local label="$1" entry="$2" home verdict
+  home="$(fresh_home)"
+  plant "$home/.gemini/config/mcp_config.json" "{\"mcpServers\":{\"agy-surface-probe\":$entry}}"
+  agy_run "$home" mcp list
+  verdict="DROPPED"
+  [[ "$agy_output" == *"agy-surface-probe"* ]] && verdict="loaded"
+  summary+="$(printf '%-8s %s' "$verdict" "$label")"$'\n'
+}
+drop_probe 'the minimum: command, args'                  '{"command":"/bin/true","args":[]}'
+drop_probe 'plus timeoutSeconds, as grain writes it'     '{"command":"/bin/true","args":[],"timeoutSeconds":7200}'
+drop_probe 'plus tools as an object, as grain writes it' '{"command":"/bin/true","args":[],"timeoutSeconds":7200,"tools":{"run_command":{"eager":true}}}'
+drop_probe 'but tools as an empty list'                  '{"command":"/bin/true","args":[],"tools":[]}'
+drop_probe 'but tools as a list of names'                '{"command":"/bin/true","args":[],"tools":["run_command"]}'
+drop_probe 'but timeoutSeconds as a string'              '{"command":"/bin/true","args":[],"timeoutSeconds":"7200"}'
+drop_probe 'plus a key agy has never heard of'           '{"command":"/bin/true","args":[],"noSuchKeyAtAll":true}'
+block "does agy mcp list still show the server" 0 "$summary"
+
 # ---------------------------------------------------- the string table
 
 printf '## The config schema, out of the string table\n\n'
 
 printf 'agy is stripped, but a Go binary carries every struct tag, every JSON-schema description and every literal path its own code names. This is where the keys a settings file may use come from -- with the caveat this file opens with: an unknown key is ignored in silence, so a key appearing here is not proof that writing it does anything, and a *known* key given a value that does not parse can drop a whole agent without a word.\n\n'
 
-extract 'json:"..."'                   'json:"[A-Za-z0-9_.,-]+"'
+printf 'Two things shape the patterns below, and the first capture is what taught them both.\n\n'
+
+printf 'The `json:"..."` tags are not dumped whole. There are ten thousand distinct ones in this binary, because a 200MB Go program that bundles an AWS SDK, a JSON-schema library and most of a browser carries their struct tags too; dumped whole they truncate in alphabetical order, and the first capture spent four hundred lines on `AbsoluteKeywordLocation` and `AccessKeyID` under a heading promising the keys a settings file may use. They are asked for by subject instead -- tools, permissions, hooks, MCP, agents, sandboxing -- which is both shorter and the actual question.\n\n'
+
+printf 'And the camelCase probes are anchored to whole strings (`^...$`). A Go string table has no delimiters between its entries, so an unanchored pattern reads straight across the join and invents names: the first capture'"'"'s roster section offered `allowedAmountfeeParametersgetFeeBalanc` and `hookStubInputBlockingCharzend`, neither of which is anything. Anchoring costs the names that appear only inside a longer literal and buys a list where every entry is a name some Go code actually uses.\n\n'
+
+extract 'json tags naming a tool'       'json:"[A-Za-z0-9_.,-]*[Tt]ool[A-Za-z0-9_.,-]*"'
+extract 'json tags naming a permission' 'json:"[A-Za-z0-9_.,-]*([Pp]ermission|[Dd]eny|[Aa]llow)[A-Za-z0-9_.,-]*"'
+extract 'json tags naming a hook'       'json:"[A-Za-z0-9_.,-]*[Hh]ook[A-Za-z0-9_.,-]*"'
+extract 'json tags naming an MCP server' 'json:"[A-Za-z0-9_.,-]*([Mm]cp|MCP)[A-Za-z0-9_.,-]*"'
+extract 'json tags naming an agent or a skill' 'json:"[A-Za-z0-9_.,-]*([Aa]gent|[Ss]kill)[A-Za-z0-9_.,-]*"'
+extract 'json tags naming a sandbox'    'json:"[A-Za-z0-9_.,-]*[Ss]andbox[A-Za-z0-9_.,-]*"'
 extract 'yaml:"..."'                   'yaml:"[A-Za-z0-9_.,-]+"'
 extract 'mapstructure:"..."'           'mapstructure:"[A-Za-z0-9_.,-]+"'
 extract 'jsonschema_description:"..."' 'jsonschema_description:"[^"]{1,120}"'
 extract 'paths under .gemini'          '\.gemini/[A-Za-z0-9_./-]+'
-extract 'settings, config and hook file names' '[A-Za-z0-9_-]*(settings|config|hooks|agents|permissions)[A-Za-z0-9_-]*\.(json|yaml|yml|md|toml)'
-extract 'names that read like a tool roster'   '(enabled|disabled|allowed|denied|withheld)[A-Z][A-Za-z]{2,30}'
-extract 'names that read like a permission'    '(permission|decision|hook|sandbox)[A-Z][A-Za-z]{2,30}'
+extract 'settings, config and hook file names' '/[a-z0-9_-]{0,30}(settings|config|hook|agent|permission|skill|plugin|rule|workflow)[a-z0-9_-]{0,30}\.(json|yaml|yml|md|toml)'
+extract 'whole strings that read like a tool roster' '^(enabled|disabled|allowed|denied|withheld)[A-Z][A-Za-z]{2,30}$'
+extract 'whole strings that read like a permission'  '^(permission|decision|hook|sandbox)[A-Z][A-Za-z]{2,30}$'

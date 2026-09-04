@@ -29,6 +29,10 @@ package staterepo_test
 //   - the clock crossing a churn interval
 //   - a restore onto a new host: a fresh clone, a fresh database, and
 //     everything the repository holds imported into it
+//   - the store going away while the working tree survives -- a deleted
+//     file, a volume restored from a backup that did not have it -- and
+//     the start that has to restore this deployment out of the tree
+//     rather than export nothing over it
 //
 // And what it checks, every round:
 //
@@ -222,8 +226,10 @@ func (d *soak) act() {
 		d.restart()
 	case n < 92:
 		d.crossTheChurnInterval()
-	case n < 96:
+	case n < 95:
 		d.restoreOntoANewHost()
+	case n < 97:
+		d.loseTheStore()
 	default:
 		// A quiet round: nothing at all happened. The cycle that follows
 		// has to produce no commit, which is the property that keeps a
@@ -469,6 +475,33 @@ func (d *soak) restart() {
 		d.fatalf("loading after a recovery at startup: %v", err)
 	}
 	d.count("restarts that recovered a divergence")
+}
+
+// loseTheStore is the case the loaded-head marker cannot see: the
+// database is gone and the working tree is exactly as this host left it,
+// so the marker still names HEAD and the ordinary answer -- "nothing
+// arrived, import nothing" -- would come up on a database with nothing
+// in it, and the export after it would commit that over the deployment.
+//
+// The start has to restore instead, out of the working tree it already
+// has, and everything the round after this checks is the proof: every
+// task ever filed is still here, the settings are the ones last merged,
+// and the repository still holds them.
+//
+// A fresh database at a directory of its own, which is what a deleted
+// store file, a restored volume that did not include one, and a
+// misconfigured path all amount to by the time sqlite.Open has returned.
+// The working tree is untouched -- marker, churn stamp and all -- which
+// is the whole point of the case.
+func (d *soak) loseTheStore() {
+	d.t.Helper()
+	store, db := d.openScratchDB()
+	d.store, d.db = store, db
+	d.open()
+	if err := staterepo.Load(d.ctx, d.repo, d.db, model.SchemaVersion); err != nil {
+		d.fatalf("starting with the store lost and the working tree kept: %v", err)
+	}
+	d.count("stores lost and restored from the working tree")
 }
 
 // crossTheChurnInterval moves the clock past DefaultChurnInterval, so the

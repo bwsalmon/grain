@@ -61,6 +61,33 @@ var ErrNotApplied = errors.New("state repository holds changes grain could not a
 var ErrNoLocalCopy = errors.New("the state repository's remote could not be reached and this host " +
 	"has no copy of it to fall back on")
 
+// ErrDatabaseEmpty is the export this package will not do: writing a
+// database with nothing in it over a repository that holds a whole
+// deployment.
+//
+// Nothing further up stops that on its own. The remote is not ahead --
+// this host really is the one that wrote the commit the dump sits on --
+// so RemoteAhead has no objection, the commit is a fast-forward, and the
+// push lands. The off-host copy of the deployment is then deleted by the
+// deployment, in one commit, by the very loop that exists to keep it.
+//
+// The way in is a store that was lost while its working tree survived:
+// the file deleted, a volume restored from a backup that did not include
+// it, sqlite.Open handed a path that has never held one. A *start* in
+// that state now puts itself right rather than reaching this at all --
+// Load imports the whole repository into a database that has nothing to
+// lose by it, which is the restore the repository exists for. This is
+// what is left over: a database that went away underneath a daemon
+// already running, and a `grain state sync` run against one. There the
+// answer is to export nothing, say so where an operator looks (the UI's
+// State pane reports it, cmd/grain's stateManager), and leave the
+// restore to the restart that can do it safely -- an import that
+// replaces every row is not something to do underneath a reconcile loop
+// holding the ids it would delete.
+var ErrDatabaseEmpty = errors.New("grain's database holds nothing and its state repository holds a " +
+	"deployment: refusing to export an empty database over it -- restart grain to restore from the " +
+	"repository, or point it at the store it was running on")
+
 // SettingsTables names the tables Apply imports into a running daemon.
 //
 // The list is the whole of the "which rows may change underneath a live
@@ -185,6 +212,30 @@ func Apply(ctx context.Context, r *Repo, db *sql.DB, version int) (bool, error) 
 		return false, fmt.Errorf("%w: %w: repository is at schema %d, this build knows %d",
 			ErrNotApplied, ErrSchemaTooOld, found, version)
 	}
+	// A database with nothing in it is not one to make a settings change
+	// live in, and refusing here is what keeps the export below honest
+	// rather than a nicety. The settings tables are a small part of the
+	// dump; importing them into an empty database would leave a database
+	// that holds templates and no tasks -- populated enough that sync's
+	// own refusal (ErrDatabaseEmpty) no longer applies, and the very next
+	// export would commit an empty task.json over a repository that holds
+	// them. Reported as ErrNotApplied so cmd/grain's cycle stops before
+	// that export, exactly as it does for a dump it could not read.
+	//
+	// The whole repository is what such a database wants, and a start is
+	// where it gets it (Load). Not here: Apply runs underneath a live
+	// reconcile loop, and replacing every row is not something to do with
+	// runs in flight holding the ids.
+	empty, err := databaseIsEmpty(ctx, db)
+	if err != nil {
+		return false, fmt.Errorf("%w: %w", ErrNotApplied, err)
+	}
+	if empty {
+		if table, has := dumpHasRows(r.Dir()); has {
+			return false, fmt.Errorf("%w: %w (%s/%s.json holds rows this database does not)",
+				ErrNotApplied, ErrDatabaseEmpty, TablesDir, table)
+		}
+	}
 	if err := ImportTables(ctx, db, r.Dir(), SettingsTables); err != nil {
 		return false, fmt.Errorf("%w: %w", ErrNotApplied, err)
 	}
@@ -226,6 +277,31 @@ func Apply(ctx context.Context, r *Repo, db *sql.DB, version int) (bool, error) 
 //   - otherwise: the repository is exactly where we left it, so the
 //     database is authoritative and nothing is imported. The next sync
 //     exports whatever has happened since.
+//
+// There is a second question underneath all of that, and the marker
+// cannot answer it: whether there is a database here at all. The marker
+// is a fact about the repository and this host's agreement with it, and
+// it lives in the git directory -- so a store that went away takes none
+// of it with it. Deleted, or on a volume restored from a backup that did
+// not include it, or simply opened at a path that has never held one: the
+// working tree is untouched, HEAD is exactly the commit this host last
+// wrote, and the answer above is "nothing to import" onto an empty
+// database. The sync after that would export it and push a commit
+// deleting the deployment from its own off-host copy, and no check
+// further out would object, because the remote is not ahead -- this host
+// wrote the commit under it.
+//
+// So a database with nothing in it takes the whole repository, marker or
+// no marker. It is the same case the missing marker already is, arrived
+// at from the other side: there is no database ahead of the dump to
+// protect, so importing all of it can cost nothing and gains back
+// everything the dump holds -- the restore this repository exists to
+// make possible, done by the deployment rather than by an operator who
+// has to know to move the working tree aside first. "Nothing in it"
+// means exactly that: no row in any table, bar the schema stamp every
+// database has from the moment it is created (databaseIsEmpty). A
+// database with a single task in it is a database this host is
+// responsible for, and it takes the ordinary path.
 //
 // A failure to reach the remote does not stop any of that. Everything
 // above is decided against the working tree, and a tree this host has
@@ -291,11 +367,24 @@ func Load(ctx context.Context, r *Repo, db *sql.DB, version int) error {
 	if err != nil {
 		return err
 	}
-	if marker != "" && marker == head {
+	// Whether there is a database here to protect, asked before the
+	// marker is allowed to answer anything: a host can agree with the
+	// repository exactly and have nothing to run on, because the marker
+	// survives the store it was written beside (this function's own doc
+	// comment, and databaseIsEmpty).
+	empty, err := databaseIsEmpty(ctx, db)
+	if err != nil {
+		return err
+	}
+	// The ordinary restart: the repository is exactly where this host left
+	// it, and this host has a database of its own to run on. Nothing is
+	// imported, and the next sync exports whatever has happened since.
+	if marker != "" && marker == head && !empty {
 		return unreachable
 	}
-	// Which tables the import replaces depends on which of two cases this
-	// is, and the marker is what tells them apart.
+	// Which tables the import replaces depends on which of three cases
+	// this is. The marker tells the first two apart; the third is the one
+	// it cannot see.
 	//
 	// No marker at all is a working tree this host has never loaded -- a
 	// clone onto a new machine, the restore case -- and there the
@@ -303,6 +392,14 @@ func Load(ctx context.Context, r *Repo, db *sql.DB, version int) error {
 	// churn included. That case is what makes a clone a whole deployment
 	// rather than a settings file, and nothing below applies to it: there
 	// is no database ahead of the dump to protect.
+	//
+	// A database with nothing in it is that same case with the marker
+	// still in place: a store that was lost while its working tree
+	// survived. It takes the whole repository too, and for the identical
+	// reason -- an empty database is not ahead of anything -- which is why
+	// it is decided here rather than left to the marker, whose answer
+	// ("this repository has not moved, import nothing") would come up on
+	// an empty database and then export it back over the dump.
 	//
 	// A marker that disagrees with HEAD is a repository that moved under a
 	// host that already has a database -- a merged pull request, or a
@@ -334,7 +431,7 @@ func Load(ctx context.Context, r *Repo, db *sql.DB, version int) error {
 	// next export writes the database's version back out over a merged
 	// change to anything else. The import a restart does is now the import
 	// a tick does.
-	if marker == "" {
+	if marker == "" || empty {
 		if err := Import(ctx, db, r.Dir()); err != nil {
 			return err
 		}
@@ -455,6 +552,30 @@ func sync(ctx context.Context, r *Repo, db *sql.DB, version int, forceChurn bool
 	remote := r.remoteState(ctx)
 	if remote.ahead {
 		return false, ErrRemoteAhead
+	}
+	// The other export this must not do, and the one no check on the
+	// remote can catch: a database with nothing in it, written over a
+	// repository that holds a deployment. The remote is not ahead in that
+	// case -- this host wrote the commit under the dump -- so the commit
+	// fast-forwards and the push lands, and the off-host copy is gone. See
+	// ErrDatabaseEmpty for how a host gets into that state and why the
+	// answer here is to stop rather than to restore: the restore is a
+	// start's to do (Load), because it replaces every row.
+	//
+	// Both halves of the question are needed and the cheap half comes
+	// first. An empty database is not on its own a reason to refuse: a
+	// deployment nobody has configured yet, seeded into a repository of
+	// its own, is empty at both ends and has to go on exporting. What is
+	// refused is the pair -- nothing here, something there.
+	empty, err := databaseIsEmpty(ctx, db)
+	if err != nil {
+		return false, err
+	}
+	if empty {
+		if table, has := dumpHasRows(r.Dir()); has {
+			return false, fmt.Errorf("%w (%s/%s.json holds rows this database does not)",
+				ErrDatabaseEmpty, TablesDir, table)
+		}
 	}
 	// The CI step, before anything is exported and as a commit and a push
 	// of its own (installWorkflow, format.go). Every sync, not only at
@@ -726,10 +847,14 @@ so importing them would delete whatever grain had written since. Editing
 one of them here does nothing; the next export writes the database's
 version back over your change.
 
-The exception is a restore, and it is the only one: a clone of this
-repository onto a host that has never loaded it brings back every table,
-which is what makes this a whole deployment to restore from rather than
-a settings file.
+The exception is a restore, and it is the only one: a start with nothing
+to lose brings back every table -- a clone of this repository onto a host
+that has never loaded it, or a start on a host whose database has gone
+away and left this directory behind, which is the same situation from the
+other side. That is what makes this a whole deployment to restore from
+rather than a settings file. grain will not do the reverse: an export
+from a database with nothing in it, over a dump that holds rows, is
+refused and reported instead of committed.
 
 That check already runs on your pull request. ` + "`" + WorkflowFile + "`" + `
 runs ` + "`" + `grain state check` + "`" + `, which loads this whole directory into a

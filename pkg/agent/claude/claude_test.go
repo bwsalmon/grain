@@ -1044,3 +1044,49 @@ func TestCanOpenPullRequestTracksWithGrainServer(t *testing.T) {
 			"its runs' mcpserver registers no open_pull_request at all")
 	}
 }
+
+// TestRunReportsClaudesOwnErrorAlongsideItsExitStatus: the stream's
+// account of the failure is what a reader can act on, and it led the
+// message already -- but the exit status used to be thrown away with it,
+// leaving no way to tell a run claude ended deliberately from one that
+// died under it. Both halves now, in that order.
+func TestRunReportsClaudesOwnErrorAlongsideItsExitStatus(t *testing.T) {
+	exitErr := errors.New("exit status 1 (stderr: )")
+	fake := &fakeRunner{
+		stdout: streamJSONLine(t, map[string]any{
+			"type": "result", "subtype": "error_during_execution", "is_error": true,
+			"result": "Connection error: the server dropped the request",
+		}),
+		err: exitErr,
+	}
+	f := newFramework(fake, "mcpserver-path")
+
+	_, err := f.Run(context.Background(), agent.RunConfig{Prompt: "go", SandboxRoot: t.TempDir()})
+	if err == nil {
+		t.Fatal("Run err = nil, want the failure")
+	}
+	if !strings.Contains(err.Error(), "the server dropped the request") {
+		t.Errorf("Run err = %q, want claude's own account of why the run failed", err)
+	}
+	if !strings.Contains(err.Error(), "exit status 1") {
+		t.Errorf("Run err = %q, want the exit status kept alongside it", err)
+	}
+	if !errors.Is(err, exitErr) {
+		t.Errorf("Run err = %q, want the subprocess's own error still wrapped in it", err)
+	}
+}
+
+// A claude that died before saying anything -- no stream at all -- is
+// still reported by its exit status alone.
+func TestRunReportsTheExitStatusAloneWhenClaudeSaidNothing(t *testing.T) {
+	fake := &fakeRunner{err: errors.New("signal: killed")}
+	f := newFramework(fake, "mcpserver-path")
+
+	_, err := f.Run(context.Background(), agent.RunConfig{Prompt: "go", SandboxRoot: t.TempDir()})
+	if err == nil {
+		t.Fatal("Run err = nil, want the failure")
+	}
+	if !strings.Contains(err.Error(), "claude: running claude: signal: killed") {
+		t.Errorf("Run err = %q, want the subprocess's own failure named", err)
+	}
+}

@@ -89,9 +89,9 @@ type Config struct {
 	// state-repo.json.
 	//
 	// It is not only written into a workflow that is missing: an
-	// installed one that is still grain's own rendering is repointed here
-	// as well, so an upgraded deployment's check follows it. See
-	// StaleImage.
+	// installed one that is still grain's own rendering -- this build's
+	// or an earlier grain's -- is repointed here as well, so an upgraded
+	// deployment's check follows it. See StaleWorkflow.
 	CheckImage string
 	// NoWorkflow stops grain from installing that workflow at all: the
 	// opt-out for a deployment whose state repository is checked

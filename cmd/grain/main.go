@@ -216,6 +216,33 @@ func serverDefault() string {
 	return defaultServerURL
 }
 
+// dataDirEnvVar is the same idea for the subcommands that edit a
+// colocated deployment's files on disk rather than talking to its API:
+// `grain state` and `grain secrets` (grain/task-303). Both need the root
+// that deployment's daemon was started with, and there is exactly one
+// such root per host -- so a deployment that knows it can say so once,
+// for every shell on the box, instead of every operator remembering the
+// path. scripts/setup.sh exports it both in the CLI wrapper's container
+// and in /etc/profile.d/grain.sh, beside GRAIN_SERVER.
+//
+// That matters most for the commands a deployment prints itself: its
+// closing report tells the operator to run `grain state status`, and
+// typed exactly as printed that used to fail with "-data-dir is
+// required".
+//
+// An explicit -data-dir still wins -- see dataDirDefault, which supplies
+// this only as the flag's default -- and a host that sets neither gets
+// the same error it always did.
+const dataDirEnvVar = "GRAIN_DATA_DIR"
+
+// dataDirDefault is what -data-dir defaults to: GRAIN_DATA_DIR if it is
+// set to anything non-empty, and otherwise empty, which the subcommands
+// go on to reject. Empty is treated as unset rather than as a data
+// directory named "", for the same reason serverDefault does it.
+func dataDirDefault() string {
+	return strings.TrimSpace(os.Getenv(dataDirEnvVar))
+}
+
 func runCLI(args []string) error {
 	fs := flag.NewFlagSet("grain", flag.ContinueOnError)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, usage) }
