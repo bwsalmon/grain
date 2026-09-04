@@ -89,6 +89,26 @@ func TestLiveAgyLoadsGrainsHookConfig(t *testing.T) {
 		t.Errorf("agy -p /hooks named grain's hook for a HOME with no hooks.json:\n%s\n"+
 			"So the assertions above are not evidence that agy read grain's file.", control)
 	}
+
+	// And the reason any of this is asserted rather than assumed: a
+	// hooks.json agy cannot read is not an error. It loads no hooks,
+	// says nothing, and leaves the binary working -- which from grain's
+	// side is a run whose every tool call goes straight past the denial.
+	// The day hookConfigJSON emits a shape this agy no longer accepts
+	// looks exactly like this.
+	if err := os.WriteFile(antigravity.HooksConfigPathForTest(bare), []byte("not json at all"), 0o600); err != nil {
+		t.Fatalf("writing an unreadable hooks.json: %v", err)
+	}
+	broken, err := agyPrintModeResult(t, agyPath, bare, "/hooks")
+	switch {
+	case err != nil:
+		t.Logf("agy now refuses to start on an unreadable hooks.json (%v): it fails loudly rather than "+
+			"silently, which makes the assertions above cheaper than they need to be rather than wrong", err)
+	case strings.Contains(broken, antigravity.HookName):
+		t.Errorf("agy -p /hooks named grain's hook for a HOME whose hooks.json is not JSON:\n%s", broken)
+	default:
+		t.Logf("an unreadable hooks.json loads as no hooks, exit 0, no message: the silent failure this test exists for")
+	}
 }
 
 // TestLiveAgyLoadsGrainsPermissionRules asserts the other file: that the
@@ -229,6 +249,18 @@ func liveRunHome(t *testing.T, grainPath string) string {
 // tests cost no quota even on the nightly that has a real credential.
 func agyPrintMode(t *testing.T, agyPath, home, slashCommand string) string {
 	t.Helper()
+	out, err := agyPrintModeResult(t, agyPath, home, slashCommand)
+	if err != nil {
+		t.Fatalf("agy -p %s: %v\nstdout:\n%s", slashCommand, err, out)
+	}
+	return out
+}
+
+// agyPrintModeResult is the same, for the one caller that is asking what
+// agy does with a config it cannot read and must not fail when the answer
+// is "refuses to start".
+func agyPrintModeResult(t *testing.T, agyPath, home, slashCommand string) (string, error) {
+	t.Helper()
 	apiKey := os.Getenv("GEMINI_API_KEY")
 	if apiKey == "" {
 		apiKey = "grain-print-mode-probe"
@@ -242,7 +274,7 @@ func agyPrintMode(t *testing.T, agyPath, home, slashCommand string) string {
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		t.Fatalf("agy -p %s: %v\nstdout:\n%s\nstderr:\n%s", slashCommand, err, stdout.String(), stderr.String())
+		return stdout.String(), fmt.Errorf("%w\nstderr:\n%s", err, stderr.String())
 	}
-	return stdout.String()
+	return stdout.String(), nil
 }
