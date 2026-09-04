@@ -239,8 +239,8 @@ func TestTheCommandGetsTheSameEnvironmentSSHDGaveIt(t *testing.T) {
 	if len(lines) != 3 {
 		t.Fatalf("stdout = %q", res.stdout)
 	}
-	if lines[0] != defaultPATH {
-		t.Errorf("PATH = %q, want sshd's own default %q", lines[0], defaultPATH)
+	if want := defaultPATH(os.Getuid()); lines[0] != want {
+		t.Errorf("PATH = %q, want the login default %q", lines[0], want)
 	}
 	if lines[2] == "" {
 		t.Error("USER is empty")
@@ -538,8 +538,8 @@ func TestARequestedEnvironmentIsOverlaidOnTheLoginEnvironment(t *testing.T) {
 	if lines[0] != "-mod=vendor" {
 		t.Errorf("GOFLAGS = %q, want the value the request set", lines[0])
 	}
-	if lines[1] != defaultPATH {
-		t.Errorf("PATH = %q, want the login default %q left alone", lines[1], defaultPATH)
+	if want := defaultPATH(os.Getuid()); lines[1] != want {
+		t.Errorf("PATH = %q, want the login default %q left alone", lines[1], want)
 	}
 	if lines[2] == "" {
 		t.Error("HOME is empty: the login environment was replaced rather than added to")

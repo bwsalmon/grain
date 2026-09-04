@@ -6,11 +6,12 @@ kontur's primary consumer, so a change grain needs belongs on kontur's
 `main` and reaches here by a resync, not by being applied to this copy
 (see "Local patches" below).
 
-**This copy is byte-for-byte upstream again**, verified with `diff -r`
-against a fresh checkout (which reports only this file). Both of the
-local patches it used to carry have landed on kontur's `main` and come
-back here as ordinary upstream code -- see "Local patches" at the bottom,
-which is back to saying "None". Keep it that way.
+This copy is upstream plus **one patch, in flight** ([kontur#70]) -- see
+"Local patches" at the bottom, which is otherwise back to "None". Both of
+the local patches this file used to list have landed on kontur's `main`
+and come back here as ordinary upstream code. Keep it that way: the one
+below is here only because it is the fix for a red build, and it goes
+when its PR merges.
 
 This snapshot is kontur's `main` at
 `a9fe8b66aed8bd07e937597bc4de58dd4a8abdf5` (2026-09-04), the merge of
@@ -110,6 +111,7 @@ being carried into the guest rather than just its netmask.
 [kontur#43]: https://github.com/bwsalmon/kontur/pull/43
 [kontur#46]: https://github.com/bwsalmon/kontur/pull/46
 [kontur#67]: https://github.com/bwsalmon/kontur/pull/67
+[kontur#70]: https://github.com/bwsalmon/kontur/pull/70
 
 ## Previous resync: a VM can be given the disk size it needs
 
@@ -310,9 +312,21 @@ safety- or correctness-critical should be confirmed against a live
 
 ## Local patches
 
-**None.** Both of the two this file used to list are upstream now, and
-the way they got there is the point of this section rather than a
-footnote:
+**One, in flight.** `internal/agent/path.go` and its test, plus the two
+lines in `session.go` that call it: a root exec session gets the sbin
+directories on its PATH, the way `login(1)` and `sshd(8)` give uid 0
+`ENV_SUPATH` rather than `ENV_PATH`. Without it the guest setup script
+dies on `useradd: not found`, since `useradd` lives in `/usr/sbin` -- so
+this is not a patch anyone chose to carry, it is the fix for a red build
+copied in ahead of its merge.
+
+It is [kontur#70], byte-for-byte the same change, and it is a no-op the
+moment kontur's `main` carries it. **Drop it by re-vendoring from that
+`main`** -- do not re-diff it by hand, and do not let this section keep
+saying "one" after #70 has merged.
+
+The two this file used to list are upstream now, and the way they got
+there is the point of this section rather than a footnote:
 
 - **Flat mode's default-route discovery** landed as [kontur#40]. It was
   applied here directly first, and the file it lived in has since been

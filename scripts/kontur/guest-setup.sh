@@ -284,12 +284,12 @@ curl -fsSL -o "/tmp/${go_tarball}" "https://go.dev/dl/${go_tarball}"
 rm -rf /usr/local/go
 tar -C /usr/local -xzf "/tmp/${go_tarball}"
 rm -f "/tmp/${go_tarball}"
-# /usr/local/bin, not a profile script: sshd runs `bash -c` for a
-# non-interactive command, which reads no profile at all, and its default
-# PATH (/usr/local/bin:/usr/bin:/bin:/usr/games -- confirmed on a booted
-# guest) already has this directory in it. Every environment default
-# below is likewise written where the tool itself reads it rather than
-# into a shell's environment, for the same reason.
+# /usr/local/bin, not a profile script: `kontur exec` runs the command
+# through `sh -c` with no profile read at all, and the PATH its agent
+# gives a session -- login(1)'s own, from /etc/login.defs -- already has
+# this directory in it, for root and for an ordinary user alike. Every
+# environment default below is likewise written where the tool itself
+# reads it rather than into a shell's environment, for the same reason.
 ln -sf /usr/local/go/bin/go /usr/local/bin/go
 ln -sf /usr/local/go/bin/gofmt /usr/local/bin/gofmt
 

@@ -55,11 +55,6 @@ import (
 	"github.com/bwsalmon/kontur/internal/execwire"
 )
 
-// defaultPATH is sshd's own default for a session with no profile read,
-// and so what a command run here has always seen. Changing it is a
-// guest-visible change, not a tidy-up.
-const defaultPATH = "/usr/local/bin:/usr/bin:/bin:/usr/games"
-
 // Serve handles exactly one exec session on conn and returns when the
 // command has finished and its exit frame has been written.
 //
@@ -358,7 +353,7 @@ func (a *account) credential() *syscall.Credential {
 
 func loginEnv(a *account) []string {
 	return []string{
-		"PATH=" + defaultPATH,
+		"PATH=" + defaultPATH(a.UID),
 		"HOME=" + a.Home,
 		"USER=" + a.Name,
 		"LOGNAME=" + a.Name,
