@@ -88,6 +88,7 @@ import (
 
 	"github.com/bwsalmon/grain/pkg/agent/antigravity"
 	"github.com/bwsalmon/grain/pkg/kontur"
+	"github.com/bwsalmon/grain/pkg/model"
 	"github.com/bwsalmon/grain/pkg/ui"
 )
 
@@ -672,6 +673,16 @@ func cmdSettings(ctx context.Context, c *ui.HTTPClient, out *printer, args []str
 	pollInterval := fs.String("poll-interval", "", "how often the daemon runs a reconcile cycle, e.g. 30s")
 	maxWorkers := fs.Int("max-workers", 0, "maximum number of ordinary tasks dispatched at once")
 	maxMergers := fs.Int("max-mergers", 0, "capacity on top of -max-workers only the merge queue's own fix tasks may use (0 lets them contend for it like anything else)")
+	// The one setting the Settings pane could change and this could not
+	// (found by hand, task 244): an operator on a host with no browser
+	// reachable -- which is every deployment scripts/setup.sh installs,
+	// where the UI binds to loopback -- could read and set all three
+	// model names here but neither see nor change which framework
+	// actually runs. Validated by ui.UpdateSettings, the same as the
+	// pane's own field, rather than a second copy of the vocabulary
+	// here.
+	agentFramework := fs.String("agent-framework", "",
+		"which agent framework a run is driven by unless its task names another: "+model.AgentFrameworkNames())
 	geminiModel := fs.String("gemini-model", "", "Gemini model the antigravity agent framework calls")
 	claudeModel := fs.String("claude-model", "", "Claude model the claude agent framework calls")
 	codexModel := fs.String("codex-model", "", "model the codex agent framework calls")
@@ -748,6 +759,9 @@ func cmdSettings(ctx context.Context, c *ui.HTTPClient, out *printer, args []str
 		case "max-mergers":
 			v := *maxMergers
 			req.MaxMergers = &v
+		case "agent-framework":
+			v := *agentFramework
+			req.AgentFramework = &v
 		case "gemini-model":
 			v := *geminiModel
 			req.GeminiModel = &v
@@ -933,6 +947,9 @@ func (p *printer) settings(s ui.Settings) {
 	fmt.Printf("poll interval:  %s\n", s.PollInterval)
 	fmt.Printf("max workers:    %d\n", s.MaxWorkers)
 	fmt.Printf("max mergers:    %d\n", s.MaxMergers)
+	// Ahead of the three model names, which are each only in effect when
+	// this line names their framework.
+	fmt.Printf("agent framework: %s\n", s.AgentFramework)
 	fmt.Printf("gemini model:   %s\n", s.GeminiModel)
 	fmt.Printf("claude model:   %s\n", s.ClaudeModel)
 	fmt.Printf("codex model:    %s\n", s.CodexModel)
