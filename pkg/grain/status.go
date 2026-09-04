@@ -1,9 +1,6 @@
 package grain
 
-import (
-	"encoding/json"
-	"time"
-)
+import "time"
 
 // Phase is where a grain is in its life. It is the one field Reconcile
 // branches on first, and it is deliberately coarse: anything finer -- what
@@ -25,11 +22,10 @@ const (
 	PhaseProvisioning Phase = "provisioning"
 	// PhaseRunning is the agent CLI executing in the container.
 	PhaseRunning Phase = "running"
-	// PhaseBlocked is the agent waiting on a Request nobody has answered
-	// -- a question for a human, a secret, a pull request only the
-	// controller can open. Distinct from PhaseRunning because a grain
-	// that has been blocked for an hour is waiting on someone, and a
-	// grain that has been running for an hour is working.
+	// PhaseBlocked is the agent waiting on an upstream tool call -- a
+	// question for a human, a secret, a pull request. Distinct from
+	// PhaseRunning because a grain blocked for an hour is waiting on
+	// someone, and one running for an hour is working.
 	PhaseBlocked Phase = "blocked"
 
 	PhaseSucceeded Phase = "succeeded"
@@ -99,17 +95,10 @@ type Status struct {
 	// It is the diagnosis for a grain that failed before its agent ever
 	// ran, which is the case a bare outcome explains worst.
 	Setup *SetupResult `json:"setup,omitempty"`
-	// Call is the one MCP tool call this grain is waiting on the
-	// controller to serve, or nil when it is waiting on nothing.
-	//
-	// At most one, always. The shim serves every tool it can locally and
-	// forwards only the ones needing the store, GitHub or a human; if two
-	// of those arrive together -- which parallel tool use makes possible
-	// -- it holds the second until the first is answered. Serialising
-	// costs a tick on a case that is already rare, and buys a status with
-	// one slot instead of a queue: "this grain is blocked on X, or it is
-	// not blocked".
-	Call *Call `json:"call,omitempty"`
+	// Upstream is this grain's connection to the controller's MCP
+	// server, which is where every tool but BuiltinTools comes from.
+	Upstream Upstream `json:"upstream"`
+
 	// Result is set exactly when Phase is terminal.
 	Result *Result `json:"result,omitempty"`
 	Health Health  `json:"health"`
@@ -124,20 +113,6 @@ type Status struct {
 	// per-record sequence is the one cursor both a log stream and a plain
 	// file can honour.
 	Seq int64 `json:"seq"`
-	// Consumed are the Answer ids this grain has taken delivery of, so a
-	// controller stops resending them.
-	//
-	// It is the acknowledgement half of a spool that is deliberately
-	// at-least-once: `grain answer` is a separate process from the
-	// supervisor that acts on it, so it hands over through a directory
-	// rather than a call, and a controller cannot tell a write it made
-	// from one the supervisor has read. Echoing the ids back is what
-	// closes that.
-	//
-	// Bounded rather than complete: a grain need only remember far enough
-	// back that a controller polling every tick cannot still be holding
-	// an unacknowledged id, not for the life of the run.
-	Consumed []string `json:"consumed,omitempty"`
 }
 
 // SetupResult is how Spec.Setup ended, verbatim and uninterpreted.
@@ -154,48 +129,38 @@ type SetupResult struct {
 	Output string `json:"output,omitempty"`
 }
 
-// CallID identifies one forwarded call within one grain.
-type CallID string
-
-// Call is one MCP tool call the shim is holding open on the agent's
-// behalf, waiting for the controller to serve it.
+// Upstream is the state of a grain's connection to the controller's MCP
+// server -- the one the controller attaches by exec'ing `grain proxy`,
+// and over which every tool that is not a built-in is served.
 //
-// It is an MCP tools/call forwarded rather than translated: Tool and
-// Arguments are what the agent's own client sent, and the Answer that
-// settles it is what the shim returns as that tool's result. The
-// controller is acting as an out-of-band executor for the tools a grain
-// cannot run itself, reached by being polled rather than by holding a
-// connection -- which is the whole of what "MCP over a poll" means here,
-// and why none of it needs an MCP transport.
+// The shim terminates the agent's own MCP session rather than proxying it
+// through, which is what makes a dropped upstream survivable. MCP is
+// session-oriented: a client initializes once and a dead transport takes
+// the whole session with it, and clients generally mark such a server
+// failed rather than re-initializing. A grain that merely piped bytes
+// would therefore lose those tools for the rest of the run -- an hour in,
+// silently -- rather than for a tick. Terminating means the agent's
+// connection is to the shim, the shim never closes it, and a drop is
+// something only the shim sees.
 //
-// Tool is a bare string because a grain does not know what any of these
-// mean. It serves its own built-ins (BuiltinTools) and forwards every
-// tool somebody else declared (Spec.Tools), without a vocabulary of its
-// own for them. Whoever declared a tool is who knows what it does.
-type Call struct {
-	ID   CallID `json:"id"`
-	Tool string `json:"tool"`
-	// Arguments are the call's own, verbatim, so the controller never
-	// depends on the shim having understood them.
-	Arguments json.RawMessage `json:"arguments,omitempty"`
-	// Since is when the agent made the call, and so how long it has been
-	// blocked -- the number a human wants when a grain has read "blocked"
-	// for an hour.
-	Since time.Time `json:"since"`
-}
-
-// Answer settles a Call. It is mcp.Result's own two fields, so the shim
-// hands it back to the agent as that tool's result with nothing to
-// translate: text plus a flag, reported as a single content block.
-//
-// A refusal is an answer. IsError with a reason tells the agent it asked
-// for something it will not get, which is a turn it can act on; leaving a
-// call unanswered blocks it until its deadline instead.
-type Answer struct {
-	// Version is the wire format this document is written to.
-	Version string `json:"version"`
-	Text    string `json:"text"`
-	IsError bool   `json:"isError,omitempty"`
+// What the shim does while detached is hold: in-flight and new calls to
+// upstream tools wait rather than failing, so the agent goes on working
+// with the sandbox tools -- most of what it does -- and blocks only if it
+// reaches for an upstream one. The controller reattaches on its next tick
+// and the held calls go through. If it never returns, Spec.MaxRuntime
+// ends the grain like any other stall.
+type Upstream struct {
+	// Attached is whether a controller is connected right now. A grain
+	// running with this false is one to attach to, which is a reconcile
+	// row.
+	Attached bool `json:"attached"`
+	// Pending is how many calls the shim is holding for a controller that
+	// is not there. Reported because a grain with calls piling up and
+	// nobody attached is a situation worth seeing, and the phase alone
+	// does not say it.
+	Pending int `json:"pending,omitempty"`
+	// Since is when Attached last changed.
+	Since time.Time `json:"since,omitempty"`
 }
 
 // Outcome vocabulary, matching what model.Store.FinishRun already

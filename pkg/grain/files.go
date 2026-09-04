@@ -1,7 +1,6 @@
 package grain
 
 import (
-	"encoding/json"
 	"fmt"
 	"path"
 	"strings"
@@ -64,12 +63,6 @@ const (
 	// human can cat in an incident -- rather than a string that has to
 	// survive shell quoting on its way through a runtime's env handling.
 	FileSetup = Root + "/setup"
-	// DirTools holds the MCP tool declarations the grain advertises to
-	// the agent and forwards calls to, one JSON file per tool
-	// (ToolDecl). Non-secret and structured, which makes it a ConfigMap
-	// volume on Kubernetes -- and means a deployment can give its agents
-	// a new tool without grain being changed or released.
-	DirTools = Root + "/tools"
 	// DirPlacements holds the files to copy into the guest, in a tree
 	// that mirrors their guest paths: a placement at /home/agent/.netrc
 	// is mounted at /grain/placements/home/agent/.netrc.
@@ -97,6 +90,18 @@ const (
 // writing it anyway costs a few hundred bytes.
 const FileTerminationLog = "/dev/termination-log"
 
+// SocketUpstream is where `grain proxy` connects to hand the supervisor
+// its stream to the controller's MCP server.
+//
+// A socket the supervisor listens on, rather than the proxy owning the
+// connection, because they are separate processes: `grain run` is PID 1
+// and `grain proxy` is what the controller starts with an exec, and
+// passing a file descriptor between them would need SCM_RIGHTS where
+// copying bytes needs nothing. So proxy dials this and pumps its own
+// stdin and stdout across, and when the exec dies the socket connection
+// closes and the supervisor knows it is detached.
+const SocketUpstream = "/run/grain/upstream.sock"
+
 // ModeSetup is the mode FileSetup is written with. Executable, because a
 // script that has to be invoked through an interpreter cannot carry its
 // own shebang, and the controller composing it should be free to choose
@@ -118,10 +123,7 @@ type File struct {
 // and writing three of four credentials is a worse outcome than writing
 // none and saying so.
 func (s Spec) Files() (map[string]File, error) {
-	if err := checkTools(s.Tools); err != nil {
-		return nil, err
-	}
-	out := make(map[string]File, len(s.Placements)+len(s.Tools)+2)
+	out := make(map[string]File, len(s.Placements)+3)
 	if s.Framework.Credential != "" {
 		out[FileCredential] = File{Content: s.Framework.Credential, Mode: "0600"}
 	}
@@ -130,15 +132,6 @@ func (s Spec) Files() (map[string]File, error) {
 	}
 	if s.Setup != "" {
 		out[FileSetup] = File{Content: s.Setup, Mode: ModeSetup}
-	}
-	for _, d := range s.Tools {
-		encoded, err := json.MarshalIndent(d, "", "  ")
-		if err != nil {
-			return nil, fmt.Errorf("grain: encoding the %q tool: %w", d.Name, err)
-		}
-		// 0644: a tool declaration is not material, and the agent's own
-		// process may need to read it.
-		out[DirTools+"/"+d.Name+".json"] = File{Content: string(encoded) + "\n", Mode: "0644"}
 	}
 	for _, p := range s.Placements {
 		at, err := PlacementPath(p.Path)

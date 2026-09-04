@@ -34,13 +34,14 @@
 // rebuilt, so a rebuild replays Spec.Placements rather than coordinating
 // a re-mint with a controller that holds the only copy.
 //
-// Anything that touches the store, GitHub or a human is an MCP tool call
-// the shim forwards rather than serves: it surfaces on the next Observe
-// as Status.Call, the controller executes it and hands the result back
-// through Answer, and the shim returns that to the agent as the tool's
-// own result. So the controller is an out-of-band executor for the tools
-// a grain cannot run itself -- MCP over a poll, needing no MCP transport,
-// no session and no connection.
+// Everything else an agent can call comes from an ordinary MCP server the
+// controller runs, reached over the connection Attach opens. The shim
+// merges those tools into its own tools/list and relays their calls; it
+// holds no vocabulary for them and never sees a declaration it wrote. So
+// somebody extending a deployment writes a plain stdio MCP server against
+// the spec and any official SDK, lists it in the controller's own
+// mcpServers config, and its tools appear to every agent -- with no
+// awareness that a proxy, a container or a VM is in the path.
 //
 // That is the whole of what leaves the container, and it means the
 // container needs no daemon URL, no task ID and no bearer token of its
@@ -63,7 +64,10 @@
 // health.
 package grain
 
-import "context"
+import (
+	"context"
+	"io"
+)
 
 // ID names one grain. It is derived from the run it serves
 // (dispatch.RunID) and never allocated by a backend, because a controller
@@ -133,18 +137,38 @@ type Grain interface {
 	// genuinely a second route only under docker.
 	Observe(ctx context.Context) (Status, error)
 
-	// Answer settles the MCP tool call this grain is blocked on
-	// (Status.Call) -- the shim hands what comes back to the agent as
-	// that tool's result. Answering an unknown or already-settled call is
-	// a no-op, so a controller that polls again before the shim has
-	// consumed the first answer is harmless, which is the property that
-	// lets Reconcile be re-run freely.
+	// Attach connects this grain to the controller's MCP server. The
+	// returned stream is one MCP stdio session with the *controller* as
+	// the server and the grain as the client: whatever `mcpServers` that
+	// deployment configured, launched per grain so a run's context
+	// arrives as ordinary launch arguments, aggregated, and served here.
 	//
-	// One call at a time, because a grain holds at most one: the shim
-	// serves every tool it can locally and forwards only what needs the
-	// store, GitHub or a human, holding a second such call until the
-	// first is settled.
-	Answer(ctx context.Context, call CallID, ans Answer) error
+	// It is the one call that is not poll-shaped, and it earns that. The
+	// objections that ruled out held connections elsewhere were about
+	// what they carried -- push, where silence is ambiguous and edges get
+	// lost; the trajectory, which needs buffering and replay. Tool calls
+	// are synchronous request/response, low volume, and fail visibly, so
+	// none of it transfers. Direction is unchanged either way: the
+	// controller opens this, and the grain never dials out.
+	//
+	// It blocks for the life of the connection and returns when it drops.
+	// A controller reattaches on any tick that finds Upstream.Attached
+	// false, and the shim holds calls in between (see Upstream).
+	//
+	// A grain waits for the first attach before starting its agent,
+	// because a tool list is fixed at MCP's initialize and the shim
+	// cannot advertise what it has not yet been told about. So a grain
+	// cannot *start* without a controller, though it survives one dying
+	// mid-run on the list it cached. A controller that dies before
+	// attaching leaves the grain in PhaseProvisioning until
+	// Policy.ProvisionBudget, which is an ending that already has a rule.
+	//
+	// Held calls are replayed on reattach, so an upstream server must
+	// tolerate seeing one twice: the connection can drop after it acted
+	// and before its answer arrived. Grain's own pull request path
+	// already does -- EnsurePullRequest is find-or-create -- and where
+	// that is not achievable the controller dedupes by call id.
+	Attach(ctx context.Context) (io.ReadWriteCloser, error)
 
 	// Transcript reads this run's trajectory from a cursor -- the
 	// sequence number of the last record the caller saw, Status.Seq's own

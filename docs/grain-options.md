@@ -321,9 +321,11 @@ an agent in a sandbox and knows nothing about why.
   of whether repair is converging.
 - **id** → the container is the identity. A controller execs into one
   specific container, so a grain is never told a name it makes no use of.
-- **the tool vocabulary** → `/grain/tools/`. `ToolOpenPullRequest` and
-  friends were grain-the-product's names sitting inside
-  grain-the-sandbox-runner.
+- **the tool vocabulary** → the controller's own MCP server.
+  `ToolOpenPullRequest` and friends were grain-the-product's names sitting
+  inside grain-the-sandbox-runner; the mounted declarations that briefly
+  replaced them went too (see "Forwarding calls, replaced by a real MCP
+  connection").
 
 ### The two-phase start, retired
 
@@ -516,3 +518,71 @@ still-provisioning grains; marginal, and recorded rather than built.
 **What Kubernetes does not give** is mid-run rich state — activity, the
 outstanding call, `seq`. There is no native "ask the container what it is
 doing" short of exec, so the poll stays.
+
+## Forwarding calls, replaced by a real MCP connection
+
+For a while the controller was an out-of-band executor: the shim held a
+tool call it could not serve, surfaced it as `status.call`, and a `grain
+answer` verb settled it. **MCP over a poll.**
+
+Replaced by the controller attaching an actual MCP server, because the
+poll version was re-implementing request/response over a channel that was
+not built for it. What that deleted: `Status.Call`, `Call`, `CallID`,
+`Answer`, the "at most one outstanding" serialisation, `Status.Consumed`
+and the spool, the `answer` verb, `ActionAnswer` — and `/grain/tools/`,
+`ToolDecl` and `checkTools` with them, since a server advertises its own
+`tools/list` and a mounted schema was only ever a second copy to keep in
+sync.
+
+### The failure mode that shaped it
+
+The obvious version — the shim as a dumb byte pipe with a tee into the
+trajectory — is wrong, and badly. MCP is session-oriented: a client
+initializes once and a dead transport takes the session with it, and
+clients generally mark such a server failed rather than re-initializing.
+So a dropped pipe would cost the agent those tools **for the rest of the
+run**, an hour in and silently, rather than for a tick.
+
+Hence the shim terminates the agent's session and merges tool lists,
+holding upstream calls while detached. The agent's connection is to the
+shim, and the shim never closes it.
+
+That recovers a small part of what forwarding was — an in-memory hold —
+but not the expensive part: no spool, no status surfacing, no answer verb,
+no ids to acknowledge.
+
+### What it costs
+
+**A grain cannot start without a controller.** A tool list is fixed at
+`initialize`, so the shim must know the upstream tools before the agent
+runs, which means waiting for the first attach. The alternative was
+keeping mounted declarations so the shim is independent at start; waiting
+was preferred because the controller has just created the grain (the
+window is milliseconds), a grain that cannot reach a controller cannot do
+its job anyway, and a controller dying before attach leaves the grain in
+provisioning until `ProvisionBudget` — an ending that already has a rule.
+A grain *does* survive a controller dying mid-run, on the cached list.
+
+**At-least-once did not disappear, it moved.** A connection can drop after
+an upstream server acted and before its answer arrived, so replaying a
+held call can double-execute. That machinery moved from the wire into the
+connection, where it is cheaper — in-memory, no `status.consumed` — but it
+is not free. Naturally idempotent tools are better where achievable, and
+grain's pull request path already is (`EnsurePullRequest`, find-or-create).
+
+**Forwarding survived an absent controller and a connection does not.**
+Under forwarding a grain blocked and was answered whenever *a* controller
+returned, even a different process — the reattach property. Now calls
+merely wait for the next tick's reattach, which is nearly the same thing,
+but not identically so.
+
+### What it bought
+
+Real MCP, end to end, with immediate latency — `wait_for_checks` and
+`ask_question` work by the server simply not answering yet, with no policy
+in the wire. And an extension story that is one sentence: **write a plain
+stdio MCP server, list it in the controller's config, and its tools appear
+to every agent.** That server is unaware of the proxy, the container or
+the VM; per-run context reaches it as launch arguments, because the
+controller starts one instance per grain — which is how MCP servers are
+scoped anyway.

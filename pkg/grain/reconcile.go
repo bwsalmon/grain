@@ -71,9 +71,11 @@ type Observed struct {
 type ActionKind string
 
 const (
-	// ActionAnswer serves Action.Call -- the one forwarded MCP tool call
-	// this grain is blocked on.
-	ActionAnswer ActionKind = "answer"
+	// ActionAttach connects this grain to the controller's MCP server --
+	// Grain.Attach. Issued for any grain running without one, which is
+	// how a dropped connection is repaired and how a freshly created
+	// grain gets started at all.
+	ActionAttach ActionKind = "attach"
 	// ActionRecordActivity copies the grain's own phrase onto the task's
 	// row.
 	ActionRecordActivity ActionKind = "record-activity"
@@ -93,7 +95,6 @@ const (
 // next tick observes whatever actually happened and decides again.
 type Action struct {
 	Kind     ActionKind
-	Call     CallID
 	Outcome  string
 	Detail   string
 	Activity string
@@ -124,8 +125,9 @@ type Action struct {
 //     no signal for either.
 //  6. A provisioning grain past its budget is failed. Nothing else about
 //     a grain that cannot finish booting is worth doing.
-//  7. Otherwise, keep it served: at most one forwarded call, because a
-//     grain holds at most one.
+//  7. Otherwise, keep it connected: a grain with no upstream cannot serve
+//     any tool but its own, and one that has never had an upstream has
+//     not started its agent at all.
 func Reconcile(o Observed, p Policy) []Action {
 	st := o.Status
 
@@ -203,12 +205,11 @@ func Reconcile(o Observed, p Policy) []Action {
 		}
 	}
 
-	// 7. Steady state: serve the call it is blocked on and keep its row
-	// honest. Both are independent, and a tick with nothing to do returns
-	// nothing at all.
+	// 7. Steady state: keep it attached and keep its row honest. Both are
+	// independent, and a tick with nothing to do returns nothing at all.
 	var out []Action
-	if st.Call != nil {
-		out = append(out, Action{Kind: ActionAnswer, Call: st.Call.ID})
+	if !st.Upstream.Attached {
+		out = append(out, Action{Kind: ActionAttach})
 	}
 	if st.Activity != o.Run.Activity {
 		out = append(out, Action{Kind: ActionRecordActivity, Activity: st.Activity})

@@ -65,39 +65,99 @@ wire format. The residual: the agent process can read its own token and
 could write it into the guest. That is unchanged from today, and is not
 what the VM boundary defends against.
 
-## The tool line
+## Tools: six built in, the rest from an MCP server
 
-> **If grain declared it, grain serves it. If you declared it, grain
-> forwards it.**
-
-Grain's own are six built-ins, every one about the sandbox:
+Grain's own are six, every one about the sandbox:
 
 | tool | served |
 | --- | --- |
 | `run_command`, `read_file`, `write_file`, `edit_file` | locally, over vsock |
 | `recreate_sandbox` | locally — a kontur call, now that the VMM is the shim's own child |
-| `status` | locally — writes `status.activity`, read on the next poll |
+| `status` | locally — writes `status.activity`, read off the record stream |
 
-Everything else is an ordinary MCP tool declaration in `/grain/tools/`
-that the grain advertises, holds calls to, and relays **without a
-vocabulary of its own for it**. So `open_pull_request`, `ask_question`,
-`wait_for_checks` and the rest are grain-the-product's tools, declared by
-the controller that knows what they mean; a deployment can add a tool
-grain has never heard of without grain being changed or released.
+**Everything else comes from an ordinary MCP server the controller runs.**
+The controller attaches to a grain by exec'ing `grain proxy`, and over that
+connection it serves whatever `mcpServers` the deployment configured. The
+shim merges those tools into its own `tools/list` and relays their calls.
+
+`status` is the one escape hatch that becomes *fully* local: `update_status`
+is an HTTP hop today to put a phrase on a task's row, and as a built-in it
+is a file write that cannot fail and costs the agent nothing.
 
 | tool | today | as a grain |
 | --- | --- | --- |
 | `run_command`, `read_file`, … | `docker exec` → `kontur exec` | built in — local, vsock |
 | `recreate_sandbox` | MCP → daemon REST → registry → four `restore*` | built in — local kontur call |
 | `update_status` → `status` | MCP → daemon REST → store write | built in — a local file write |
-| `open_pull_request` | MCP → daemon REST | declared and forwarded |
-| `pull_request_status`, `wait_for_checks` | controller's GitHub client | declared and forwarded |
-| `ask_question`, `request_secret` | deferred into the result | declared and forwarded |
-| `comment_on_issue`, `propose_task`, `add_review_comment` | deferred into the result | declared and forwarded |
+| `open_pull_request`, `pull_request_status`, `wait_for_checks` | daemon REST / controller's GitHub client | an upstream MCP server |
+| `ask_question`, `request_secret` | deferred into the result | an upstream MCP server |
+| `comment_on_issue`, `propose_task`, `add_review_comment` | deferred into the result | an upstream MCP server |
 
-`status` is the one escape hatch that becomes *fully* local: `update_status`
-is an HTTP hop today to put a phrase on a task's row, and as a built-in it
-is a file write that cannot fail and costs the agent nothing.
+### Extending it
+
+Somebody who wants an agent to be able to do something new writes **a plain
+stdio MCP server** — the spec's own transport, any official SDK — and lists
+it in the controller's config, in the shape every MCP client already takes:
+
+```json
+{
+  "mcpServers": {
+    "acme-tracker": { "command": "/usr/local/bin/acme-mcp",
+                      "args": ["--task", "task-311", "--repo", "bwsalmon/grain"] }
+  }
+}
+```
+
+**That server is not aware of any of this.** It does not know a proxy, a
+container or a VM is in the path. Per-run context reaches it as launch
+arguments, because the controller starts **one instance per grain** — which
+is how MCP servers are scoped anyway, the way a filesystem server is given
+its root.
+
+Name collisions across merged servers are handled by the convention grain
+already implements: `pkg/mcp/toolnames.go`'s `mcp__<namespace>__<tool>`,
+"the way a CLI that loaded it from an MCP config reports and admits it",
+plus `AgyQualifiedToolName` for agy's single-underscore spelling of the
+same thing.
+
+This replaced a scheme where tool schemas were mounted into the container
+as declarations. A server advertising its own `tools/list` is one source of
+truth; a mounted schema is a second copy to keep in sync.
+
+### Why the shim terminates the session rather than piping bytes
+
+MCP is session-oriented: a client initializes once, and a dead transport
+takes the whole session with it — clients generally mark such a server
+failed rather than re-initializing. A grain that merely piped bytes to the
+controller would therefore lose those tools **for the rest of the run** the
+first time the connection dropped, an hour in and silently.
+
+So the shim is the MCP server the agent talks to. It serves `initialize`
+and a merged `tools/list`, answers its own six, and relays the rest. The
+agent's connection is to the shim and the shim never closes it, so a drop
+is something only the shim sees.
+
+**While detached it holds.** In-flight and new upstream calls wait rather
+than failing, so the agent goes on working with the sandbox tools — most of
+what it does — and blocks only if it reaches for an upstream one. The
+controller reattaches on the next tick that finds `upstream.attached`
+false. If it never returns, `GRAIN_MAX_RUNTIME` ends the grain like any
+other stall.
+
+Two consequences worth naming rather than discovering:
+
+- **A grain cannot start without a controller.** A tool list is fixed at
+  `initialize`, so the shim must be told the upstream tools before the
+  agent runs. It waits for the first attach — milliseconds, since the
+  controller just created it — and a controller that dies before attaching
+  leaves the grain in `provisioning` until `ProvisionBudget`, an ending
+  that already has a rule. It *can* survive a controller dying mid-run, on
+  the list it cached.
+- **An upstream server must tolerate seeing a call twice.** A connection
+  can drop after the server acted and before its answer arrived, and held
+  calls are replayed on reattach. Grain's own pull request path already
+  does — `EnsurePullRequest` (`finish.go:937`) is find-or-create — and
+  where that is not achievable the controller dedupes by call id.
 
 **The container needs no daemon URL, no task ID and no bearer token.**
 `agent.RunConfig.TaskID` exists solely as "the one fact a forked mcpserver
@@ -130,8 +190,8 @@ in one of four shapes:
   the clone included, since a clone is git commands in a guest;
 - **a placement** (`/grain/placements/…`), which is where a credential the
   work needs goes, git's among them;
-- **a tool declaration** (`/grain/tools/…`), for anything the agent should
-  be able to ask for.
+- **a tool on the controller's MCP server**, for anything the agent should
+  be able to ask for beyond its own sandbox.
 
 A shim that understood repositories would have to agree with the
 controller about branch naming, proxy URLs, what to do with a half-made
@@ -165,7 +225,6 @@ CHV_CPUS=2  CHV_MEMORY_MB=8192  CHV_DISK_SIZE_MB=30720
 /grain/credential                                0600
 /grain/prompt                                    0644
 /grain/setup                                     0755
-/grain/tools/open_pull_request.json              0644
 /grain/placements/home/agent/.git-credentials    0600
 ```
 
@@ -190,8 +249,6 @@ volumes:
       items:
         - { key: credential,      path: credential,                             mode: 0600 }
         - { key: git-credentials, path: placements/home/agent/.git-credentials, mode: 0600 }
-  - name: tools
-    configMap: { name: grain-tools }
 ```
 
 **The placements tree is the mapping.** A placement bound for
@@ -285,15 +342,19 @@ grain run
         tools and forwarding the declared ones. Writes trajectory
         records to stdout. Does not exit until the grain is done.
 
+grain proxy
+        What the controller execs to attach. Dials SocketUpstream and
+        pumps its own stdin and stdout across, so the supervisor gets a
+        stream to the controller's MCP server. A socket rather than
+        handing over a file descriptor, because `run` and `proxy` are
+        separate processes and copying bytes needs no SCM_RIGHTS.
+
 grain status                       > status.json
-grain answer  --call <id>          < answer.json
 ```
 
-**Two verbs on the control surface**: read the status, answer the one call
-it may be blocked on. Everything else a controller does to a grain is a
-container-runtime operation — create it, list it, tail its logs, destroy
-it. Payloads go on stdin, never argv, since stdin has no size limit and no
-quoting hazard.
+**Two verbs**: attach, and read the status when the record stream has gone
+stale. Everything else a controller does to a grain is a container-runtime
+operation — create it, list it, tail its logs, destroy it.
 
 `run`'s stdout is the container log stream; a `status` started by `docker
 exec` writes to whoever called it. Different streams, which reads as a
@@ -314,14 +375,21 @@ is not running, as against propagating the command's code. The first means
 `PhaseLost`; the second means the shim answered and said no.
 `mcp.DockerExecRunner`'s `execFailedBeforeGuest` already draws that line.
 
-### Delivery
+### The upstream connection
 
-`answer` cannot hand anything to the supervisor directly — different
-process — so it writes into a spool directory the supervisor watches,
-atomically, named by the call's id. The supervisor consumes it and echoes
-that id in `status.consumed`; the controller stops resending once it sees
-its own id there. At-least-once with dedupe by id, which is what makes
-`Answer` idempotent as the interface promises.
+`grain proxy` is one MCP stdio session with the **controller** as server
+and the grain as client. It blocks for the life of the connection; the
+controller reattaches on any tick that finds `upstream.attached` false,
+which is both how a drop is repaired and how a freshly created grain gets
+started at all.
+
+It is the one thing here that is not poll-shaped, and it earns that. The
+objections that ruled out held connections elsewhere were about what they
+carried: push, where silence is ambiguous and edges get lost; the
+trajectory, which needs buffering and replay. Tool calls are synchronous
+request/response, low volume, and fail visibly — none of it transfers.
+Direction is unchanged: the controller opens it, and the grain never dials
+out. It rides exec, not the network, so it works in flat mode.
 
 ### Versioning
 
@@ -357,19 +425,13 @@ second exec per grain per tick.
   "activity": "waiting for CI",
   "rebuilds": 1,
   "setup": { "exitCode": 0, "output": "9f3c1a2\n" },
-  "call": {
-    "id": "c-7",
-    "tool": "open_pull_request",
-    "arguments": { "title": "Port the staleness check" },
-    "since": "2026-09-04T19:40:00Z"
-  },
+  "upstream": { "attached": true, "pending": 1, "since": "2026-09-04T19:40:00Z" },
   "health": {
     "container": { "running": true },
     "guest": { "ready": true, "loadAverage": "0.41 0.30 0.22",
                "conntrackCount": 812, "conntrackMax": 262144 }
   },
-  "seq": 4471,
-  "consumed": ["sig-19"]
+  "seq": 4471
 }
 ```
 
@@ -381,10 +443,10 @@ and every timeout the controller enforces is a subtraction against it.
 a controller execs into one specific container, so the answer cannot be
 ambiguous about whose it is.
 
-**`call` is one slot, not a queue.** The shim serves what it can and
-forwards the rest; if two forwarded calls arrive together — which parallel
-tool use makes possible — it holds the second until the first is settled.
-A grain is blocked on something or it is not.
+**`upstream` is how a drop becomes visible.** `attached` false on a running
+grain is one to reattach to; `pending` is how many calls the shim is
+holding for a controller that is not there, which the phase alone does not
+say.
 
 `conntrackCount`/`conntrackMax` are there because of the network decision:
 under NAT the guest's traffic fills a table in the pod's namespace that the
@@ -405,29 +467,6 @@ Once terminal, `result` is set:
 commits, pushes and then runs out of turns did the work and only the ending
 failed. Salvaging that branch is a special case in `runOne`'s error path
 today; here it is a field the ordinary finish path reads.
-
-### `answer.json` → `grain answer --call c-7`
-
-`mcp.Result`'s own two fields, so the shim returns it to the agent as that
-tool's result with nothing to translate:
-
-```json
-{ "version": "v1", "text": "opened #812: https://github.com/bwsalmon/grain/pull/812" }
-```
-
-A refusal is an answer:
-
-```json
-{ "version": "v1", "isError": true,
-  "text": "parked for a human; wrap up now" }
-```
-
-Leaving a call unanswered blocks the agent until its deadline. **Whether a
-tool blocks is the controller's policy, not the wire's**: `wait_for_checks`
-is a call it simply does not answer until CI has a verdict, and
-`ask_question` is the same mechanism with a different policy — answer it if
-a human is watching, or refuse it to reproduce today's end-the-turn
-behaviour. Both are one tool result the agent reacts to.
 
 ### Stopping a grain
 
@@ -520,7 +559,7 @@ type Grains interface {
 type Grain interface {
 	ID() ID
 	Observe(ctx context.Context) (Status, error)
-	Answer(ctx context.Context, call CallID, ans Answer) error
+	Attach(ctx context.Context) (io.ReadWriteCloser, error)
 	Transcript(ctx context.Context, from int64) (chunk []byte, next int64, err error)
 	Release(ctx context.Context) error
 }
@@ -529,8 +568,8 @@ type Grain interface {
 Half of it never reaches the shim: `Create` is `konturctl vm create` with
 the grain's environment and mount, `List` is `docker ps --filter
 label=grain.id`, `Transcript` is `docker logs --since`, `Release` is
-`docker rm -f` (and is also how a grain is cancelled). Two methods are
-actual shim calls, matching the two verbs. A method that cannot be served by one subcommand or one
+`docker rm -f` (and is also how a grain is cancelled). Two are actual shim
+calls, matching the two verbs. A method that cannot be served by one subcommand or one
 runtime operation has drifted from what the transport can do.
 
 There is deliberately **no `Rebuild`**. Rebuilding the guest is internal to
@@ -569,7 +608,7 @@ whole per-grain policy is a table test. Its ordering is the decision:
 | 5 | any | task closed | `fail(cancelled)`, `release` |
 | 5 | any | paused | `fail(cancelled)`, `release` |
 | 6 | `provisioning`, over budget | live | `fail(setup-failed)`, `release` |
-| 7 | `running` / `blocked` | live | `answer` the one call; mirror activity |
+| 7 | `running` / `blocked` | live | `attach` if detached; mirror activity |
 
 Row 5 is one tick, not two: signalling and then waiting for the next poll
 to see a terminal phase was the only place this table needed a follow-up
