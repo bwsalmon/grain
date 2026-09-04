@@ -124,6 +124,15 @@ type Grain interface {
 	// watching a grain live, and returns the next offset. It reads a
 	// container-local file: no guest hop, so tailing costs one exec and
 	// does not touch the sandbox at all.
+	//
+	// This is the one place the polled control plane is not enough: tick
+	// granularity reads as lag to a human watching a run work. A backend
+	// may therefore serve a watched grain from an exec held open for as
+	// long as somebody is watching, rather than one exec per call --
+	// still the same transport and still no credential in the container,
+	// and nothing at all when nobody is watching. The offsets make the
+	// two indistinguishable to a caller, which is why the seam is a
+	// cursor rather than a stream.
 	Transcript(ctx context.Context, from int64) (chunk []byte, next int64, err error)
 
 	// Release destroys the grain: the container, the VMM inside it and

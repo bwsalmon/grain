@@ -112,19 +112,112 @@ Two more things move inside by the same rule:
 - **`prepareCheckout`** (~500 lines of `checkout.go`, currently cloning
   through MCP round trips) moves into the shim, driven by the Spec.
 
-## Why polling
+## Poll, not push
+
+**Decision: the controller polls, over the container runtime's exec.** The
+grain never initiates. Four options were weighed:
+
+1. **Poll via exec** — `grain-shim status` per grain per tick.
+2. **Push with a credential** — the shim holds a token and posts to the
+   daemon's REST API. This is what grain does today for `update_status`,
+   `open_pull_request` and `recreate_sandbox`.
+3. **Attached stream over exec** — a persistent exec per grain, the shim
+   writing events into it as they happen: exec transport, push semantics.
+4. **Poll via shared volume** — the shim writes `status.json` to a
+   hostPath the controller reads directly.
+
+### Why not push
+
+**Push forces NAT, and the network decision deliberately keeps flat
+available.** Under flat mode the container can send but never receive —
+the splice steals ingress, so no connection can be established at all.
+There is no HTTP push from a flat-mode grain. Choosing push would close
+the door the section below leaves open: a tunnelled grain, or any later
+shape with nothing at the container layer needing network, could no longer
+report at all. Exec-poll works under either mode because it never touches
+the container's network.
+
+**Silence is information under poll and ambiguous under push.** A grain
+the controller cannot reach is a grain that has failed — `PhaseLost`, with
+a reconcile row for it — and the controller's view is at most one tick
+stale, with the staleness itself detectable. A grain that has stopped
+pushing might be dead, wedged, or idle, and nothing distinguishes them. So
+push systems grow a heartbeat, which is a poll rebuilt with the failure
+detector living inside the thing being monitored.
+
+Underneath that: **poll is naturally level-triggered and push is naturally
+edge-triggered, and edges get lost.** A push that lands while the
+controller is restarting is gone, so push needs retry, at-least-once
+delivery, idempotency keys and dedupe on receipt. `Reconcile` rests
+entirely on level-triggering — running one is always safe, skipping one
+costs latency rather than correctness — and push either gives that up or
+rebuilds it by pushing the whole `Status` every time, which forfeits the
+efficiency that motivated pushing.
+
+### What push would genuinely have bought
+
+Recorded honestly, so that neither is rediscovered as an argument later.
+
+**Latency**, but only in one place. `ask_question` waits on a human, so a
+tick is noise beside it; `open_pull_request` and `wait_for_checks` are
+fine at tick granularity; cancellation is controller-to-grain and so is
+push-shaped already. The one signal that genuinely suffers is the live
+transcript, which is handled as an exception below.
+
+**Scale.** Poll is O(grains × ticks) where push is O(events), so idle
+grains cost nothing under push. This does not bite at the size grain runs
+at — a single-operator cluster bounded by `-max-workers`, so single digits
+to low tens, where the difference is irrelevant. **If it ever does, the
+answer is a node-local aggregator the controller polls once per tick,
+making it O(nodes) — not push.** Written down explicitly so that "polling
+does not scale" is not later read as "we should have pushed": the
+aggregator keeps every property above intact and push forfeits all of
+them.
+
+### What the credential argument is and is not
+
+It would be easy to argue against push on the grounds that it needs a
+credential in the container. That argument is weak and worth not making.
+The container is the *trusted* side of this design — untrusted code runs
+in the guest, behind vsock — so a control-plane token there sits in the
+same trust zone as the model API credential already beside it.
+
+The real cost is the **authorization surface**: what a token may do,
+scoped to which grain, minted when, revoked when, and what happens when a
+grain claims to be a run it is not. `pkg/gitproxy` is ~1,900 lines and a
+good share of it is exactly that — `tokens.go`, `authorize.go`,
+`forbidden.go`. Not danger; work, and a place bugs live.
+
+Push also partly undoes the simplification this proposal is for.
+`recreate_sandbox` collapsed from a subsystem into a local call precisely
+because it stopped needing a daemon hop; making push the architecture
+reinstates daemon hops as the norm and grows `pkg/ui` an ingest surface
+rather than shrinking it.
+
+### The one exception: live transcript
+
+The transcript is the only latency-sensitive signal, and it is not
+control-plane data — it is a UI convenience. So it gets option 3, narrowly:
+an exec held open **only while a human has that grain open**, with the
+shim tailing its transcript file into it, torn down when nobody is
+watching. Same transport, no credential, and nothing at all when idle.
+
+### Transport is not the interface
+
+`Observe` says nothing about how a status is fetched, which leaves option
+4 available as an implementation detail rather than a different design. On
+the docker backend the controller and its grains share a host, so reading
+a hostPath is strictly cheaper than a `docker exec` with identical
+semantics; it stops working the moment they are on different nodes.
+`KonturGrains` may choose it; nothing above it needs to know.
+
+### What the shape gives back
 
 Every method on `Grain` is idempotent, none blocks on the work, and
 `Observe` returns the whole of what can be seen rather than a delta. The
 controller compares that answer to what it wants and issues at most one
-round of actions per tick. Level-triggered — the same discipline
-`orchestrator.Reconciler` already states: running one is always safe, and
-skipping one costs latency rather than correctness.
-
-The direction matters as much as the shape. **The controller reaches in;
-the grain never reaches out.** A grain that cannot be polled is a grain
-that has failed, and that is a state the controller can act on. A grain
-whose push failed is silence, which it cannot tell from health.
+round of actions per tick — the same level-triggered discipline
+`orchestrator.Reconciler` already states.
 
 Three things fall out that are not obvious:
 
@@ -133,11 +226,12 @@ Three things fall out that are not obvious:
    tick — so controller restart is the ordinary path. `orphan.go`,
    `recover.go`, `InFlight` and `drainInFlight` all go, along with
    `runOne`'s detached-context cleanup.
-2. **Tool calls get an order of magnitude faster.** Per `read_file`, today
-   is *fork docker CLI → dockerd RPC → `kontur exec` → vsock → guest*. In
-   the container it is *fork `kontur exec` → vsock → guest*, and a bare
-   socket dial if kontur promotes `internal/execwire` out of `internal/`.
-   The docker CLI spawn and daemon round trip were the expensive part.
+2. **Tool calls get an order of magnitude faster.** This one is
+   co-location rather than polling: per `read_file`, today is *fork docker
+   CLI → dockerd RPC → `kontur exec` → vsock → guest*, and in the
+   container it is *fork `kontur exec` → vsock → guest*, or a bare socket
+   dial if kontur promotes `internal/execwire` out of `internal/`. The
+   docker CLI spawn and daemon round trip were the expensive part.
 3. **The grain is the container.** Lifetime, identity and liveness are one
    thing. `Release` deletes the container; the VMM and guest die with it.
    No orphan agent process, no supervision problem, no deferred cleanup
@@ -510,10 +604,12 @@ own control channel.
 
 ## Costs and open items
 
-1. **Live transcript costs a tick.** Poll-tail is one exec per watched
-   grain per poll. Tail only grains a UI has open, on a faster tick; leave
-   the rest alone. (It reads a container-local file, so it does not touch
-   the sandbox.)
+1. **Live transcript needs its own channel.** Poll-tailing at tick
+   granularity feels laggy to a human watching a run, which is why it is
+   the one exception to "poll, not push" above: an exec held open only
+   while a grain is being watched. It reads a container-local file, so it
+   costs nothing in the sandbox and nothing at all when nobody is
+   watching.
 2. **grain needs its own image.** kontur's final stage is `FROM scratch`
    with `ENTRYPOINT ["/usr/local/bin/kontur"]` — a node-based CLI cannot
    run there. grain ships a sandbox image: a real base, `COPY --from=kontur`
