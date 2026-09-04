@@ -10,7 +10,9 @@ package staterepo_test
 // a file whose editor is fighting one. The image in a workflow nobody
 // has edited follows the deployment across an upgrade, because a check
 // running a build that knows another schema fails every pull request
-// against this repository over nothing in the change. And a remote that
+// against this repository over nothing in the change -- and a check an
+// earlier grain wrote is brought up to this build's wording so that it
+// can be. And a remote that
 // will not accept a file under .github/workflows -- which is what GitHub
 // says to a credential without the permission -- costs the deployment
 // the CI step and nothing else: the commit is undone, whatever check was
@@ -283,6 +285,92 @@ func TestSyncRepointsTheCheckAtTheImageThisDeploymentRuns(t *testing.T) {
 		t.Fatalf("putting: %v", err)
 	}
 	if _, err := staterepo.Sync(ctx, upgraded, db, model.SchemaVersion); err != nil {
+		t.Fatalf("syncing again: %v", err)
+	}
+	if got := remoteWorkflow(t, remote); got != body {
+		t.Errorf("the workflow was rewritten a second time:\n%s", got)
+	}
+	if before == head(t, dir) {
+		t.Fatal("the second sync exported nothing at all; the test is not testing anything")
+	}
+}
+
+// The same upgrade, on the deployments that already exist. Every state
+// repository seeded before commit b898473e carries the check as the
+// grain of that day wrote it, pinned to whatever image it was installed
+// with; and until this test passed, grain no longer recognised that file
+// as its own, so it kept that image forever and no operator found out
+// until a schema bump failed every pull request against it.
+//
+// It is one commit on the first sync after the upgrade -- the whole
+// file, because the file is grain's own text word for word and its
+// comment block describes rules grain has since changed -- and nothing
+// at all after that.
+func TestSyncAdoptsAWorkflowAnEarlierGrainWrote(t *testing.T) {
+	ctx := context.Background()
+	store, db := openDB(t)
+	remote := bareRemote(t)
+	dir := filepath.Join(t.TempDir(), "state")
+	const now = "ghcr.io/bwsalmon/grain/grain:sha-abc1234"
+	repo, err := staterepo.Open(ctx, staterepo.Config{Dir: dir, Remote: remote, CheckImage: now})
+	if err != nil {
+		t.Fatalf("opening: %v", err)
+	}
+	if err := staterepo.Load(ctx, repo, db, model.SchemaVersion); err != nil {
+		t.Fatalf("loading: %v", err)
+	}
+
+	// The repository as an older grain left it: the check it wrote, with
+	// the image that grain had, merged in over the one this build seeded.
+	// A merge rather than a hand edit, because that is the shape the
+	// deployment sees either way -- a file in the remote's history that
+	// this build did not write.
+	old := pre258(staterepo.DefaultCheckImage)
+	work := filepath.Join(t.TempDir(), "clone")
+	git(t, "", "clone", "--quiet", remote, work)
+	if err := os.WriteFile(filepath.Join(work, filepath.FromSlash(staterepo.WorkflowFile)),
+		[]byte(old), 0o644); err != nil {
+		t.Fatalf("writing the older grain's workflow: %v", err)
+	}
+	git(t, work, "add", "--all", ".")
+	git(t, work, "-c", "user.email=a@b", "-c", "user.name=a", "commit", "-m", "The check as it was")
+	git(t, work, "push", "--quiet", "origin", "main")
+	if _, err := staterepo.Apply(ctx, repo, db, model.SchemaVersion); err != nil {
+		t.Fatalf("applying the merge: %v", err)
+	}
+	if got := read(t, workflowPath(dir)); got != old {
+		t.Fatalf("the older workflow never reached the working tree; the test is not testing anything")
+	}
+
+	if err := store.PutTask(ctx, task("a1b2")); err != nil {
+		t.Fatalf("putting: %v", err)
+	}
+	if _, err := staterepo.Sync(ctx, repo, db, model.SchemaVersion); err != nil {
+		t.Fatalf("syncing: %v", err)
+	}
+	body := remoteWorkflow(t, remote)
+	if want := string(staterepo.Workflow(now)); body != want {
+		t.Errorf("the check an earlier grain wrote was not brought up to date:\n%s", body)
+	}
+	// Its own commit still, saying what it did: a reviewer of this
+	// repository sees a whole file rewritten by a machine and has to be
+	// able to find out why that was allowed.
+	at := strings.TrimSpace(git(t, dir, "log", "-1", "--format=%H", "--", staterepo.WorkflowFile))
+	files := git(t, dir, "show", "--name-only", "--format=", at)
+	if strings.TrimSpace(files) != staterepo.WorkflowFile {
+		t.Errorf("the adopting commit carries more than the workflow: %q", files)
+	}
+	if msg := git(t, dir, "show", "-s", "--format=%B", at); !strings.Contains(msg, "an earlier grain") {
+		t.Errorf("the adopting commit does not say what it did: %q", msg)
+	}
+
+	// And it is done. A deployment that syncs every thirty seconds must
+	// not rewrite somebody else's repository every thirty seconds.
+	before := head(t, dir)
+	if err := store.PutTask(ctx, task("c3d4")); err != nil {
+		t.Fatalf("putting: %v", err)
+	}
+	if _, err := staterepo.Sync(ctx, repo, db, model.SchemaVersion); err != nil {
 		t.Fatalf("syncing again: %v", err)
 	}
 	if got := remoteWorkflow(t, remote); got != body {

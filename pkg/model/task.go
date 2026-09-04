@@ -77,7 +77,7 @@ const (
 	ReasonDirect        OriginReason = "direct"        // somebody just filed it
 	ReasonSchedule      OriginReason = "schedule"      // a scheduled job fired
 	ReasonFix           OriginReason = "fix"           // filed for a broken PR
-	ReasonReview        OriginReason = "review"        // review threads asked for it
+	ReasonReview        OriginReason = "review"        // a review of another task's own work
 	ReasonProposal      OriginReason = "proposal"      // an agent or parent proposed it
 	ReasonQualification OriginReason = "qualification" // a release candidate's qualification plan fired it
 	ReasonSuite         OriginReason = "suite"         // a suite run fired it (bwsalmon/agents#642)
@@ -431,6 +431,17 @@ const (
 	// these links and a report over them (Store.TaskTimings) should go on
 	// counting the repairs they record.
 	LinkFixTask LinkKind = "fix-task"
+	// LinkReviewTask records the task grain filed to review this one's
+	// own work (-> the review task's ID), from the template
+	// Task.ReviewTemplateID names. It is LinkFixTask's shape for the
+	// other reason a second task is stacked on a first one's branch, and
+	// it is read the same three ways: orchestrator.SyncReviews checks it
+	// before filing, so exactly one review is ever filed; syncEntry
+	// checks it to hold this task's own merge until the review has
+	// landed; and the UI reads it as provenance. Like LinkFixTask it
+	// blocks nothing -- the review task dispatches the moment it is
+	// ready, and what waits is the merge, not a run.
+	LinkReviewTask LinkKind = "review-task"
 )
 
 // Blocks reports whether a link holds a task back from dispatch.
@@ -609,7 +620,31 @@ type Task struct {
 	// edit to a queued task's own override reach the run it eventually
 	// gets.
 	PromptExtension string
-	CreatedAt       *time.Time
+	// ReviewTemplateID is the review attached to this task
+	// (grain/task-284): the Template.ID whose title, body and grants a
+	// second task is filed from once this one's own work is done, to
+	// read the code it proposed and fix what is wrong with it before it
+	// merges. Empty, the default, means no review -- the same "zero
+	// means unset" contract AgentFramework and PromptExtension above
+	// use, so a task created before this field existed reads back as one
+	// nobody asked for a review of.
+	//
+	// A template rather than a body written here for the same reason
+	// Schedule.TemplateID is one: "review this branch and fix what you
+	// find" is the same paragraph on every task it is attached to, and
+	// the instructions worth improving once and having every review use.
+	// Nothing about the template says it is a review; what makes it one
+	// is being named here.
+	//
+	// Read by orchestrator.SyncReviews, once, the first cycle this task
+	// has a pull request open and its run is over -- so attaching a
+	// review to a task that has already completed still gets one, and
+	// editing this after the review has been filed changes nothing
+	// (LinkReviewTask is what records that it was). Never inherited: the
+	// review task itself is filed with this empty, which is what stops a
+	// review of a review of a review.
+	ReviewTemplateID string
+	CreatedAt        *time.Time
 
 	// OrderKey is this task's position in the backlog -- Store.Ready
 	// dispatches ascending, so the task with the smallest OrderKey among

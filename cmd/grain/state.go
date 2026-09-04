@@ -38,9 +38,10 @@ import (
 const stateUsage = `usage: grain state -data-dir DIR <command> [args]
 
 -data-dir must name the same root a colocated ` + "`grain daemon`" + ` was
-started with. This edits files on disk, not a running daemon; stop the
-daemon before adopting or importing, since both replace every row in the
-database.
+started with; it defaults to $GRAIN_DATA_DIR when that is set, which a host
+installed by scripts/setup.sh exports already. This edits files on disk, not
+a running daemon; stop the daemon before adopting or importing, since both
+replace every row in the database.
 
 Commands:
   status                    where this installation's state lives, and whether it is committed
@@ -79,7 +80,7 @@ func stateCmd(args []string) {
 func runState(args []string) error {
 	fs := flag.NewFlagSet("grain state", flag.ContinueOnError)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, stateUsage) }
-	dataDir := fs.String("data-dir", "", "root directory a colocated `grain daemon` was started with (required)")
+	dataDir := fs.String("data-dir", dataDirDefault(), "root directory a colocated `grain daemon` was started with (required; $"+dataDirEnvVar+" supplies the default)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -193,6 +194,31 @@ func stateStatus(ctx context.Context, dataDir string, out io.Writer) error {
 	default:
 		fmt.Fprintf(out, "dispatch:   allowed -- a task may be filed against this repository "+
 			"(`grain create -repo <owner>/<name> ...`)\n")
+	}
+	// Whether anything validates a proposed change to this repository,
+	// which is the other thing none of the lines above can be read for:
+	// a deployment whose credential may not push files under
+	// .github/workflows syncs, commits and pushes exactly like one whose
+	// check runs on every pull request, because installWorkflow undoes
+	// the commit GitHub refused and lets the sync carry on rather than
+	// stopping over a file worth one CI step. Asked of the same
+	// WorkflowRefusedAt the State pane's warning is drawn from, so the
+	// terminal and the pane cannot come to say different things about
+	// one repository.
+	if at, refused := repo.WorkflowRefusedAt(ctx); refused {
+		fmt.Fprintf(out, "checks:     none -- this deployment's credential may not push %s, so the check "+
+			"that runs `grain state check` on pull requests against this repository was never "+
+			"committed", staterepo.WorkflowFile)
+		// Absent when grain wrote the marker and can no longer read it
+		// back: the refusal still happened and is still worth saying, and
+		// only the date is unknown.
+		if !at.IsZero() {
+			fmt.Fprintf(out, " (last tried %s)", at.UTC().Format(time.RFC3339))
+		}
+		fmt.Fprintf(out, ". grain keeps syncing and offers it again daily\n")
+		fmt.Fprintf(out, "            run `grain state ci` in a clone and commit %s with a credential that "+
+			"may write workflows, or set \"noWorkflow\": true in %s to stop grain offering it\n",
+			staterepo.WorkflowFile, filepath.Join(dataDir, staterepo.SettingsFileName))
 	}
 	reportSecretsKey(dataDir, out)
 	return nil
@@ -561,7 +587,7 @@ func stateCI(args []string) error {
 	fmt.Printf("wrote %s\n", filepath.Join(dir, filepath.FromSlash(staterepo.WorkflowFile)))
 	fmt.Printf("\nCommit and push it yourself, with a credential that may write workflows:\n" +
 		"a deployment whose own credential may not is the reason this command exists,\n" +
-		"and grain leaves a workflow that is already there exactly as it finds it.\n")
+		"and grain leaves a workflow anybody has edited exactly as it finds it.\n")
 	return nil
 }
 

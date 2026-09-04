@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Button, Checkbox, Chip, FormControlLabel } from "@mui/material";
 import DragIndicatorIcon from "@mui/icons-material/DragIndicator";
-import { STATE_LABELS, capabilityName, completionPhase, runActivity, stateLabel } from "../state.js";
+import { STATE_LABELS, capabilityName, completionPhase, runActivity, stackedChip, stateLabel } from "../state.js";
 import { SORTS, filterViews, matchesFilters, sortTasks } from "../taskFilters.js";
 import { ListEmpty, ListFilterSelect, ListHeader, ListSearchField, ListSortSelect, ListToolbar } from "./ListPrimitives.jsx";
 import StateDot, { isLiveRunning } from "./StateDot.jsx";
@@ -252,7 +252,7 @@ export default function TaskList({ tasks, stateFilter, config, onOpenTask, selec
 // nested says this row is already sitting in a .task-sublist under the
 // task it was generated from, which is the only thing that makes a
 // stacked task self-explaining -- so it is what decides whether the
-// "merge fix" chip below is worth its space. Callers that list tasks
+// "merge fix"/"review" chip below is worth its space. Callers that list tasks
 // flat (groupByStack's own fallback for a stacked task whose parent is
 // filtered out or gone) leave it off and get the chip.
 //
@@ -262,8 +262,8 @@ export default function TaskList({ tasks, stateFilter, config, onOpenTask, selec
 // rather than from every row of every list a task can appear in.
 //
 // dragPlaceholder is for a row with no handle of its own in a list where
-// the other rows have one -- a stacked merge fix, which is never
-// reordered because the merge queue always runs it ahead of the backlog.
+// the other rows have one -- a stacked merge fix or review, neither of
+// which is ever reordered, since both are filed ahead of the backlog.
 // Without it that row's badge, number and title would each sit a handle's
 // width left of every other row's, so the column the handle occupies is
 // held open and empty instead.
@@ -321,14 +321,7 @@ export function TaskRow({ t, config, onOpenTask, selected, onToggleSelect, dragg
         {t.scheduled && <Chip size="small" className="chip-scheduled" title="filed automatically by a schedule" label="scheduled" />}
         {t.suiteRun && <Chip size="small" className="chip-suite" title="filed automatically by a suite run" label="suite" />}
         {t.stacked && !nested && (
-          <Chip
-            size="small"
-            className="chip-stacked"
-            title={t.generatedFrom
-              ? `the merge queue's own automatic fix for ${t.generatedFrom}`
-              : "the merge queue's own automatic fix for another task's pull request"}
-            label="merge fix"
-          />
+          <Chip size="small" className="chip-stacked" {...stackedChip(t)} />
         )}
         {t.interactive && (
           <Chip size="small" className="chip-interactive" title="a live chat, not a background task" label="interactive" />

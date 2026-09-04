@@ -108,8 +108,24 @@ jobs:
       # the suite ran here too, twice per commit, against `go test`'s 600s
       # per-package default. It needs ~336s of that, and lost the race
       # often enough to redden PRs that had touched none of it.
+      #
+      # -race, which is the same command the Makefile's `test` target has
+      # always run and which this step, for its whole life until now, did
+      # not: nothing in CI had ever run the race detector, so a data race
+      # in a daemon that is a reconcile loop, a goroutine per dispatch, a
+      # poller per addendum, an atomic ForbiddenSet replaced under a
+      # serving proxy and a stateManager lock shared between a UI handler
+      # and a timer reached main unless a developer happened to run `make
+      # test` on a machine where it showed. It costs roughly double this
+      # step's wall clock (~2m30s to ~4m40s measured on four cores), on a
+      # job whose long pole is elsewhere.
+      #
+      # The detector is a cgo library, so this step needs CGO_ENABLED at
+      # its default -- `-race requires cgo or SWIG` is what setting it to
+      # 0 anywhere above would get, not a quiet loss of coverage. Only
+      # `make build` turns cgo off, and only for the binary that ships.
       - name: Test
-        run: go test ./...
+        run: go test -race ./...
 
       - name: Test frontend
         working-directory: ui

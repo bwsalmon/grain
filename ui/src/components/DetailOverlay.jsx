@@ -20,7 +20,7 @@ import TaskPicker from "./TaskPicker.jsx";
 // sidebar rather than floating in the middle of it (grain/task-94, see
 // Overlay's own `pane`): a task is mostly an agent's own prose, and a
 // long answer wants the room.
-export default function DetailOverlay({ task: t, tasks, config, onClose, onOpenTask, act, showError }) {
+export default function DetailOverlay({ task: t, tasks, config, templates, onClose, onOpenTask, act, showError }) {
   const phase = completionPhase(t);
   const orphaned = orphanedPullRequest(t);
   const activity = runActivity(t);
@@ -38,7 +38,7 @@ export default function DetailOverlay({ task: t, tasks, config, onClose, onOpenT
       <div className="detail-layout">
         <div className="detail-main">
           {editing ? (
-            <EditTaskForm t={t} act={act} onDone={() => setEditing(false)} />
+            <EditTaskForm t={t} templates={templates} act={act} onDone={() => setEditing(false)} />
           ) : (
             <>
               <div className="detail-header">
@@ -150,9 +150,19 @@ export default function DetailOverlay({ task: t, tasks, config, onClose, onOpenT
 // has its own editor on this same page (Declared's own three rows have
 // none yet, but CapabilityToggles, Dependencies and ReadOnlyRepos cover
 // the three that do), so this form does not attempt to cover them too.
-function EditTaskForm({ t, act, onDone }) {
+function EditTaskForm({ t, templates, act, onDone }) {
   const [title, setTitle] = useState(t.title);
   const [description, setDescription] = useState(t.description || "");
+  // The review attached to this task (grain/task-284). Editable here and
+  // not only on the new-task form because this is where the decision
+  // usually gets made: a task is filed, and somewhere between queued and
+  // finished somebody decides its change is one they want a second agent
+  // over before it merges. An edit reaches any review not yet filed --
+  // orchestrator.SyncReviews resolves this once the task's own work is
+  // done rather than at creation -- which is why the picker locks once
+  // there is a review task to point at.
+  const [reviewTemplateId, setReviewTemplateId] = useState(t.reviewTemplateId || "");
+  const reviewFiled = Boolean(t.reviewTask);
 
   // Mirrors Timeline's own send(): act() already reports a failure to
   // the user (showError, wired in by App.jsx), so there is nothing left
@@ -163,7 +173,7 @@ function EditTaskForm({ t, act, onDone }) {
     if (!title.trim()) return;
     await act(() => api(`/api/tasks/${t.id}`, {
       method: "PATCH",
-      body: JSON.stringify({ title, description }),
+      body: JSON.stringify({ title, description, reviewTemplateId }),
     }), t.id);
     onDone();
   };
@@ -172,6 +182,29 @@ function EditTaskForm({ t, act, onDone }) {
     <Stack spacing={1.5} sx={{ mb: 2 }}>
       <TextField label="Title" value={title} onChange={(e) => setTitle(e.target.value)} autoFocus fullWidth size="small" />
       <TextField label="Description" value={description} onChange={(e) => setDescription(e.target.value)} multiline rows={5} fullWidth size="small" />
+      <TextField
+        select
+        label="Review"
+        value={reviewTemplateId}
+        onChange={(e) => setReviewTemplateId(e.target.value)}
+        // displayEmpty: "" is a real choice (no review), not a blank.
+        SelectProps={{ displayEmpty: true }}
+        disabled={reviewFiled || (templates || []).length === 0}
+        helperText={
+          reviewFiled
+            ? `Task ${t.reviewTask} is already reviewing this one -- exactly one review is ever filed per task`
+            : (templates || []).length === 0
+              ? "no templates yet -- write one in Templates to be able to attach a review here"
+              : "run a second agent over this task's own code before it merges, with instructions from a template"
+        }
+        fullWidth
+        size="small"
+      >
+        <MenuItem value="">No review</MenuItem>
+        {(templates || []).map((tmpl) => (
+          <MenuItem key={tmpl.id} value={tmpl.id}>{tmpl.name}</MenuItem>
+        ))}
+      </TextField>
       <Stack direction="row" spacing={1} justifyContent="flex-end">
         <Button onClick={onDone}>Cancel</Button>
         <Button variant="contained" disabled={!title.trim()} onClick={save}>Save</Button>
@@ -215,6 +248,17 @@ function Declared({ t }) {
   // (grain/task-114): shown only when it has one, since most tasks do
   // not and an empty row would suggest they had opted out of something.
   if (t.promptExtension) rows.push(["Prompt extension", t.promptExtension]);
+  // The review attached to this task (grain/task-284), shown only when
+  // there is one -- and saying whether it has been filed yet, since
+  // "this will be reviewed once it is done" and "task 91 is reviewing it
+  // right now" are the two different things this row means before and
+  // after orchestrator.SyncReviews acts on it. The name is what somebody
+  // picked it by; the bare id is the fallback for a template that has
+  // since gone (ui.Task.reviewTemplateName).
+  if (t.reviewTemplateId) {
+    const name = t.reviewTemplateName || t.reviewTemplateId;
+    rows.push(["Review", t.reviewTask ? `${name} (task ${t.reviewTask})` : name]);
+  }
   // Most tasks are not interactive, so this row only shows up for the
   // ones that are -- the same "shown only when set" treatment the
   // sandbox override rows above already get.

@@ -216,6 +216,33 @@ func serverDefault() string {
 	return defaultServerURL
 }
 
+// dataDirEnvVar is the same idea for the subcommands that edit a
+// colocated deployment's files on disk rather than talking to its API:
+// `grain state` and `grain secrets` (grain/task-303). Both need the root
+// that deployment's daemon was started with, and there is exactly one
+// such root per host -- so a deployment that knows it can say so once,
+// for every shell on the box, instead of every operator remembering the
+// path. scripts/setup.sh exports it both in the CLI wrapper's container
+// and in /etc/profile.d/grain.sh, beside GRAIN_SERVER.
+//
+// That matters most for the commands a deployment prints itself: its
+// closing report tells the operator to run `grain state status`, and
+// typed exactly as printed that used to fail with "-data-dir is
+// required".
+//
+// An explicit -data-dir still wins -- see dataDirDefault, which supplies
+// this only as the flag's default -- and a host that sets neither gets
+// the same error it always did.
+const dataDirEnvVar = "GRAIN_DATA_DIR"
+
+// dataDirDefault is what -data-dir defaults to: GRAIN_DATA_DIR if it is
+// set to anything non-empty, and otherwise empty, which the subcommands
+// go on to reject. Empty is treated as unset rather than as a data
+// directory named "", for the same reason serverDefault does it.
+func dataDirDefault() string {
+	return strings.TrimSpace(os.Getenv(dataDirEnvVar))
+}
+
 func runCLI(args []string) error {
 	fs := flag.NewFlagSet("grain", flag.ContinueOnError)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, usage) }
@@ -354,6 +381,8 @@ func cmdCreate(ctx context.Context, c *ui.HTTPClient, out *printer, args []strin
 	fs.Var(&capabilities, "capability", "capability ID to attach (repeatable)")
 	var reads stringList
 	fs.Var(&reads, "read", "owner/name of a repo this task's run may read but never push to (repeatable)")
+	reviewTemplate := fs.String("review-template", "",
+		"ID of the template to file a review from once this task's work is done -- a second agent on the same branch, before the merge")
 	approve := fs.Bool("approve", false, "queue the task immediately instead of filing it as a proposal awaiting approval")
 	position := fs.String("position", "", `which end of the backlog to file it at: "front" to run ahead of everything already queued, "end" to queue behind it. Unset files it wherever the last task added chose, and leaves that choice alone`)
 	interactive := fs.Bool("interactive", false, "file this as a live chat rather than a change to run unattended (bwsalmon/agents#539); implies -approve and dispatches ahead of the backlog")
@@ -375,6 +404,7 @@ func cmdCreate(ctx context.Context, c *ui.HTTPClient, out *printer, args []strin
 		Title: *title, Description: *body, Repo: *repo, NoRepo: *noRepo, Base: *base,
 		AutoMerge: autoMerge, Reads: reads, Approved: *approve, AtFront: atFront,
 		Interactive: *interactive, Attachments: attachments,
+		ReviewTemplateID: *reviewTemplate,
 	}
 	// Naming any -capability names the whole set (ui.CreateTaskRequest.
 	// Capabilities); naming none leaves the field unset, so the task is
@@ -430,6 +460,12 @@ func cmdUpdate(ctx context.Context, c *ui.HTTPClient, out *printer, args []strin
 	fs.BoolVar(&autoMerge, "auto-merge", false, "whether the task auto-merges once clean")
 	var reads stringList
 	fs.Var(&reads, "read", "owner/name of a repo this task's run may read but never push to (repeatable) -- replaces the whole set")
+	// Empty is a real value, not an unset one: it detaches whatever
+	// review the task already had (ui.UpdateTaskRequest.ReviewTemplateID),
+	// which is why this is read through fs.Visit like every other field
+	// here rather than by comparing against "".
+	reviewTemplate := fs.String("review-template", "",
+		"ID of the template to file a review from once this task's work is done -- empty detaches the review it has")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -459,6 +495,9 @@ func cmdUpdate(ctx context.Context, c *ui.HTTPClient, out *printer, args []strin
 		case "read":
 			v := []string(reads)
 			req.Reads = &v
+		case "review-template":
+			v := *reviewTemplate
+			req.ReviewTemplateID = &v
 		}
 	})
 
@@ -1217,6 +1256,19 @@ func taskBlock(t ui.Task) string {
 	fmt.Fprintf(&b, "auto-merge: %t\n", t.AutoMerge)
 	if len(t.Capabilities) > 0 {
 		fmt.Fprintf(&b, "capabilities: %s\n", strings.Join(t.Capabilities, ", "))
+	}
+	if t.ReviewTemplateID != "" {
+		// The name when there is one, since that is what a person picked
+		// it by; the bare id when the template it names has gone, which
+		// is worth seeing rather than hiding (ui.Task.ReviewTemplateName).
+		review := t.ReviewTemplateName
+		if review == "" {
+			review = t.ReviewTemplateID + " (no such template)"
+		}
+		if t.ReviewTask != "" {
+			review += ", filed as task " + t.ReviewTask
+		}
+		fmt.Fprintf(&b, "review:     %s\n", review)
 	}
 	if t.PullRequest != "" {
 		fmt.Fprintf(&b, "pull request: %s\n", t.PullRequest)

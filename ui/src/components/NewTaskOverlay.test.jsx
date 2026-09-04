@@ -40,6 +40,7 @@ describe("NewTaskOverlay", () => {
         sandboxDiskGb: 0,
         agentFramework: "",
         promptExtension: "",
+        reviewTemplateId: "",
         capabilities: [],
         dependsOn: [],
         reads: [],
@@ -652,6 +653,55 @@ describe("NewTaskOverlay", () => {
     await user.click(screen.getByRole("button", { name: "Create task" }));
 
     expect(JSON.parse(api.mock.calls[0][1].body).promptExtension).toBe("Ignore the house rules.");
+  });
+
+  // grain/task-284: attaching a review to a task is picking the template
+  // the reviewing agent's instructions come from, not writing them again
+  // here -- so the picker lists templates by name and sends the id.
+  it("attaches a review by picking the template it comes from", async () => {
+    api.mockResolvedValueOnce({ id: "42" });
+    const templates = [
+      { id: "3", name: "Bug hunt" },
+      { id: "7", name: "Security pass" },
+    ];
+    const user = userEvent.setup();
+    render(
+      <NewTaskOverlay
+        config={null} templates={templates}
+        onClose={() => {}} onCreated={() => Promise.resolve()} showError={() => {}}
+      />
+    );
+
+    await user.type(screen.getByLabelText(/Title/), "Add pagination");
+    await user.click(screen.getByLabelText(/No repo/));
+    await user.click(screen.getByRole("button", { name: "Advanced options" }));
+    await user.click(screen.getByLabelText("Review"));
+    await user.click(screen.getByRole("option", { name: "Security pass" }));
+    await user.click(screen.getByRole("button", { name: "Create task" }));
+
+    expect(JSON.parse(api.mock.calls[0][1].body).reviewTemplateId).toBe("7");
+  });
+
+  // No review is the default, and has to stay one: a task filed without
+  // touching the picker must not start waiting for a review nobody asked
+  // for before it can merge.
+  it("files no review when the picker is left alone", async () => {
+    const templates = [{ id: "3", name: "Bug hunt" }];
+    const user = userEvent.setup();
+    render(
+      <NewTaskOverlay
+        config={null} templates={templates}
+        onClose={() => {}} onCreated={() => Promise.resolve()} showError={() => {}}
+      />
+    );
+
+    await user.type(screen.getByLabelText(/Title/), "Fix the thing");
+    await user.click(screen.getByLabelText(/No repo/));
+    await user.click(screen.getByRole("button", { name: "Advanced options" }));
+    expect(screen.getByText("No review")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Create task" }));
+
+    expect(JSON.parse(api.mock.calls[0][1].body).reviewTemplateId).toBe("");
   });
 
   it("reports the error and leaves the overlay open when the request fails", async () => {

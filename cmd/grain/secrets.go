@@ -42,8 +42,10 @@ const secretsUsage = `usage: grain secrets -data-dir DIR <command> [args]
 -data-dir must name the same root a colocated ` + "`grain daemon`" + ` was
 started with -- the encrypted secrets file lives in that deployment's state
 repository and its key at <data-dir>/secrets, the same paths daemon.go itself
-resolves. This edits files on disk, not a running daemon, so it only works
-when run on the same host as the server (bwsalmon/agents#357).
+resolves. It defaults to $GRAIN_DATA_DIR when that is set, which a host
+installed by scripts/setup.sh exports already. This edits files on disk, not
+a running daemon, so it only works when run on the same host as the server
+(bwsalmon/agents#357).
 
 Commands:
   list                          list every secret and the keys it holds (never values)
@@ -62,7 +64,7 @@ func secretsCmd(args []string) {
 func runSecrets(args []string) error {
 	fs := flag.NewFlagSet("grain secrets", flag.ContinueOnError)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, secretsUsage) }
-	dataDir := fs.String("data-dir", "", "root directory a colocated `grain daemon` was started with (required)")
+	dataDir := fs.String("data-dir", dataDirDefault(), "root directory a colocated `grain daemon` was started with (required; $"+dataDirEnvVar+" supplies the default)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}

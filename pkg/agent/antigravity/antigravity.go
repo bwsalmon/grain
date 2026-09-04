@@ -604,6 +604,16 @@ func eagerToolsConfig() map[string]any {
 // binary on disk. The schema is Gemini CLI's own mcpServers map, which
 // agy inherited along with the ~/.gemini config directory, plus the
 // per-server timeoutSeconds and tools keys agy added to it.
+//
+// Those two keys have to be the right JSON *type*, and getting one wrong
+// is not a partial load: agy drops the whole server entry and reports "No
+// MCP servers configured", with no error, no warning and nothing in the
+// file to say which key did it. Measured in docs/agy-surface.md, one key
+// at a time -- `tools` as a list rather than the object eagerToolsConfig
+// builds drops the server, `timeoutSeconds` as a string drops the server,
+// and a key agy has never heard of is ignored without harm. So the
+// asymmetry to hold on to is that an unknown key here is safe and a known
+// key of the wrong type costs a run every tool it has.
 func mcpConfigJSON(grainBinaryPath string, mcpArgs []string) ([]byte, error) {
 	return json.Marshal(map[string]any{
 		"mcpServers": map[string]any{
@@ -649,9 +659,11 @@ func settingsJSON(apiKeyAuth bool) ([]byte, error) {
 //
 //   - Nothing here changes the roster. The same probe read the `init`
 //     event of a real (if unauthenticated) stream-json session with and
-//     without this block, and both advertise the identical 55 native
-//     tools. A denied tool is one the model still sees and still calls;
-//     the denial, if it lands at all, lands on the call.
+//     without this block, and both advertise the identical 57 native
+//     tools -- as do excludeTools, permissionPreset, agentPermissions,
+//     toolConfirmation and the --sandbox flag, each measured in
+//     docs/agy-surface.md. A denied tool is one the model still sees and
+//     still calls; the denial, if it lands at all, lands on the call.
 //   - The override wins, and that is now measured rather than suspected.
 //     Run passes --dangerously-skip-permissions, which puts the session in
 //     agy's "always-proceed" permission mode (that same `init` event
@@ -707,6 +719,20 @@ func permissionRules() map[string]any {
 // unpacks that guide into a fresh HOME under
 // antigravity-cli/builtin/skills/agy-customizations/, which is where the
 // hook contract quoted in hookConfigJSON comes from).
+//
+// Settings and MCP servers are read from exactly one path each, but hooks
+// are not, and the difference is worth knowing about: 1.1.26 loads
+// hooks.json from ~/.gemini/config/, ~/.gemini/antigravity-cli/ and
+// ~/.gemini/ alike, and a file at the antigravity-cli path *replaces* the
+// one here rather than merging with it (measured both ways in
+// docs/agy-surface.md, which is also where "planted together" and
+// "planted one at a time" first disagreed). Nothing bites today, because
+// writeAgyHome builds the whole HOME per run and agy unpacks no hooks.json
+// of its own into a fresh one. It would bite the first time a run is given
+// a HOME it does not own outright -- a reused HOME, a mounted one, a
+// future agy that ships a default -- and it would bite silently, with the
+// run's own hook simply absent. `agy -p /hooks` is the check, and
+// TestLiveAgyLoadsGrainsHookConfig is where it is already asked.
 var (
 	mcpConfigRelPath   = filepath.Join(".gemini", "config", "mcp_config.json")
 	cliSettingsRelPath = filepath.Join(".gemini", "antigravity-cli", "settings.json")
@@ -985,8 +1011,10 @@ func workDir(cfg agent.RunConfig, home string) string {
 // (tests/e2e/live_test.go logs the whole of it), which is where a name
 // added to this list should come from too.
 //
-// It is deliberately not the whole roster. agy advertises 55 native tools
-// (measured on 1.1.26's own init event) and pins none of them, so a
+// It is deliberately not the whole roster. agy advertises 57 native tools
+// (counted off 1.1.26's own init event in docs/agy-surface.md, which is
+// also where the 55 this comment used to claim was corrected) and pins
+// none of them, so a
 // hand-copied catalogue would drift silently and read as authoritative
 // while doing so; what the prompt says after this list -- anything whose
 // name does not carry grain's prefix -- is the rule, and these are the
@@ -1291,12 +1319,17 @@ func (f *Framework) Run(ctx context.Context, cfg agent.RunConfig) (*agent.Result
 
 	stdout, runErr := f.run.Run(runCtx, args, stdin, env, workDir(cfg, home), io.MultiWriter(sinks...))
 	result, parseErr := parseTranscript(stdout)
-	// Read once, from the terminal event's own text plus whatever the
+	// Parsed once here rather than at each branch below, since two of
+	// them read the same pass: what agy said about how the run ended is
+	// both the evidence a quota refusal leaves and the sentence that
+	// explains an ordinary failure.
+	events := parseEvents(stdout)
+	// Read from the terminal event's own text plus whatever the
 	// subprocess itself reported, because a quota refusal can arrive
 	// either way: agy usually reports it as a failed terminal status
 	// (parseErr, below) but a hard enough refusal kills the process
 	// first (runErr). See usagelimit.go.
-	limit := usageLimitFailure(parseEvents(stdout).resultText, runErr)
+	limit := usageLimitFailure(events.resultText, runErr)
 	switch {
 	case capWatch.tripped():
 		// The cap cancelled the subprocess, so runErr is that
@@ -1319,7 +1352,16 @@ func (f *Framework) Run(ctx context.Context, cfg agent.RunConfig) (*agent.Result
 		// changed the world.
 		return partialResult(result, stdout), limit
 	case runErr != nil:
-		return partialResult(result, stdout), fmt.Errorf("antigravity: running agy: %w", runErr)
+		// Both halves, not just the exit status. agy reports a run it
+		// could not finish as a terminal result event with a status of
+		// ERROR or FAILURE -- "There was a network issue connecting to
+		// the server, please try again." -- and then exits 1 with
+		// nothing at all on stderr, so this arm used to render the one
+		// failure a reader can act on as "running agy: exit status 1
+		// (stderr: )". events.resultErr is that sentence; the stream is
+		// removed once the run finishes (orchestrator's own cleanup), so
+		// what this returns is the last place it exists.
+		return partialResult(result, stdout), agent.RunFailure("antigravity", "agy", events.resultErr, runErr)
 	case parseErr != nil:
 		// A capture with no terminal result event -- an agy that died
 		// without runErr reaching us, or output truncated mid-stream.

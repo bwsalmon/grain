@@ -183,14 +183,25 @@ const dispatchReconciler = "dispatch"
 // off of, so its place in the order carries no latency preference the way
 // "releases" before "qualifications" does.
 //
+// "reviews" (grain/task-284) files the review a finished task declares,
+// from the template it names, and runs before "dispatch" and "sync" for
+// the latency reason "schedule" runs first: a review filed this cycle is
+// dispatchable this same tick, and the merge queue sees it the same tick
+// too. That placement is a preference and not a dependency, though it
+// looks like one -- syncEntry holds a reviewed task's own merge on the
+// declaration (Task.ReviewTemplateID) rather than on the review task
+// having been filed yet, precisely so that whether a change merges
+// before its review exists does not come down to this ordering.
+//
 // The order among the rest is a latency preference, not a dependency:
 // syncing pull requests last lets a merge this very cycle just performed
-// be picked up without a tick's delay. All six read their own inputs from
-// the store, so a different order produces the same state one cycle
+// be picked up without a tick's delay. All of them read their own inputs
+// from the store, so a different order produces the same state one cycle
 // later — which is exactly why one failing does not invalidate another.
 func Reconcilers() []Reconciler {
 	return []Reconciler{
 		{Name: "schedule", Reconcile: reconcileSchedule},
+		{Name: "reviews", Reconcile: reconcileReviews},
 		{Name: dispatchReconciler, Reconcile: reconcileDispatch},
 		{Name: "sync", Reconcile: reconcileSync},
 		{Name: "releases", Reconcile: reconcileReleases},
@@ -338,6 +349,13 @@ func recoverReconcile(ctx context.Context, r Reconciler, deps Deps, now time.Tim
 		}
 	}()
 	return r.Reconcile(ctx, deps, now)
+}
+
+// reconcileReviews files the review each finished task declares
+// (grain/task-284), from the template it names, onto the branch that
+// task's own run pushed.
+func reconcileReviews(ctx context.Context, deps Deps, now time.Time) error {
+	return SyncReviews(ctx, deps.Store, now)
 }
 
 // reconcileSync refreshes every pull request grain is still watching.

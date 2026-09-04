@@ -192,7 +192,11 @@ pkg/orchestrator/  v1's core.py/Orchestrator equivalent: runs
                 request once GitHub reports it merged or closed. It no
                 longer polls anything: tasks arrive by being written
                 (see "Input is a model update, not a GitHub issue").
-                RunCycle runs the two halves as independent reconcilers
+                It also files the review a finished task declares
+                (SyncReviews, Task.ReviewTemplateID) and holds that
+                task's own merge until the review has landed -- see "A
+                review, before the merge" below.
+                RunCycle runs the halves as independent reconcilers
                 rather than one pipeline -- see "Reconcilers, not a
                 pipeline" below. It also times itself
                 (orchestrator.CycleTimes): a bounded in-memory ring of how
@@ -410,7 +414,14 @@ controller has" coupling ICU used to cause one layer up. Forcing it off
 produces a genuinely static binary with nothing left to carry to the
 controller. `make test`/`make vet` deliberately leave `CGO_ENABLED`
 alone, since `go test -race` needs cgo for the race detector and nothing
-about testing this module ships anywhere.
+about testing this module ships anywhere. `tests.yml`'s `go-test` job
+runs that same `go test -race ./...`, character for character — for a
+long time it ran a plain `go test ./...` instead, so the detector never
+saw a commit that a developer had not happened to run `make test` over,
+which for a daemon of this shape (a reconcile loop, a goroutine per
+dispatch, an addendum poller each, a `ForbiddenSet` swapped under a
+serving proxy) is the coverage worth having. `tests/deploy` compares the
+two commands now, so neither file can be changed on its own.
 
 `make container-build` still runs that same `make build`, out of this
 same Makefile, inside `Dockerfile.build`'s pinned Debian 12 toolchain --
@@ -1682,7 +1693,15 @@ at all.
 
 **agy 1.1.26 has no denylist for its own native tools, and this is now
 read off the binary rather than assumed.** The whole of what it offers,
-with the evidence:
+with the evidence -- which is in the tree as of the first capture:
+`docs/agy-surface.md` is the binary's own answer to every question below,
+regenerated on demand by `.github/workflows/agy-surface.yml`, and every
+claim in this section has been checked against it. Three needed changing
+when it landed, and they are marked where they appear: the roster is 57
+tools rather than the 55 written here before there was a capture, agents
+are discovered from a third directory as well as the two named here, and
+`agy -p /permissions` wants a credential set before it will answer, even
+though it never checks that one. The rest stood.
 
 - **No flag.** `agy --help` lists `--add-dir`, `--agent`, `--continue`,
   `--conversation`, `--dangerously-skip-permissions`,
@@ -1701,7 +1720,16 @@ with the evidence:
   fields of that file. Naming agy's tools there is a trap rather than a
   near miss: grain's tools and agy's share names, so listing
   `run_command` would deny the run *grain's* `run_command` and leave
-  agy's in place.
+  agy's in place. The capture surfaces the near misses too, and they stay
+  near misses: `allowedTools`, `deniedTools`, `allowedToolPrefixes`,
+  `deniedToolPrefixes`, `deniedCommandPatterns` and
+  `sandboxSystemAllowlist` are all in the binary's string table, and not
+  one of them carries a `json`, `yaml` or `mapstructure` tag -- they are
+  internal Go identifiers rather than keys any file this repository writes
+  can reach. `excludeTools` does carry a tag, which makes it the closest
+  thing to the switch this section is looking for; it sits among Gemini
+  *extension* settings, and putting it in `settings.json` leaves the
+  roster at 57.
 - **The settings file is where the permission system lives, not a
   roster.** `settings.json` carries `permissionPreset`,
   `agentPermissions`, `fileAccessPolicy` and `toolConfirmation`
@@ -1710,10 +1738,11 @@ with the evidence:
   `--dangerously-skip-permissions` switches off. Nothing there removes a
   tool from the roster.
 - **A custom agent replaces the prompt, not the toolset.** A Markdown
-  file with YAML frontmatter under `~/.gemini/antigravity-cli/agents/`
-  (or `~/.gemini/agents/`) is discovered even in an otherwise empty
-  private `HOME` -- the shape `writeAgyHome` builds -- and `--agent
-  <name>` selects it. Its frontmatter keys are `name`, `description`,
+  file with YAML frontmatter under `~/.gemini/antigravity-cli/agents/`,
+  `~/.gemini/agents/` or `~/.gemini/config/agents/` -- all three, on
+  1.1.26, planted together or one at a time -- is discovered even in an
+  otherwise empty private `HOME`, the shape `writeAgyHome` builds, and
+  `--agent <name>` selects it. Its frontmatter keys are `name`, `description`,
   `mainAgent`, `subagent`, `hidden`, `inheritMcp`,
   `inheritCustomizations`, `commandExecutionPolicy`, `model`, `rules`,
   `skills`, `plugins` and `mcpServers`. None of them names the native
@@ -1745,7 +1774,8 @@ against a real credential and reading the tool steps back off its
 - **`settings.json` takes `permissions.allow` / `permissions.deny`, and
   they load.** Write the block, ask the binary what it read
   (`agy -p /permissions`, which print mode answers without an agent turn
-  or a credential), and it prints one record per rule:
+  and without a *valid* credential, though not without one at all --
+  `docs/agy-surface.md`), and it prints one record per rule:
   `global<TAB>deny<TAB>run_command`. Bare names, `run_command(*)` and
   `regex:` forms all survive; a malformed value (`"deny": 12345`) is
   dropped in silence, no rule and no complaint -- the failure mode this
@@ -1759,8 +1789,13 @@ against a real credential and reading the tool steps back off its
   runs agy -- `writeAgyHome` builds a fresh `HOME` per run and `Run`
   starts the binary once in it -- and a trap for any future change that
   reuses one or starts agy again to resume a run. What the rules do *not*
-  do is change the roster: the `init` event of a real stream-json session advertises the
-  same 55 native tools with the block and without it. And `Run` passes
+  do is change the roster: the `init` event of a real stream-json session
+  advertises the same 57 native tools with the block and without it, and
+  the same 57 again for `excludeTools`, `permissionPreset`,
+  `agentPermissions`, `toolConfirmation` and the `--sandbox` flag
+  (`docs/agy-surface.md`; the count was written as 55 here and in
+  `withheldNativeTools` before there was a capture to check it against).
+  And `Run` passes
   `--dangerously-skip-permissions`, which that same event reports as
   permission mode `always-proceed`, while agy's own prompt calls an
   always-deny decision "overridden by dangerously-skip-permissions". That
@@ -3173,11 +3208,37 @@ recorded it as loaded. The import a restart does is now the import a tick
 does.
 
 The whole-database import -- every table, churn included -- is left with
-the one case that needs it: a working tree with no marker, which is a
-clone onto a host that has never loaded it. That is the restore case,
-where the repository is the only copy there is and there is no database
-ahead of it to protect, and it is what makes a clone a whole deployment
-rather than a settings file.
+the cases that need it, and what they have in common is that there is no
+database ahead of the dump to protect. A working tree with no marker is
+one: a clone onto a host that has never loaded it, which is the restore
+case, and what makes a clone a whole deployment rather than a settings
+file. A database with nothing in it is the other, and it is the same case
+reached from the other side -- a store deleted, a volume restored from a
+backup that did not include it, `sqlite.Open` handed a path that has
+never held one -- where the working tree survived and the marker with it.
+
+That second one used to be the one shape of this that lost data rather
+than recovering from it. The marker answers "has the repository moved
+since this host last agreed with it" and knows nothing about the
+database, so a host whose store was gone read `marker == HEAD`, imported
+nothing, came up empty, and the next sync exported that empty database
+over the dump, committed it and pushed it -- with nothing further out to
+object, because the remote was not ahead: this host really had written
+the commit under it. The repository that exists to be the off-host copy
+of the deployment was deleted by the deployment. (The paired case was
+already handled: `scripts/setup.sh` moves the working tree aside
+alongside the store on a schema bump, so the daemon re-seeds. It was the
+unpaired one -- store gone, tree kept -- that had no answer.) An empty
+database now takes the whole repository, which costs nothing by
+definition and is the restore an operator wanted, and the export in that
+direction is refused outright and reported in the State pane rather than
+committed (`staterepo.ErrDatabaseEmpty`) -- because a database that goes
+away underneath a daemon that is already running cannot be restored on
+the spot: an import that replaces every row is not something to do with
+runs in flight holding the ids, so it waits for a restart. "Nothing in
+it" means no row in any table, bar the schema stamp every database has
+from the moment it is created; a database with a single task in it is one
+this host is responsible for and takes the ordinary path.
 
 If a pull arrives that cannot be applied -- a dump stamped with a schema
 this build does not know, or rows that will not insert -- the daemon
@@ -3287,8 +3348,8 @@ database is ahead of the repository on churn by up to an hour by design,
 and ahead of it on everything else by up to an export interval for the
 same reason, a merged pull request arriving at startup imports the
 settings out of it and leaves grain's own record of what it did alone. A
-clone with no marker -- the restore case, where the repository is the
-only copy there is -- still imports all of it.
+start with nothing to lose -- a clone with no marker, or a database with
+nothing in it -- still imports all of it.
 
 Squashing history periodically was the other candidate and is not what
 happened: it means force-pushing a branch that people open pull requests
@@ -3490,22 +3551,43 @@ the tag CI keeps pointed at main, which is a less precise answer than
 the stamp and a much better one than none.
 
 Unlike the README, which is grain's text and is rewritten on every sync,
-a workflow that is already there is never touched again — but for that
-one image line, which grain keeps in step with the build it is running.
-That line is a fact about the deployment rather than about the
-repository, and it goes stale on its own every time the deployment is
-upgraded, so a sync after an upgrade repoints it on a one-line commit of
-its own and the syncs after that have nothing to do. The rule that makes
-that safe is byte equality: grain only touches a file that is still word
-for word its own rendering, so a runner, a trigger or a step of
-somebody's own hands the whole file back to whoever wrote it, image
-included. A file grain rewrote every thirty seconds would be a file
-whose editor is fighting a timer, which is the same reason the export
-must not fight a hand edit to a table file. Deleting it is not an
+a workflow somebody has edited is never touched again. The rule that
+makes that safe is byte equality: grain only touches a file that is
+still word for word one of its own renderings, so a runner, a trigger or
+a step of somebody's own hands the whole file back to whoever wrote it,
+image included. A file grain rewrote every thirty seconds would be a
+file whose editor is fighting a timer, which is the same reason the
+export must not fight a hand edit to a table file. Deleting it is not an
 opt-out, because grain writes back what is missing: `"noWorkflow": true`
 in `state-repo.json` is, and `"checkImage"` pins the image from the host
 side — grain then writes and maintains that value instead of its own, so
 a pin made there is one a later sync does not take back.
+
+What grain does maintain in a file nobody has edited is the image line,
+which it keeps in step with the build it is running. That line is a fact
+about the deployment rather than about the repository, and it goes stale
+on its own every time the deployment is upgraded, so a sync after an
+upgrade repoints it on a one-line commit of its own and the syncs after
+that have nothing to do.
+
+Byte equality against *this build's* template alone would have made that
+promise good only until the next time the template was reworded: a
+comment edited here and every file grain had already installed stops
+being recognised, keeps whatever image it was installed with, and is
+never maintained again — no worse than a grain that never repointed
+anything, but a fix that reaches no deployment that already exists. So
+`pkg/staterepo/workflow_history.go` keeps the renderings earlier grains
+wrote, and a file matching one of them word for word is adopted: grain
+replaces it with this build's wording, on one commit that says as much,
+and maintains its image from then on. The whole file rather than its
+image line, because the comment block of an older rendering describes
+rules grain has since changed. Nothing is loosened by this — each entry
+is still an exact match against text grain itself wrote, and a file with
+one character of anybody else's in it matches none of them — and the
+list only grows: a template edited here goes into that file, and
+`TestTheCurrentTemplateIsRecorded` fails until it does, because the
+alternative is stranding every repository already carrying the old text
+with nothing to say so.
 
 That leaves the reason grain did not commit this file until now, which
 is real: a push adding a file under `.github/workflows` is refused
@@ -3514,8 +3596,8 @@ installation token need not be able to. So the workflow is a commit of
 its own, pushed on its own, and a refusal -- GitHub says "refusing to
 allow ... to create or update workflow" -- is undone in full: the commit
 is dropped, the file put back as it was — removed when grain had just
-written it, restored when what was refused was the one-line repointing
-of a check the repository already had — the export goes on untouched,
+written it, restored when what was refused was a change to a check the
+repository already had — the export goes on untouched,
 and the journal says to run `grain state ci` in a clone and commit the
 file with a credential that may. grain tries again a day later, so
 granting the permission needs no restart. A local-only repository gets
@@ -3531,6 +3613,14 @@ reading the journal that minute. It says when grain was last refused,
 names the file, and offers the same two ways out: install it by hand, or
 set `"noWorkflow": true`. It stops saying it the moment the file is in
 the repository, however it got there.
+
+`grain state status` says it too, out of that same marker rather than out
+of anything of its own, so the terminal and the pane cannot come to
+describe one repository differently. It is the same question asked by
+whoever is on the host, and without the line every other one that command
+prints -- the remote, the head, the schema, the dispatch verdict -- is
+word for word what a repository whose check runs on every pull request
+prints.
 
 `grain state ci DIR` is that manual path, and the one for a repository
 whose deployment cannot push workflows. It writes the same file into a
@@ -6343,6 +6433,84 @@ ordinary concurrency it had and gains a single slot the merge queue
 cannot be shut out of. Setting it to 0 puts a deployment back exactly
 where it was: the merge queue's own repairs contending for worker
 capacity like anything else.
+
+## A review, before the merge
+
+A task can carry a review: `Task.ReviewTemplateID`, the id of a
+`model.Template` whose title, body and grants are what a *second* agent
+is dispatched with once the first one's work is done. The "reviews"
+reconciler files it (`orchestrator.SyncReviews`), the merge queue waits
+for it, and everything else about it is machinery that already existed.
+
+The shape is the separate fix task the merge queue used to file before
+grain/task-271, reused deliberately: a repair now runs as another attempt
+of the task itself, but stacking a second agent on a first one's branch
+is still exactly what a review needs. A
+review task's `Base` is the reviewed task's branch (`model.BranchName`,
+derived, so nothing has to agree with anything), its `AutoMerge` is set,
+and it is filed already approved at the head of the backlog. So it is a
+stacked branch: the reviewing agent reads the diff on the branch under
+review, commits its fixes onto its own branch off that one, and
+`syncEntry` merges its pull request straight back into the branch it
+reviewed the moment it reads clean. That is as close to "a new agent on
+the same branch" as grain can be, given that a run's branch is a function
+of its task id and always will be. Like one of those fix tasks, a review
+is never a
+merge queue entry in its own right (`isQueueMember`): it merges into
+another task's branch, not into the repo's base, so it neither takes a
+head position nor waits for one.
+
+What is new is the wait. A reviewed task does not merge while its review
+is outstanding, so the order is work, review, merge — not work, merge,
+and a review of something that has already landed. The wait is on the
+*declaration* rather than on the review task existing, which matters more
+than it looks: filing the review and advancing the merge queue are two
+reconcilers in one cycle, and if the gate were "has a review task been
+filed" then whether a change merged before its review existed would come
+down to which of them ran first. `Task.ReviewTemplateID` alone holds the
+merge; filing the review starts the clock rather than starting the wait.
+
+And the wait is bounded, for the reason the wait on an automatic repair
+is (`defaultRepairDeadline`): a task holding its merge for a review reads
+PrClean, not PrPending, so the CI stall clock never times it, and the
+review's own pull request is never a queue head, so nothing times that
+either. A review neither finished nor abandoned after six hours is said
+so on the task, which is then blocked in the merge queue's own sense —
+it stops being anyone's head, so the tasks behind it move, and it merges
+as soon as it reads clean like any other task the queue has given up
+driving. That is the deliberate choice between the two ways to be wrong:
+merging a change whose review never arrived, having said so, is
+recoverable; holding a finished change out of the repo forever on a
+review that is not coming is not.
+
+A template rather than a body typed onto the task, for the same reason
+`Schedule.TemplateID` is one: "read this branch and fix what you find" is
+the same paragraph on every task it is attached to, and the instructions
+worth improving once. Nothing about a template says it is a review; what
+makes it one is being named as a task's own. Grain appends the subject
+the template cannot know — which task, which branch, which pull request —
+and supplies nothing else, so what the reviewing agent is told is what
+somebody wrote in Templates.
+
+It is attachable from the new-task form, from a task's own edit form (the
+usual case: a task is filed, and somewhere before it finishes somebody
+decides its change wants a second pass), from `PATCH /api/tasks/{id}`,
+and from `grain create -review-template`/`grain update -review-template`.
+An edit reaches any review not yet filed, since the template is resolved
+when the work is done rather than when the task is created — so a review
+can be attached to a task that is queued, running, or already finished
+and waiting to merge. Once the review task exists, changing it changes
+nothing: exactly one review is ever filed per task (`LinkReviewTask` is
+both the record of that and what the merge queue waits on), and the
+picker locks and says which task is carrying it out. A review task
+carries no review of its own, which is what stops reviews nesting.
+
+The review task itself nests under the task it reviews, the way an
+automatic fix nests under the one it repairs, and says which of the two
+it is rather than borrowing the other's name: a "review" chip in the task
+list, and `grain list -origin review` beside `-origin fix`. Both are
+stacked on another task's branch; only one of them is a repair of a red
+build.
 
 ## Pausing when the agent runs out of budget
 

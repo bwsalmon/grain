@@ -454,3 +454,54 @@ func TestRunRequiresASandbox(t *testing.T) {
 		t.Fatal("Run with neither a sandbox root nor a kontur VM succeeded")
 	}
 }
+
+// TestRunReportsCodexsOwnErrorAlongsideItsExitStatus is the same pinning
+// agent/antigravity's own test does, for the same failure shape: codex
+// reports a turn it could not finish in the stream and then exits
+// non-zero, and reporting only the exit status left the daemon's log
+// with "running codex: exit status 1" -- no cause named, and no capture
+// left to read it out of once the run finished.
+func TestRunReportsCodexsOwnErrorAlongsideItsExitStatus(t *testing.T) {
+	exitErr := errors.New("exit status 1 (stderr: )")
+	r := &recordingRunner{
+		stdout: strings.Join([]string{
+			`{"type":"item.completed","item":{"id":"i1","item_type":"mcp_tool_call","server":"grain-sandbox",` +
+				`"tool":"run_command","status":"completed","result":"pushed"}}`,
+			`{"type":"turn.failed","error":{"message":"stream disconnected before completion"}}`,
+		}, "\n"),
+		err: exitErr,
+	}
+	f := newFramework(r, "/usr/local/bin/grain")
+
+	result, err := f.Run(context.Background(), agent.RunConfig{Prompt: "go", SandboxRoot: t.TempDir()})
+	if err == nil {
+		t.Fatal("Run err = nil, want the failure")
+	}
+	if !strings.Contains(err.Error(), "stream disconnected") {
+		t.Errorf("Run err = %q, want codex's own account of why the run failed", err)
+	}
+	if !strings.Contains(err.Error(), "exit status 1") {
+		t.Errorf("Run err = %q, want the exit status kept alongside it", err)
+	}
+	if !errors.Is(err, exitErr) {
+		t.Errorf("Run err = %q, want the subprocess's own error still wrapped in it", err)
+	}
+	if result == nil || len(result.ToolCalls) != 1 {
+		t.Fatalf("Result = %+v, want the work the run did before it failed", result)
+	}
+}
+
+// A codex that died before reporting anything has left nothing but its
+// exit status, and that is what Run reports.
+func TestRunReportsTheExitStatusAloneWhenCodexSaidNothing(t *testing.T) {
+	r := &recordingRunner{err: errors.New("signal: killed")}
+	f := newFramework(r, "/usr/local/bin/grain")
+
+	_, err := f.Run(context.Background(), agent.RunConfig{Prompt: "go", SandboxRoot: t.TempDir()})
+	if err == nil {
+		t.Fatal("Run err = nil, want the failure")
+	}
+	if !strings.Contains(err.Error(), "codex: running codex: signal: killed") {
+		t.Errorf("Run err = %q, want the subprocess's own failure named", err)
+	}
+}

@@ -291,16 +291,20 @@ func (c *Client) UpdateTemplate(ctx context.Context, id string, req UpdateTempla
 // "no history worth keeping" reasoning applies again here, except a
 // template additionally refuses to delete out from under a schedule
 // that still fires from it, a qualification plan (bwsalmon/agents#518)
-// that still schedules from it, or a suite (bwsalmon/agents#642) that
-// still runs it: unlike editing a template (which every schedule, plan
-// or suite pointing at it is meant to pick up), deleting one out from
+// that still schedules from it, a suite (bwsalmon/agents#642) that
+// still runs it, or an open task (grain/task-284) that still names it as
+// its review: unlike editing a template (which every schedule, plan,
+// suite or task pointing at it is meant to pick up), deleting one out from
 // under any of them would silently strand its next firing -- a
 // schedule's with no content to file, a plan's with no template for
 // CreateQualificationRun to resolve, a suite's with no template for
-// CreateSuiteRun/FireNextPass to resolve -- worse than the plain,
-// retried error each would otherwise have to surface days or weeks
-// later. A human wanting to delete it anyway repoints or deletes those
-// schedules, plans and suites first.
+// CreateSuiteRun/FireNextPass to resolve, a task's with no template for
+// orchestrator.fileReviewTask to resolve (which leaves its own pull
+// request waiting on a review that can never be filed) -- worse than the
+// plain, retried error each would otherwise have to surface days or
+// weeks later. A human wanting to delete it anyway repoints or deletes
+// those schedules, plans and suites first, and detaches it from those
+// tasks.
 func (c *Client) DeleteTemplate(ctx context.Context, id string) error {
 	existing, err := c.Store.GetTemplate(ctx, id)
 	if err != nil {
@@ -332,6 +336,15 @@ func (c *Client) DeleteTemplate(ctx context.Context, id string) error {
 	if len(suites) > 0 {
 		return validationErrorf(
 			"template is used by %d suite(s); remove it from those first", len(suites))
+	}
+	reviewed, err := c.Store.TasksReviewedByTemplate(ctx, id)
+	if err != nil {
+		return err
+	}
+	if len(reviewed) > 0 {
+		return validationErrorf(
+			"template is the review attached to %d open task(s); detach it from those first",
+			len(reviewed))
 	}
 	return c.Store.DeleteTemplate(ctx, id)
 }

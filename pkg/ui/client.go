@@ -255,6 +255,13 @@ func (c *Client) ListTasks(ctx context.Context) ([]Task, error) {
 	if err != nil {
 		return nil, err
 	}
+	// And once more for the review each task has attached: one read of
+	// the template list, which is a handful of rows a deployment writes
+	// by hand, rather than a GetTemplate per task naming one.
+	reviewNames, err := c.templateNames(ctx)
+	if err != nil {
+		return nil, err
+	}
 	out := make([]Task, 0, len(tasks))
 	for _, t := range tasks {
 		var blockedAt *time.Time
@@ -265,9 +272,46 @@ func (c *Client) ListTasks(ctx context.Context) ([]Task, error) {
 		if a, ok := activity[t.ID]; ok {
 			doing = &a
 		}
-		out = append(out, taskFrom(t, states[t.ID], closed, blockedAt, repairing[t.ID], doing))
+		out = append(out, taskFrom(t, states[t.ID], closed, blockedAt, repairing[t.ID], doing, reviewNames[t.ReviewTemplateID]))
 	}
 	return out, nil
+}
+
+// templateNames is every template's ID mapped to its Name, for a caller
+// rendering many tasks at once -- ListTasks' own "one query for
+// everyone" trade, applied to the review a task can name
+// (model.Task.ReviewTemplateID). A task naming none, or naming one that
+// has since been deleted, simply misses the map and reads back with no
+// name, which Task.ReviewTemplateName documents as the two cases it
+// cannot tell apart from the id alone.
+func (c *Client) templateNames(ctx context.Context) (map[string]string, error) {
+	list, err := c.Store.ListTemplates(ctx)
+	if err != nil {
+		return nil, err
+	}
+	names := make(map[string]string, len(list))
+	for _, t := range list {
+		names[t.ID] = t.Name
+	}
+	return names, nil
+}
+
+// reviewTemplateName is templateNames for a single task: the Name of the
+// template it names as its review, empty when it names none or when that
+// template is gone. One read rather than the whole list, matching
+// closedTargets' own "a few queries for one task" trade.
+func (c *Client) reviewTemplateName(ctx context.Context, t model.Task) (string, error) {
+	if t.ReviewTemplateID == "" {
+		return "", nil
+	}
+	tmpl, err := c.Store.GetTemplate(ctx, t.ReviewTemplateID)
+	if err != nil {
+		return "", err
+	}
+	if tmpl == nil {
+		return "", nil
+	}
+	return tmpl.Name, nil
 }
 
 // newestFirst reads model.Config.NewestFirst fresh from the store on
@@ -327,7 +371,11 @@ func (c *Client) Task(ctx context.Context, id string) (Task, error) {
 	if err != nil {
 		return Task{}, err
 	}
-	return taskFrom(*t, state, closed, blockedAt, obs.RepairInFlight(), activity), nil
+	reviewName, err := c.reviewTemplateName(ctx, *t)
+	if err != nil {
+		return Task{}, err
+	}
+	return taskFrom(*t, state, closed, blockedAt, obs.RepairInFlight(), activity, reviewName), nil
 }
 
 // closedTargets resolves whether each of a task's own blocking-link
@@ -402,8 +450,12 @@ func (c *Client) GetTask(ctx context.Context, id string) (TaskDetail, error) {
 	if err != nil {
 		return TaskDetail{}, err
 	}
+	reviewName, err := c.reviewTemplateName(ctx, *t)
+	if err != nil {
+		return TaskDetail{}, err
+	}
 	detail := TaskDetail{
-		Task:        taskFrom(*t, state, closed, blockedAt, obs.RepairInFlight(), activity),
+		Task:        taskFrom(*t, state, closed, blockedAt, obs.RepairInFlight(), activity, reviewName),
 		Comments:    make([]Comment, 0, len(comments)),
 		Attachments: taskAttachments,
 	}
@@ -648,6 +700,14 @@ type CreateTaskRequest struct {
 	// newline into files as no override rather than as an override that
 	// silences both.
 	PromptExtension string `json:"promptExtension"`
+	// ReviewTemplateID attaches a review to this task
+	// (model.Task.ReviewTemplateID, grain/task-284): the ID of the
+	// template a second task is filed from once this one's own work is
+	// done, to read the code it proposed and fix what is wrong with it
+	// before it merges. "" (the default) attaches none. Anything else
+	// must name a template that exists, checked here rather than left to
+	// fail at the one moment the review was supposed to be filed.
+	ReviewTemplateID string `json:"reviewTemplateId"`
 	// Capabilities is the exact set of capability ids this task is filed
 	// holding -- but only when the caller names one. nil (the field left
 	// out, or JSON null) means the caller expressed no opinion, and the
@@ -844,6 +904,10 @@ func (c *Client) CreateTask(ctx context.Context, req CreateTaskRequest) (Task, e
 	if err := validateAgentFramework(req.AgentFramework); err != nil {
 		return Task{}, err
 	}
+	reviewTemplateID, err := c.validReviewTemplate(ctx, req.ReviewTemplateID)
+	if err != nil {
+		return Task{}, err
+	}
 	grants, err := c.creationGrants(ctx, req, target)
 	if err != nil {
 		return Task{}, err
@@ -900,21 +964,22 @@ func (c *Client) CreateTask(ctx context.Context, req CreateTaskRequest) (Task, e
 			Attribution: model.Attribution{Actor: c.Config.Actor},
 			Reason:      model.ReasonDirect,
 		},
-		Target:          target,
-		Binding:         model.BindingDirective,
-		Base:            req.Base,
-		AutoMerge:       req.AutoMerge,
-		Interactive:     req.Interactive,
-		SandboxCPUs:     req.SandboxCPUs,
-		SandboxMemoryMB: req.SandboxMemoryMB,
-		SandboxDiskGB:   req.SandboxDiskGB,
-		AgentFramework:  req.AgentFramework,
-		PromptExtension: strings.TrimSpace(req.PromptExtension),
-		Grants:          grants,
-		Links:           links,
-		Reads:           reads,
-		CreatedAt:       &now,
-		OrderKey:        orderKey,
+		Target:           target,
+		Binding:          model.BindingDirective,
+		Base:             req.Base,
+		AutoMerge:        req.AutoMerge,
+		Interactive:      req.Interactive,
+		SandboxCPUs:      req.SandboxCPUs,
+		SandboxMemoryMB:  req.SandboxMemoryMB,
+		SandboxDiskGB:    req.SandboxDiskGB,
+		AgentFramework:   req.AgentFramework,
+		PromptExtension:  strings.TrimSpace(req.PromptExtension),
+		ReviewTemplateID: reviewTemplateID,
+		Grants:           grants,
+		Links:            links,
+		Reads:            reads,
+		CreatedAt:        &now,
+		OrderKey:         orderKey,
 	}
 	if req.Approved || req.Interactive {
 		task.Approval = &model.Attribution{Actor: c.Config.Actor}
@@ -945,6 +1010,34 @@ func (c *Client) CreateTask(ctx context.Context, req CreateTaskRequest) (Task, e
 		}
 	}
 	return c.Task(ctx, id)
+}
+
+// validReviewTemplate checks the review a task is being filed or edited
+// with, returning the id to store: "" for no review, and otherwise the
+// trimmed id, once it has been confirmed to name a template that
+// actually exists.
+//
+// Checked at the point somebody chooses it rather than at the point it
+// is used, because those moments are far apart: a review is resolved
+// once the task's own work is finished (orchestrator.fileReviewTask),
+// which may be hours later, and a typo discovered then costs the review
+// entirely -- the task's pull request waits on one that can never be
+// filed until the merge queue gives up on it. It is not re-checked at
+// use: ui.Client.DeleteTemplate refuses to delete a template an open
+// task still names, which is the same guard from the other side.
+func (c *Client) validReviewTemplate(ctx context.Context, id string) (string, error) {
+	trimmed := strings.TrimSpace(id)
+	if trimmed == "" {
+		return "", nil
+	}
+	tmpl, err := c.Store.GetTemplate(ctx, trimmed)
+	if err != nil {
+		return "", err
+	}
+	if tmpl == nil {
+		return "", validationErrorf("unknown review template %s", trimmed)
+	}
+	return trimmed, nil
 }
 
 // validateAgentFramework checks a task's own AgentFramework override.
@@ -1192,6 +1285,19 @@ type UpdateTaskRequest struct {
 	// run this task has not started yet -- but not one already live,
 	// whose prompt was built when it began.
 	PromptExtension *string `json:"promptExtension,omitempty"`
+	// ReviewTemplateID attaches, changes or detaches this task's review
+	// (CreateTaskRequest.ReviewTemplateID sets the same field), with an
+	// empty string meaningful for the reason it is on the two above: it
+	// detaches the review, so the task merges without waiting for one.
+	//
+	// An edit reaches any review not yet filed, since
+	// orchestrator.SyncReviews resolves this the first cycle after the
+	// task's own work is done rather than at creation -- so a review can
+	// be attached to a task that is already queued, already running, or
+	// already finished and waiting to merge. Once the review task has
+	// been filed (model.LinkReviewTask), changing this changes nothing:
+	// exactly one review is ever filed per task.
+	ReviewTemplateID *string `json:"reviewTemplateId,omitempty"`
 	// Reads, given, replaces the whole set of read-only repos rather than
 	// adding to it -- there is no per-entry attach/detach endpoint for
 	// Reads the way SetCapability and SetDependency give Grants and
@@ -1243,6 +1349,14 @@ func (c *Client) UpdateTask(ctx context.Context, id string, req UpdateTaskReques
 			return Task{}, err
 		}
 	}
+	var reviewTemplateID string
+	if req.ReviewTemplateID != nil {
+		var err error
+		reviewTemplateID, err = c.validReviewTemplate(ctx, *req.ReviewTemplateID)
+		if err != nil {
+			return Task{}, err
+		}
+	}
 	var reads []model.RepoRef
 	if req.Reads != nil {
 		var err error
@@ -1290,6 +1404,9 @@ func (c *Client) UpdateTask(ctx context.Context, id string, req UpdateTaskReques
 		}
 		if req.PromptExtension != nil {
 			task.PromptExtension = strings.TrimSpace(*req.PromptExtension)
+		}
+		if req.ReviewTemplateID != nil {
+			task.ReviewTemplateID = reviewTemplateID
 		}
 		if req.Reads != nil {
 			task.Reads = reads
