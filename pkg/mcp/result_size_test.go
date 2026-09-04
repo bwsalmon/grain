@@ -8,7 +8,7 @@ import (
 )
 
 // shrinkMaxToolResultBytes caps results at something a test can produce
-// in a line or two, rather than generating 64 KB to prove the cap works.
+// in a line or two, rather than generating 16 KB to prove the cap works.
 func shrinkMaxToolResultBytes(t *testing.T, n int) {
 	t.Helper()
 	old := maxToolResultBytes

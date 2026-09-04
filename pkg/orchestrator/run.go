@@ -7,11 +7,13 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/bwsalmon/grain/pkg/agent"
+	"github.com/bwsalmon/grain/pkg/capability/bootstrap"
 	"github.com/bwsalmon/grain/pkg/capability/selfdebug"
 	"github.com/bwsalmon/grain/pkg/dispatch"
 	"github.com/bwsalmon/grain/pkg/mcp"
@@ -1115,15 +1117,15 @@ func RunDispatch(ctx context.Context, store *model.Store, framework agent.Framew
 			repo = task.Target.String()
 		}
 
-		// Whether this run's task holds the self-debug grant, and where
-		// grain's own source is if it does -- the pair that turns on the
-		// read-only tools that grant is for in the forked mcpserver a
-		// subprocess Framework runs (agent.RunConfig.SelfDebug,
-		// agent.SelfDebugArgs).
+		// Which tool-granting capabilities this run's task holds, and
+		// where grain's own source is if self-debug is among them -- what
+		// turns those grants' read-only tools on in the forked mcpserver a
+		// subprocess Framework runs (agent.RunConfig.Grants,
+		// agent.GrantArgs).
 		//
 		// Read off the task's raw Grants, exactly as runOne reads them
-		// for Config.GrantTools, and for the same reason: self-debug is
-		// a model.ProvisionGrant capability whose Resolve always
+		// for Config.GrantTools, and for the same reason: both of these
+		// are model.ProvisionGrant capabilities whose Resolve always
 		// honours, so there is no "granted but refused" case a resolved
 		// GrantResolution would catch and this would miss.
 		//
@@ -1131,10 +1133,11 @@ func RunDispatch(ctx context.Context, store *model.Store, framework agent.Framew
 		// about selfrepair's tools needing a human watching the chat to
 		// answer a confirmation, and nothing here asks anyone anything.
 		// A task granted self-debug is a task somebody wants to be able
-		// to debug grain, attended or not.
-		selfDebug := hasGrant(task, selfdebug.CapabilityName)
+		// to debug grain, attended or not, and a playbook is a file to
+		// read whether or not anyone is watching it being read.
+		grants := runGrants(task)
 		grainSourceDir := ""
-		if selfDebug {
+		if slices.Contains(grants, selfdebug.CapabilityName) {
 			grainSourceDir = cfg.GrainSourceDir
 		}
 
@@ -1172,8 +1175,8 @@ func RunDispatch(ctx context.Context, store *model.Store, framework agent.Framew
 			// TaskID is what lets a Framework's own forked mcpserver ask
 			// the daemon to act for this run rather than only on its
 			// sandbox -- open_pull_request, today (see RunConfig.TaskID).
-			TaskID:    task.ID,
-			SelfDebug: selfDebug, GrainSourceDir: grainSourceDir,
+			TaskID: task.ID,
+			Grants: grants, GrainSourceDir: grainSourceDir,
 			MaxTurns: cfg.MaxAgentTurns, TranscriptPath: transcriptPath,
 			Addenda: addendaPoller(store, task.ID, comments),
 		})
@@ -1549,6 +1552,34 @@ func prepareCapabilities(ctx context.Context, reg *model.CapabilityRegistry,
 // lets a task do, so a self-debug grant a human ticked and one a repo's
 // defaults attached are the same grant here (model.GrantsSubsetOf draws
 // the same line for the same reason).
+// toolGrants are the capability grants whose whole effect is which tools
+// a run gets, and which a forked "grain mcpserver" can therefore serve
+// for itself once it is told the run holds them (cmd/grain/mcpserver.go's
+// -grant). Both are read-only, which is what makes that possible:
+// selfrepair's own grant is absent because its one tool blocks on a
+// human's reply in the task's chat, and that needs a store handle the
+// mcpserver process deliberately does not have.
+//
+// A fixed order, so that a run's own arguments read the same way twice
+// for the same task rather than following whatever order the grants were
+// attached in.
+var toolGrants = []string{selfdebug.CapabilityName, bootstrap.CapabilityName}
+
+// runGrants is the subset of toolGrants task holds, which is what a
+// Framework passes on to the mcpserver it forks
+// (agent.RunConfig.Grants). Nothing outside that list travels: a run's
+// tools are the only thing this is for, and a capability that mints
+// credentials has no business being named in a subprocess's arguments.
+func runGrants(task model.Task) []string {
+	var grants []string
+	for _, capability := range toolGrants {
+		if hasGrant(task, capability) {
+			grants = append(grants, capability)
+		}
+	}
+	return grants
+}
+
 func hasGrant(task model.Task, capability string) bool {
 	for _, g := range task.Grants {
 		if g.Capability == capability {

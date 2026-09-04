@@ -98,6 +98,7 @@ func (p *printer) metrics(rep ui.MetricsReport) {
 
 	printTools(rep.Tools)
 	printChecks(rep.Checks)
+	printPullRequests(rep.PullRequests)
 
 	if len(rep.Backlog.ByState) > 0 {
 		fmt.Println("\nbacklog (right now, not over the window)")
@@ -163,6 +164,33 @@ func printChecks(c ui.MetricsChecks) {
 		fmt.Printf("  pushes before green      %.1f on average, %d at worst (over %d run(s) that went green)\n",
 			c.PushesToGreen.Mean, c.PushesToGreen.Max, c.GreenRuns)
 	}
+}
+
+// printPullRequests renders the last stretch of that loop: whether runs
+// take the pull request grain offers them mid-flight, and whether the
+// ones that do leave fewer red builds behind than the ones that do not.
+//
+// The two fix-task rates are printed as a pair on purpose, with both
+// denominators on the line. Either alone is a number with no scale --
+// some share of branches go red for reasons no amount of watching would
+// have caught -- and the fix-task link is on the task rather than the
+// attempt, so the pair is a comparison between two populations measured
+// the same coarse way rather than a rate anybody should quote.
+//
+// Silent for a window in which nobody was offered the tool, for the same
+// reason printTools is: a row of zeroes would read as "no run ever calls
+// it" where the truth is "no run in this window could have".
+func printPullRequests(p ui.MetricsPullRequests) {
+	if p.Runs == 0 {
+		return
+	}
+	fmt.Printf("\nmid-run pull requests (%d run(s) in the window could have opened one)\n", p.Runs)
+	fmt.Printf("  opened one themselves    %6d  (%.0f%% of them, %d call(s) in all)\n",
+		p.Opened, p.AdoptionRate*100, p.Calls)
+	fmt.Printf("  fix task filed after     %6.0f%% of the %d that did, %.0f%% of the %d that did not\n",
+		p.WithTool.Rate*100, p.WithTool.Runs, p.WithoutTool.Rate*100, p.WithoutTool.Runs)
+	fmt.Println("  (a fix task is the merge queue cleaning up a red build the run left behind." +
+		"\n   The link is on the task, not the attempt: read the difference, not either rate.)")
 }
 
 // atMost renders a bucketed percentile as the bound it is, so nobody

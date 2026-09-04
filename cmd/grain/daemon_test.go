@@ -137,7 +137,7 @@ func TestCapabilityProviders(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			providers := capabilityProviders(tc.cfg, nil)
+			providers := capabilityProviders(tc.cfg, nil, nil)
 			var got []string
 			for _, p := range providers {
 				got = append(got, p.Spec().Name)
@@ -165,7 +165,7 @@ func TestCapabilityProviders(t *testing.T) {
 func TestEveryLeakableCapabilityIsReaped(t *testing.T) {
 	cfg := config{gcpProject: "proj", gcpServiceAccountEmail: "agent@proj.iam.gserviceaccount.com"}
 	reaped := map[string]bool{}
-	for _, p := range capabilityProviders(cfg, nil) {
+	for _, p := range capabilityProviders(cfg, nil, nil) {
 		if _, ok := p.(model.Reaper); ok {
 			reaped[p.Spec().Name] = true
 		}
@@ -179,10 +179,12 @@ func TestEveryLeakableCapabilityIsReaped(t *testing.T) {
 	}
 }
 
-// gitHubTokenNames is what run() reads the deployment's named tokens
-// from, once, before either half of the process is up -- the ladder's
-// own directory under -data-dir, the same place the default token lives.
-func TestGitHubTokenNames(t *testing.T) {
+// gitHubCredentialLadder is what run() reads the deployment's named
+// tokens from, once, before either half of the process is up -- the
+// ladder's own directory under -data-dir, the same place the default
+// token lives. newLiveConfig takes the ladder itself and reads the names
+// off it, so this covers the pair together.
+func TestGitHubCredentialLadderNamesTheExtraTokens(t *testing.T) {
 	dataDir := t.TempDir()
 	githubDir := filepath.Join(dataDir, "secrets", "github")
 	if err := os.MkdirAll(githubDir, 0o755); err != nil {
@@ -197,20 +199,25 @@ func TestGitHubTokenNames(t *testing.T) {
 		}
 	}
 
-	got, err := gitHubTokenNames(dataDir)
+	ladder, err := gitHubCredentialLadder(dataDir)
 	if err != nil {
 		t.Fatal(err)
 	}
+	got := newLiveConfig(nil, nil, config{}, ladder).gitHubTokens()
 	// "bot" is the default every repo already pushes with: a capability
 	// for it would grant a task exactly what it has without one.
 	if want := []string{"release-bot"}; !slices.Equal(got, want) {
-		t.Fatalf("gitHubTokenNames = %v, want %v", got, want)
+		t.Fatalf("named tokens = %v, want %v", got, want)
 	}
 
 	// A deployment that has never had a GitHub credential configured is
 	// not an error here -- it simply offers no named tokens.
-	if got, err := gitHubTokenNames(t.TempDir()); err != nil || len(got) != 0 {
-		t.Fatalf("gitHubTokenNames on an empty data dir = %v, %v, want none, nil", got, err)
+	empty, err := gitHubCredentialLadder(t.TempDir())
+	if err != nil {
+		t.Fatalf("gitHubCredentialLadder on an empty data dir: %v", err)
+	}
+	if got := newLiveConfig(nil, nil, config{}, empty).gitHubTokens(); len(got) != 0 {
+		t.Fatalf("named tokens on an empty data dir = %v, want none", got)
 	}
 }
 
@@ -223,7 +230,7 @@ func TestGitHubTokenNames(t *testing.T) {
 func TestCapabilityProvidersRegistersEachNamedGitHubToken(t *testing.T) {
 	names := []string{"release-bot", "docs-bot"}
 	var registered []string
-	for _, p := range capabilityProviders(config{}, names) {
+	for _, p := range capabilityProviders(config{}, names, nil) {
 		registered = append(registered, p.Spec().Name)
 	}
 	for _, capability := range ui.GitHubTokenCapabilities(names) {
@@ -234,7 +241,7 @@ func TestCapabilityProvidersRegistersEachNamedGitHubToken(t *testing.T) {
 	}
 	// And nothing extra: a deployment with no named tokens registers
 	// exactly what it did before this existed (TestCapabilityProviders).
-	if len(registered) != len(capabilityProviders(config{}, nil))+len(names) {
+	if len(registered) != len(capabilityProviders(config{}, nil, nil))+len(names) {
 		t.Errorf("registered %v, want the fixed set plus one provider per name %v", registered, names)
 	}
 }
@@ -255,7 +262,7 @@ func TestCapabilityProvidersRegistersEachNamedGitHubToken(t *testing.T) {
 func TestEveryRegisteredCapabilityIsGrantable(t *testing.T) {
 	cfg := config{gcpProject: "proj", gcpServiceAccountEmail: "agent@proj.iam.gserviceaccount.com"}
 	var registered []string
-	for _, p := range capabilityProviders(cfg, nil) {
+	for _, p := range capabilityProviders(cfg, nil, nil) {
 		registered = append(registered, p.Spec().Name)
 	}
 	var offered []string

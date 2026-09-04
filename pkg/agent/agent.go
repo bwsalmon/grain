@@ -13,6 +13,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/bwsalmon/grain/pkg/capability/selfdebug"
 	"github.com/bwsalmon/grain/pkg/mcp"
 )
 
@@ -79,27 +80,40 @@ type RunConfig struct {
 	// itself.
 	Repo   string
 	Branch string
-	// SelfDebug reports that this run's task holds the self-debug grant
-	// (pkg/capability/selfdebug), and is what turns on the read-only
-	// tools that grant is for: reading grain's own source. A Framework
-	// passes it on as its forked "mcpserver" subprocess's own
-	// -self-debug.
+	// Grants names the capability grants this run's task holds whose
+	// whole effect is which tools the run gets --
+	// "self-debug" (pkg/capability/selfdebug), for reading grain's own
+	// source, and "bootstrap-playbooks" (pkg/capability/bootstrap), for
+	// reading the setup runbooks embedded in this binary. A Framework
+	// passes each one on as a "-grant <name>" argument of its forked
+	// "mcpserver" subprocess, which is where those tools are actually
+	// built (GrantArgs, and cmd/grain/mcpserver.go's flag of that name).
 	//
-	// It is a field here, rather than the grant being read out of Tools,
+	// They are names here, rather than the tools themselves in Tools,
 	// because Tools has no consumer left (see above): a Framework that
 	// forks a CLI cannot look at an in-process tool set, so what it needs
 	// is the *fact* of the grant, in a form that survives the fork.
 	//
-	// False -- every ordinary task -- passes nothing, and the run's tool
+	// One list rather than a field per capability because a Framework's
+	// whole part in this is to pass the names through untouched: a fourth
+	// capability that wants the same treatment is a name
+	// orchestrator.RunDispatch adds at one end and mcpserver recognizes
+	// at the other, and nothing at all in between. Only the grants that
+	// decide a tool roster belong here -- RunDispatch picks them out of
+	// the task's own Grants and leaves the rest, so nothing learns about
+	// a credential-minting capability it has no business knowing about.
+	//
+	// Empty -- every ordinary task -- passes nothing, and the run's tool
 	// roster is exactly what it was.
-	SelfDebug bool
+	Grants []string
 	// GrainSourceDir is the checkout of grain's own source read_grain_source
 	// may read, passed on as the forked "mcpserver"'s own -grain-src-dir.
 	// It is a deployment-wide fact (cmd/grain's sourceDir: the copy baked
 	// into the image, or -upgrade-src-dir's checkout) that reaches a
 	// Framework through the run rather than through construction, so that
 	// only a run which is actually allowed to read it is ever told where
-	// it is: orchestrator.RunDispatch sets it only alongside SelfDebug.
+	// it is: orchestrator.RunDispatch sets it only alongside the
+	// self-debug grant in Grants.
 	GrainSourceDir string
 	Tools          []mcp.Tool
 	// MaxTurns caps the number of model-response/tool-call round trips
@@ -167,27 +181,37 @@ func RunDeadlineArgs(ctx context.Context) []string {
 	return []string{"-run-deadline", deadline.UTC().Format(time.RFC3339)}
 }
 
-// SelfDebugArgs is the "-self-debug [-grain-src-dir <dir>]" set a
-// Framework passes its forked "grain mcpserver" subprocess for a run
-// whose task holds the self-debug grant, and nothing at all for one that
-// does not (cmd/grain/mcpserver.go's flags of the same names).
+// GrantArgs is the "-grant <name>" set a Framework passes its forked
+// "grain mcpserver" subprocess, one pair per grant in RunConfig.Grants,
+// and nothing at all for a run whose task holds none of them
+// (cmd/grain/mcpserver.go's flag of the same name).
 //
 // It lives here, next to RunDeadlineArgs, for the same reason that one
 // does: every Framework forks the same subcommand, so the translation
 // from "what this run is allowed to do" to "what that process is told"
 // is one function rather than one per framework, each free to drift.
 //
-// The source directory is omitted rather than passed empty when a
-// deployment has none. Both are the same to mcpserver -- the source
-// tools say they have nothing to read either way -- but an empty flag
-// value in a process's own arguments reads like a bug.
-func SelfDebugArgs(cfg RunConfig) []string {
-	if !cfg.SelfDebug {
-		return nil
-	}
-	args := []string{"-self-debug"}
-	if cfg.GrainSourceDir != "" {
-		args = append(args, "-grain-src-dir", cfg.GrainSourceDir)
+// A repeated flag naming grants, rather than a boolean flag per
+// capability, because there is nothing per-capability to say here: which
+// tools a name turns on is mcpserver's own business, and a grant added
+// later needs no new flag, no new field and no edit to this function.
+// The one exception is self-debug's -grain-src-dir, which is a real
+// second argument to that grant and is written out beside it, so that a
+// process's arguments say which grant the directory belongs to. It is
+// omitted rather than passed empty when a deployment has no source
+// checkout: both are the same to mcpserver -- the source tools say they
+// have nothing to read either way -- but an empty flag value in a
+// process's own arguments reads like a bug.
+func GrantArgs(cfg RunConfig) []string {
+	var args []string
+	for _, grant := range cfg.Grants {
+		if grant == "" {
+			continue
+		}
+		args = append(args, "-grant", grant)
+		if grant == selfdebug.CapabilityName && cfg.GrainSourceDir != "" {
+			args = append(args, "-grain-src-dir", cfg.GrainSourceDir)
+		}
 	}
 	return args
 }

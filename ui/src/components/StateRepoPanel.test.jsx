@@ -130,6 +130,20 @@ describe("StateRepoPanel", () => {
     expect(await screen.findByText(/restart it to load this one/i)).toBeInTheDocument();
   });
 
+  it("says outright when the deployment has diverged and stopped syncing", async () => {
+    api.mockResolvedValueOnce({
+      ...local,
+      mode: "remote",
+      remote: "https://example.invalid/x.git",
+      diverged: true,
+      error: "commit 1a2b3c4d was authored by someone <someone@example.com>",
+    });
+    render(<StateRepoPanel showError={() => {}} />);
+
+    expect(await screen.findByText(/diverged from its remote and is not syncing/i)).toBeInTheDocument();
+    expect(screen.getByText(/authored by someone/)).toBeInTheDocument();
+  });
+
   it("warns when the repository was written by a different schema", async () => {
     api.mockResolvedValueOnce({ ...local, schemaVersion: 15, buildSchemaVersion: 16 });
     render(<StateRepoPanel showError={() => {}} />);

@@ -29,6 +29,18 @@ import (
 // (Task.CreatedAt, Task.ApprovedAt): a task filed before either column
 // existed has no such moment to report, which a report has to skip rather
 // than guess at.
+//
+// Targeted and FixTaskFiled are the two facts here that are not moments,
+// and they are here because the run-level measurements in pkg/metrics
+// cannot be read without them. A run's own row says nothing about the
+// task it was for: whether that task had a repo to push to at all --
+// which is what decides whether its prompt even carried the
+// push/check/repair paragraph, and so who belongs in the denominator of
+// any measurement of that loop -- or whether the merge queue later had to
+// file a fix task for it, which is the recorded form of "a red build was
+// left behind" (Link, LinkFixTask). Both are derived, not stored: one
+// reads a column the task already has, the other an EXISTS over
+// task_link.
 type TaskTiming struct {
 	TaskID      string
 	Reason      OriginReason
@@ -36,6 +48,14 @@ type TaskTiming struct {
 	ApprovedAt  *time.Time
 	CompletedAt *time.Time
 	ClosedAt    *time.Time
+	// Targeted is whether the task named a repo to push to (Task.Target).
+	Targeted bool
+	// FixTaskFiled is whether the merge queue filed a fix task for this
+	// task -- a LinkFixTask on it (orchestrator/sync.go's fileFixTask).
+	// It is a fact about the task rather than about any one of its
+	// attempts: the link records that a red build outlived the run that
+	// pushed it, not which attempt pushed it.
+	FixTaskFiled bool
 }
 
 // RunTiming is one attempt's own timeline. AgentStartedAt splits it in
@@ -83,15 +103,26 @@ func (s *Store) TaskTimings(ctx context.Context) ([]TaskTiming, error) {
 	var out []TaskTiming
 	err := each(ctx, s.db,
 		"SELECT `t`.`id`,`t`.`origin_reason`,`t`.`created_at`,`t`.`approved_at`,"+
-			"`o`.`completed_at`,`o`.`closed_at` "+
+			"`o`.`completed_at`,`o`.`closed_at`,"+
+			// target_owner alone: the two target columns are written
+			// together and a task with an owner and no name is not a
+			// shape Task can take.
+			"`t`.`target_owner` IS NOT NULL,"+
+			// EXISTS rather than a join, for the reason task_blocked's own
+			// query gives: a task may carry several links and a join would
+			// return the task once per link, multiplying every other row
+			// here by something that has nothing to do with it.
+			"EXISTS (SELECT 1 FROM `task_link` AS `l` "+
+			"WHERE `l`.`task_id` = `t`.`id` AND `l`.`kind` = ?) "+
 			"FROM `task` AS `t` "+
 			"LEFT JOIN `task_observation` AS `o` ON `o`.`task_id` = `t`.`id` "+
-			"ORDER BY `t`.`id`", nil,
+			"ORDER BY `t`.`id`", []any{string(LinkFixTask)},
 		func(rows *sql.Rows) error {
 			var t TaskTiming
 			var reason string
 			var created, approved, completed, closed sql.NullTime
-			if err := rows.Scan(&t.TaskID, &reason, &created, &approved, &completed, &closed); err != nil {
+			if err := rows.Scan(&t.TaskID, &reason, &created, &approved, &completed, &closed,
+				&t.Targeted, &t.FixTaskFiled); err != nil {
 				return err
 			}
 			t.Reason = OriginReason(reason)

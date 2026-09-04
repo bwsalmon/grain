@@ -108,7 +108,7 @@ func TestLiveConfigRebuildsCapabilityProvidersWhenGCPChanges(t *testing.T) {
 	putConfig(t, store, cfg.toModelConfig())
 	live := newLiveConfig(store, nil, cfg, nil)
 	deps := orchestrator.Deps{Config: orchestrator.Config{
-		Capabilities: model.NewCapabilityRegistry(capabilityProviders(cfg, nil)...),
+		Capabilities: model.NewCapabilityRegistry(capabilityProviders(cfg, nil, nil)...),
 	}}
 
 	if _, ok := deps.Config.Capabilities.Lookup("gcp-key"); ok {

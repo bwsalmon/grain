@@ -1433,23 +1433,37 @@ registry to hand a forked process. `Config.GrantTools` still assembles these too
 `RunDispatch` still passes them, but no `Framework` consumes them, so
 `selfrepair`'s host tool reaches no running agent today.
 
-`self-debug` is the half that no longer depends on any of that, because
-everything it offers is read-only and so needs no route back into a live
-run's own conversation. `grain mcpserver` takes `-self-debug` (and
-`-grain-src-dir`), and a `Framework` passes both to the subprocess it
-forks exactly when `agent.RunConfig.SelfDebug` says this task holds the
-grant — `RunDispatch` reads that off the task's own `Grants`, and
-`agent.SelfDebugArgs` is the one translation from "what this run may do"
-to "what that process is told", shared by all three frameworks the way
-`RunDeadlineArgs` already is. What the flag turns on is
-`selfdebug.SourceTools`' `read_grain_source`/`list_grain_source`, which
-answer what grain is *built* to do. They refuse politely rather than
-disappearing when a deployment has no source checkout, so a run's tool
-roster is a property of the vocabulary rather than of one deployment's
-configuration.
+`self-debug` and `bootstrap-playbooks` are the halves that no longer
+depend on any of that, because everything they offer is read-only and so
+needs no route back into a live run's own conversation. `grain mcpserver`
+takes `-grant <name>`, once per grant, and a `Framework` passes one pair
+for each grant on the run's own task — `RunDispatch` reads them off the
+task's `Grants` into `agent.RunConfig.Grants`, and `agent.GrantArgs` is
+the one translation from "what this run may do" to "what that process is
+told", shared by all three frameworks the way `RunDeadlineArgs` already
+is. A repeated name rather than a flag per capability deliberately: which
+tools a name turns on is `mcpserver`'s business alone, so a fourth
+capability wanting this treatment is a name at either end and no new flag,
+no new field and no framework change in between.
+
+`-grant bootstrap-playbooks` is the simpler of the two: `bootstrap.
+PlaybookTools`' `list_bootstrap_playbooks` and `read_bootstrap_playbook`
+read markdown runbooks embedded in the grain binary itself, so the
+subprocess is already holding everything they serve and needs no hop of
+any kind. That matters because `ui.configurationPrompt` has told the
+configuration agent to reach for both tools since bwsalmon/agents#620,
+while `Config.GrantTools` was the only thing assembling them — the prompt
+named a tool that was on no run's roster.
+
+`-grant self-debug` turns on `selfdebug.SourceTools`'
+`read_grain_source`/`list_grain_source`, which answer what grain is
+*built* to do. They refuse politely rather than disappearing when a
+deployment has no source checkout (`-grain-src-dir` unset), so a run's
+tool roster is a property of the grants it holds rather than of one
+deployment's configuration.
 
 The other half of that question — what this deployment actually *did* —
-used to be four more tools on the same flag (`mcp.NewTaskTools`'
+used to be four more tools on the same grant (`mcp.NewTaskTools`'
 `list_grain_tasks`, `read_grain_task`, `read_grain_task_prompt` and
 `read_grain_task_transcript`, reading another task's record, its
 attempts, the prompt its agent was really handed and its session
@@ -1656,9 +1670,12 @@ it already did under `agent/claude`.
 `RunConfig.Tools` has no consumer any more. It was read only by the
 in-process runtime, and a forked CLI cannot be handed an in-process
 registry. `orchestrator.Config.GrantTools` still assembles
-`selfrepair.HostCommandTools` and `selfdebug.SourceTools`, and
-`RunDispatch` still passes them, but nothing consumes them -- so an
-Interactive task's `run_host_command` confirmation prompt
+`selfrepair.HostCommandTools`, `selfdebug.SourceTools` and
+`bootstrap.PlaybookTools`, and `RunDispatch` still passes them, but
+nothing consumes them -- the two read-only sets reach a run by
+`mcpserver`'s own `-grant` instead ("configuration mode", above), and
+`selfrepair` is what is left, so an Interactive task's
+`run_host_command` confirmation prompt
 (`selfrepair.Confirm`, which blocks on `Store.Comments` from inside a
 tool call) is not reachable by a running agent today. Closing that gap
 means giving the `mcpserver` subcommand a route back to the store, which
@@ -2139,7 +2156,7 @@ nothing for size. So the point at which a tool result stopped working was
 a per-framework default grain had not chosen, did not know, and could not
 explain to the agent when it was hit.
 
-`mcp.maxToolResultBytes` is that choice: 64 KB, applied where the answer
+`mcp.maxToolResultBytes` is that choice: 16 KB, applied where the answer
 is formatted, so it holds for every framework at once. Both `run_command`
 streams share the one budget rather than getting one each — a build that
 fails prints kilobytes of stderr and megabytes of stdout, or the reverse,
@@ -2153,10 +2170,61 @@ redirect it to a file, and for `read_file` the `cat -n` numbering either
 side of the cut is exactly the `offset` and `limit` to ask for. The cut
 snaps to line boundaries so that numbering stays whole.
 
-64 KB is a starting guess — about 16k tokens, enough for a failing suite's
-summary and far short of an unbounded `git log -p`. The result-size
-telemetry in `docs/agent-ergonomics.md`'s finding 11 is what should
-eventually set it from what runs actually ask for, rather than taste.
+**16 KB is a measurement, not taste.** The cap started at 64 KB with the
+code saying outright that the number was a guess, deliberately a `var`
+until the result-size telemetry (`docs/agent-ergonomics.md`'s finding
+11) could say what runs actually ask for. This is that window — the 90
+days to 2026-09-04, over the 23 runs of grain's own deployment that
+recorded a census, from `grain metrics -window 90d`:
+
+```
+tool use (23 run(s) in the window recorded what they called)
+  calls                      1736  (76 per run at the median, 118 at p90)
+  errored calls                73  (4.2% of them -- a handful is the ordinary shape of this work)
+  tool                 runs    calls   errors timed out  mean bytes   p95 bytes
+  run_command            23     1162       4%    1 (0%)        2163      <=8191
+  edit_file              21      321       1%         -          48       <=127
+  read_file              17       92      22%         -        6736     <=32767
+  wait_for_checks        21       34       3%         -         729      <=1023
+  pull_request_status       20       29       0%         -         838      <=1023
+  write_file             14       26      19%         -          71       <=255
+  open_pull_request       21       21       0%         -         237       <=511
+  read_grain_task         3       16       0%         -        2770     <=16383
+  comment_on_issue       13       13       0%         -         184       <=511
+  propose_task           10       12       0%         -         160       <=255
+  list_grain_tasks        3        6       0%         -        7243     <=32767
+  ask_question            2        2       0%         -         197       <=255
+  list_grain_source        1        2       0%         -         183       <=255
+  (p95 bytes is an upper bound: sizes are kept in base-2 buckets, so the real
+   number is inside the octave below it. It is what should size the tool-result cap.)
+```
+
+with the p50, p99 and max of the two capped tools out of the same
+report's `-json`: `run_command` `p50 <=1023`, `p99 <=32767`, `max
+43460`; `read_file` `p50 <=4095`, `p99 <=65535`, `max 44860`.
+
+Two things fall out of that. **64 KB never fired.** The largest answer of
+any kind in those 1,254 capped calls was 44,860 bytes, so the cap was
+inert for the whole window — and with nothing ever elided, whether a run
+takes the notice's advice is a question this window cannot answer at all,
+rather than one it answers badly. **16 KB is not tight either.** At least
+95% of `run_command` answers pass whole under it and half are under 1 KB;
+`read_file` is the heavier of the two distributions — its p95 is in the
+16–32 KB octave, so a few in twenty are cut — and it is also the tool
+whose notice recovers exactly, since the `cat -n` numbering either side
+of the cut is the `offset` and `limit` that fetch the missing range.
+
+16 KB is also antigravity's own per-result default, and `agy` is what
+grain dispatches with unless a deployment says otherwise. That is what
+settles one number rather than one per tool, in spite of the two
+distributions differing: a framework's own limit is per *result*, so a
+32 KB `read_file` answer grain let through is one `agy` cuts instead,
+with none of the notice that says what went and how to get it. It stays
+a `var` rather than becoming a stored setting for the same kind of
+reason it stopped being a guess — one deployment's distribution is not
+two deployments disagreeing, and a second one that disagrees, or that
+runs a framework with a higher limit of its own, is what would make it a
+setting.
 
 ## Telling attempt N what attempt N−1 did
 
@@ -2986,6 +3054,44 @@ tick could not apply is. The pane says so in those terms -- a merge to
 load and a restart to load it with -- rather than showing a git error,
 and the journal says it once rather than every thirty seconds.
 
+### A divergence grain made is a divergence grain can clear
+
+Asking first closes the window, and does not close it completely: grain
+commits its export and then pushes it, and a push that fails -- an
+installation token that expired between the two, a remote that was
+briefly unreachable -- leaves the commit on this host. If a pull request
+is merged before that push is retried, the remote holds a commit on the
+other side of the same parent. `Pull` is fast-forward only and refuses,
+naming both branches, rather than resolving a conflict in a database dump
+by guesswork.
+
+That refusal is right and nothing used to clear it. Every tick logged the
+same divergence, the pane showed it, no merged change was ever applied
+and no export ever reached the remote until an operator went to the host
+and fixed the working tree by hand. Before the daemon pulled on its own
+timer that was a once-per-restart problem; afterwards it was a permanent
+one, and a start that hit it did not come up at all.
+
+There is exactly one case grain can resolve without deciding anything on
+anyone's behalf, and `RecoverDiverged` (`pkg/staterepo/diverge.go`) is
+it: every local commit the remote has not got is grain's own export --
+grain's author, and a diff touching only the files an export writes
+(`tables/`, the schema stamp, the README, the `.gitignore`). Those
+commits hold a dump of a database that is still sitting right here, so
+resetting the working tree onto the remote's branch loses nothing by
+construction: the settings that were merged are applied, the database is
+exported again on top of them, and both directions are moving again
+within one cycle. It runs from the sync loop and from the load at
+startup, so a restart is not the fix and is not made worse by being one.
+
+Everything else stays a refusal. A commit somebody made by hand in the
+working tree might hold something that exists nowhere else, and a merge
+commit is somebody's earlier resolution; neither is grain's to throw
+away, so the divergence is reported with the commit and its author named,
+and the pane says the thing an operator actually needs to hear -- that
+this deployment has diverged from its remote and is not syncing -- rather
+than leaving it to be read out of a git error.
+
 ## Deployment configuration lives in the store too
 
 bwsalmon/agents#320 asked the same "the store is the record" question
@@ -3508,12 +3614,68 @@ being a **Ready** badge and nothing else. `grain settings
 where whoever is reading a failed task's error is usually already
 standing.
 
-The one standing credential still unchecked is a named GitHub token
-(`github-credential:<name>`): those rows are reported `Ready` by
-construction, since a row exists only because an operator's own file
-does, and a revoked token behind one goes stale exactly the way the
-three above do. That capability holds no API client of its own to check
-through, so it is left for its own change.
+### The fourth credential: a named GitHub token
+
+task-172 stopped at three, and named the one it left out: a named GitHub
+token (`github-credential:<name>`). Those rows are reported `Ready` by
+construction — a row exists only because an operator's own file under
+`secrets/github` does — and a token revoked, expired or rotated at
+GitHub's end changes nothing about that file, so the pane went on
+agreeing with itself while the first symptom was a push failing through
+the git proxy, mid-run, as a sandbox's own error. task-189 is that
+fourth check, and the two questions it turned on are worth recording.
+
+**What it authenticates with, given the provider holds no client.** A
+named token is a SELECT capability: it mints nothing, places nothing,
+and during a dispatch resolves no credential at all — the proxy looks
+the material up per request. So unlike the other three there was no
+client to reuse, and the choice was between teaching the provider to
+read credential files itself and handing it the thing that already
+does. It is handed the ladder: `githubtoken.Config.Credentials`, a
+one-method interface over `gitproxy.CredentialSet` (the adapter lives in
+`cmd/grain/daemon.go`, beside the one that already adapts the same
+ladder onto `github.TokenSource`). That is what keeps "what does this
+token authenticate as" answered in exactly one place, and it is what
+makes the check test the material a push would actually carry — a
+`<name>.token` read as-is, or a `<name>.app.json` whose installation
+token the ladder re-mints, which are two different auth flows a check of
+its own would have had to learn separately. It is also why the UI now
+shares run()'s ladder rather than loading a copy: the Settings pane that
+writes a token is what makes a ladder forget the old one, so a check
+through any other copy would go on testing the token an operator had
+just replaced on that very pane.
+
+**What the cheap call is.** `GET /rate_limit`, then one `GET
+/repos/{owner}/{repo}` per repo this deployment targets.
+`/rate_limit` is the cheapest live-or-dead answer GitHub gives — it
+costs nothing against the limit it reports — and unlike `GET /user` it
+is answerable by both forms of credential, since an App installation
+token has no user. But "the token is alive" is rarely the interesting
+failure: a token that is alive and has lost access to the repo it exists
+to push to fails in exactly the same place a dead one does, and
+`permissions.push` on the repo lookup is the difference between "it can
+still push there" and "it can see it and nothing more".
+
+**Repo reach is evidence, not the verdict — with one exception.** A
+named token is deliberately narrower than the deployment default; that
+is what it is for. Failing the check for a repo it was never meant to
+reach would paint a correctly-scoped token permanently red, so what it
+cannot see is reported in the detail beside what it can. The exception
+is a token that can reach *none* of them: it is live and useless for
+anything any task here could ask of it, which is the same news to an
+operator as a dead token, and it is reported refused in the same words.
+
+`Ready` keeps meaning what it meant. It is still true by construction
+for these rows, because the two gates it asks about — a deployment
+setting, a secrets-store entry — are gates a GitHub token has neither
+of; what changed is that `Checkable` is now true beside it, which is
+task-172's own rule that a checked-and-refused credential is reported
+next to **Ready** and never folded into it. `pkg/ui`'s drift tests grew
+the matching half: the catalog test cannot see these rows, since which
+tokens exist is not a property of any build, so a second test holds the
+named-token listing to the same bar — the provider must implement
+`model.CredentialChecker`, and the row must report itself checkable, or
+the pane offers no way to reach it.
 
 ### The same set, per repo
 
@@ -4186,9 +4348,17 @@ direction: a run never told about a tool it happens to have loses one
 convenience, where a run told to call one it does not have burns turns on
 an error it cannot fix.
 
-What that leaves worth measuring, rather than assuming, is whether runs
-actually start calling it, and whether a run that sees a failing check
-fixes it instead of opening the pull request and stopping there.
+Whether runs actually start calling it, and whether a run that sees a
+failing check fixes it instead of opening the pull request and stopping
+there, are measured rather than assumed — see "Measuring what a run does
+with its tools" below, whose `mid-run pull requests` section is exactly
+those two questions. One caveat belongs here rather than there: that
+number is the tool's uptake overall and not prompt wording against a bare
+tool description. The change that added the tool and the change that made
+`BuildPrompt` name it landed half an hour apart, so no run in this
+deployment's history has ever had the one without the other, and the
+contrast the question originally wanted is not available from production
+data at all.
 
 ## What a pull request says it does
 
@@ -5217,6 +5387,12 @@ CI waits (84 wait(s) across 18 run(s))
   verdicts                 passed=41 failed=28 timed_out=13 no_checks=2
   blocked                  p50 3m20s, p90 14m0s, max 15m0s
   pushes before green      2.4 on average, 7 at worst (over 16 run(s) that went green)
+
+mid-run pull requests (34 run(s) in the window could have opened one)
+  opened one themselves        21  (62% of them, 48 call(s) in all)
+  fix task filed after         10% of the 21 that did, 31% of the 13 that did not
+  (a fix task is the merge queue cleaning up a red build the run left behind.
+   The link is on the task, not the attempt: read the difference, not either rate.)
 ```
 
 **This is the one measurement that had to be stored,** and it is stored
@@ -5244,8 +5420,9 @@ read whole on every report. Each census row instead carries a base-2
 histogram of its result sizes, so `p95 <=65535` means "95% of those
 answers were at most 64 KB", with the real number inside the octave
 below. That is precise enough for the question it exists to answer: what
-should `mcp.maxToolResultBytes` be, which is currently a defensible guess
-at 64 KB and deliberately a `var` until this says otherwise.
+should `mcp.maxToolResultBytes` be — a question it has now answered, and
+the 64 KB guess it was left at is 16 KB because of what it said (see "No
+single answer may eat the run's context" for the window it was read from).
 
 **Two facts had to be read back out of a tool's own text,** because
 nothing else carries them: whether a `run_command` was ended by its bound
@@ -5283,12 +5460,50 @@ did not error, because a rejected push is not a push: it under-counts
 rather than over-counts, which is the right direction for a number whose
 point is how much rework there was.
 
+**The last stretch of that loop is `open_pull_request`,** and it gets a
+section of its own because its two questions are different shapes. The
+first is a share: of the runs that were offered the loop at all, how many
+took it. "Offered" is the whole of what makes that number mean anything,
+so the denominator is stated beside the rate and is narrow — a run that
+finished inside the window, recorded a census, and belonged to a task
+with a repo to push to, since `BuildPrompt` puts the push/check/repair
+paragraph and the sentence naming the tool inside `task.Target != nil`
+and a task with no target was never asked.
+
+The second is a comparison and is deliberately not reported as a rate.
+"A run opened its pull request and its task still needed a fix task"
+means nothing alone: some share of branches go red for reasons no amount
+of watching would have caught. So both cohorts are printed with their own
+denominators — the runs that called the tool and the runs that did not,
+each with the share whose task the merge queue later filed a fix task
+against (`model.LinkFixTask`, `fileFixTask`), which is the recorded form
+of a red build outliving the run that pushed it. Read the difference, not
+either number. The signal is coarse in two known ways, both stated where
+the number is read: the fix-task link is on the task rather than the
+attempt, so every finished attempt of a task that ever went red counts as
+having gone red; and a fix task can only exist for a task that got as far
+as a pull request, which flatters any cohort holding runs that pushed
+nothing.
+
+**The fine-grained version of that question is not counted in bulk, on
+purpose.** "Did a push follow the last failing report" is answerable by
+eye from one run's persisted transcript, which is ordered — but a
+transcript renders a call as a `> name(args)` line that a tool's own
+*output* can contain verbatim (`agent/claude/transcript.go`), so a count
+taken over transcripts would measure forgeries alongside calls. Both
+numbers above come from the census rows instead, which are written by
+grain from `agent.Result` and are not text an agent can author. Nothing
+new is stored for either: `model.TaskTiming` reads two derived columns it
+did not before — whether the task had a target, and whether it carries a
+fix-task link — because a run's own row says nothing about the task it
+was for and both questions are about the task.
+
 **Everything else about it follows this package's existing rules.** A
 census row has no moment of its own, so it belongs to a window when its
 *run* finished inside it. A run that recorded none contributes to nothing
 rather than to a zero — which is why `tool use` states how many runs are
-behind it, and why neither section renders at all, in the CLI or the UI,
-until something has recorded one. A deployment upgraded into this reports
+behind it, and why none of the three sections renders at all, in the CLI
+or the UI, until something has recorded one. A deployment upgraded into this reports
 no tool use for its older runs, and that is the honest answer: nobody was
 measuring.
 
@@ -5463,6 +5678,21 @@ streak counts — so what it buys is the next tick dispatching rather than
 skipping. If the limit is in fact still in force, that run meets it and
 pauses again, which is the same self-correcting shape as a window that
 expires without having really reset.
+
+Both halves are on the CLI too (`cmd/grain/pause.go`), since an operator
+ssh'd into the deployment, or driving it with `grain -server`, has no
+banner to read. `grain pause` prints the reading — what the provider
+said, when dispatch resumes and how long that is from now — and `grain
+pause -lift` is the same DELETE the button sends. It is spelled as a noun
+with a flag, the way `grain settings` is, rather than as a `grain resume`
+verb: every verb in this CLI acts on the task its argument names
+(`approve`, `retry`, `reopen`), so a bare `grain resume` would read as
+one of those with the id left off. A deployment whose UI was handed no
+gate at all (`enabled: false` — a UI served without a reconcile loop
+behind it) says exactly that rather than "nothing is paused", which is
+the one wrong answer here: it is what an operator would act on to rule
+the usage limit out. `grain metrics` still says nothing about any of
+this, for the reason above.
 
 ## Every sandbox is built at a size grain chose
 

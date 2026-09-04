@@ -30,20 +30,51 @@ import (
 )
 
 // maxToolResultBytes is the most output text a single run_command or
-// read_file answer carries. 64 KB is a starting guess, not a measurement
-// -- roughly 16k tokens, enough for a full failing test run's summary and
-// far short of the tens of thousands of lines an unbounded `git log -p`
-// produces. docs/agent-ergonomics.md's finding 11 (result-size telemetry)
-// is what should eventually set it from the distribution of what runs
-// actually ask for.
+// read_file answer carries. 16 KB, which is two things at once: what the
+// window below says keeps nearly every answer whole, and antigravity's
+// own per-result default -- and agy is what grain dispatches with unless
+// a deployment says otherwise (model.AgentFrameworkAntigravity is
+// -agent-framework's default). Past a framework's own limit a result is
+// not a bigger answer, it is one the CLI truncates or refuses on its own
+// terms, with none of the notice below saying what went and how to get
+// it back, so there is nothing to be gained by capping above it.
+//
+// It replaces 64 KB, which this file called "a starting guess, not a
+// measurement" and which turned out to be too high to ever fire: over
+// the 90 days to 2026-09-04, across the 23 runs of this deployment that
+// recorded a census, no run_command answer reached 43 KB and no
+// read_file answer 45 KB, so the cap cut nothing in 1,254 calls. The
+// same window is what sizes the replacement (`grain metrics -window
+// 90d`, quoted in full in README.md's "No single answer may eat the
+// run's context"):
+//
+//	tool          calls  mean bytes    p50      p95      p99    max
+//	run_command    1162        2163  <=1023   <=8191  <=32767  43460
+//	read_file        92        6736  <=4095  <=32767  <=65535  44860
+//
+// The percentiles are base-2 bucket bounds, not measured bytes
+// (metrics.Sizes says why). Read against 16 KB: at least 95% of
+// run_command answers pass whole and half of them are under 1 KB;
+// read_file is the heavier of the two distributions -- its p95 sits in
+// the 16-32 KB octave, so a few in twenty are cut -- and it is also the
+// tool whose elision notice recovers exactly, since the line numbers
+// either side of the cut are the offset and limit that fetch the missing
+// range. One number rather than one per tool despite that difference:
+// the framework limit this now matches is per result, so a 32 KB
+// read_file answer grain let through is one agy would cut instead,
+// without saying so.
 //
 // It bounds the command's own output, not the whole result: the exit
 // line, grain's own notices and the deadline notice are added on top and
 // are a few hundred bytes between them.
 //
-// A var, not a const, so a test can shrink it rather than generating 64 KB
-// of output to prove the cap works.
-var maxToolResultBytes = 64 << 10
+// A var, not a const. A test shrinks it rather than generating 16 KB of
+// output to prove the cap works, and one deployment's distribution is
+// not yet a reason to make it a stored per-deployment setting -- when a
+// second deployment's numbers disagree with these, or runs a framework
+// whose own limit is higher, that is the moment for a setting rather
+// than now.
+var maxToolResultBytes = 16 << 10
 
 // elisionAdviceCommandOutput and elisionAdviceFileLines are the "how to
 // get the rest" half of an elision notice, which is the half that decides
