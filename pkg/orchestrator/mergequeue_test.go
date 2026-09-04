@@ -152,11 +152,29 @@ func TestSyncPullRequestsEscalatesWhenTheRepairFinishesButThePrIsStillBroken(t *
 		t.Fatal(err)
 	}
 
+	// Not on the cycle it finished on: dispatch runs before sync inside
+	// one tick, so this cycle's verdict describes the branch as it was
+	// before the repair's own push. Giving up here would give up on a
+	// resolution that has just landed.
 	if err := orchestrator.SyncPullRequests(ctx, store, client, finished); err != nil {
-		t.Fatalf("second SyncPullRequests (should escalate): %v", err)
+		t.Fatalf("SyncPullRequests on the cycle the repair finished on: %v", err)
+	}
+	obs, err := store.GetObservation(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if obs.MergeQueueBlockedAt != nil {
+		t.Fatal("gave up on the cycle the repair finished on, before GitHub had judged what it pushed")
 	}
 
-	obs, err := store.GetObservation(ctx, task.ID)
+	// The next cycle is judging the commit the repair actually pushed,
+	// and it is still conflicted.
+	later := finished.Add(time.Minute)
+	if err := orchestrator.SyncPullRequests(ctx, store, client, later); err != nil {
+		t.Fatalf("SyncPullRequests a cycle later (should escalate): %v", err)
+	}
+
+	obs, err = store.GetObservation(ctx, task.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -168,9 +186,9 @@ func TestSyncPullRequestsEscalatesWhenTheRepairFinishesButThePrIsStillBroken(t *
 		t.Fatalf("expected the repair comment plus one escalation comment, got %q", got)
 	}
 
-	// No third cycle asks for another repair -- the task keeps the one
+	// No further cycle asks for another repair -- the task keeps the one
 	// MergeQueueRepairAt it already has, and the queue has moved on.
-	if err := orchestrator.SyncPullRequests(ctx, store, client, finished.Add(time.Minute)); err != nil {
+	if err := orchestrator.SyncPullRequests(ctx, store, client, later.Add(time.Minute)); err != nil {
 		t.Fatalf("third SyncPullRequests: %v", err)
 	}
 	if got := commentBodies(t, ctx, store, task.ID); len(got) != 2 {

@@ -981,10 +981,22 @@ func advanceMergeQueueHead(ctx context.Context, store *model.Store, client githu
 		return escalateUnfinishedRepair(ctx, store, task, ref, health, now)
 	}
 	// The repair ran to completion -- another attempt of this task,
-	// pushed onto this very branch -- and yet ref still reads broken this
-	// cycle: it did not stick. One attempt is the deployment's whole
-	// policy here -- see requeueForRepair's own doc comment on why a
-	// second attempt is not just retried outright.
+	// pushed onto this very branch -- and yet ref still reads broken.
+	//
+	// Not on the cycle it finished on, though. Dispatch runs before sync
+	// within one tick (Reconcilers), so a repair that completed moments
+	// ago is judged here on a `detail` describing the branch as it was
+	// before its push: GitHub recomputes a pull request's mergeability
+	// asynchronously and its checks have not re-run at all, so acting now
+	// means giving up on a resolution that has just landed. One cycle's
+	// wait is the whole guard -- by the next one the verdict is about the
+	// commit the repair actually pushed, whatever that verdict is.
+	if obs.CompletedAt != nil && !now.After(*obs.CompletedAt) {
+		return nil
+	}
+	// It did not stick. One attempt is the deployment's whole policy here
+	// -- see requeueForRepair's own doc comment on why a second attempt
+	// is not just retried outright.
 	return escalateToUser(ctx, store, task, ref, health, now)
 }
 

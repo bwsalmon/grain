@@ -16,8 +16,8 @@ package model
 // being worth very different amounts. A merger is the last step of work
 // that is already done -- committed, pushed, reviewed -- and the longer
 // it waits the more likely something else lands on the branch it repairs
-// and the fix has to be filed again (Store.Ready's own doc comment on
-// why a fix task sits at the head of the backlog). A deployment whose
+// and the repair has to start over (Store.Ready's own doc comment on how
+// the merge queue's own work reaches the head of the backlog). A deployment whose
 // every slot was spent on new work would starve exactly the runs that
 // finish the old, so Mergers is capacity kept back for them.
 //
@@ -38,7 +38,7 @@ type Limits struct {
 	// Workers is the ceiling on ordinary runs, and the floor under how
 	// much of the total a merger can ever be denied.
 	Workers int
-	// Mergers is the extra capacity only a merge-queue fix task may
+	// Mergers is the extra capacity only a merge-queue repair may
 	// reach. 0 -- a meaningful value, not an unset one -- means mergers
 	// contend for Workers alongside everything else, which is what every
 	// deployment did before this split existed.
