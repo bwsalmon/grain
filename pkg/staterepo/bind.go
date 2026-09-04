@@ -231,28 +231,45 @@ func Load(ctx context.Context, r *Repo, db *sql.DB, version int) error {
 	if marker != "" && marker == head {
 		return nil
 	}
-	// Which tables the import replaces depends on which of the two cases
-	// this is, and the distinction is the marker.
+	// Which tables the import replaces depends on which of three cases
+	// this is, and the markers are what tell them apart.
 	//
 	// No marker at all is a working tree this host has never loaded --
 	// a clone onto a new machine, the restore case -- and there the
 	// repository is the only copy of anything, so all of it is imported.
 	//
-	// A marker that disagrees with HEAD is a repository that moved under a
-	// host that already had a database: a pull request was merged. That
-	// merge is about state -- nobody opens a pull request editing
-	// task_run -- and this host's database is ahead of the repository on
-	// churn by up to a churn interval, because that is exactly what
-	// exporting churn on a slower clock means. Importing all of it would
-	// throw that away every time a settings change landed, so only the
-	// state tier is replaced and the database stays authoritative about
-	// what grain itself did. The next churn export writes it back out.
-	tiers := []Tier{TierState, TierChurn}
-	if marker != "" {
-		tiers = []Tier{TierState}
-	}
-	if err := ImportTier(ctx, db, r.Dir(), tiers...); err != nil {
-		return err
+	// A HEAD that RecoverDiverged put there is the opposite extreme. The
+	// working tree was reset onto the remote's branch over local export
+	// commits that could not be pushed, so the dump under it is older
+	// than this database by everything those commits held: importing the
+	// state tier would delete every task, comment, branch and release
+	// written since the pushes started failing. Only the settings are
+	// taken, exactly as Apply takes them on a tick, and the export that
+	// follows writes grain's own record back out on top of the merge.
+	//
+	// Otherwise a marker that disagrees with HEAD is a repository that
+	// moved under a host that already had a database: a pull request was
+	// merged and fast-forwarded in. That merge is about state -- nobody
+	// opens a pull request editing task_run -- and this host's database is
+	// ahead of the repository on churn by up to a churn interval, because
+	// that is exactly what exporting churn on a slower clock means.
+	// Importing all of it would throw that away every time a settings
+	// change landed, so only the state tier is replaced and the database
+	// stays authoritative about what grain was doing. The next churn
+	// export writes it back out.
+	switch {
+	case marker == "":
+		if err := ImportTier(ctx, db, r.Dir(), TierState, TierChurn); err != nil {
+			return err
+		}
+	case r.recoveredHead(ctx) == head:
+		if err := ImportTables(ctx, db, r.Dir(), SettingsTables); err != nil {
+			return err
+		}
+	default:
+		if err := ImportTier(ctx, db, r.Dir(), TierState); err != nil {
+			return err
+		}
 	}
 	return r.setLoadedHead(ctx, head)
 }
@@ -409,8 +426,8 @@ that an unchanged database always produces byte-identical files.
 
 Two clocks, not one. Everything a person or an agent reads or changes is
 written out within seconds of changing. grain's own running record of
-what it did -- ` + "`" + TablesDir + `/task_run.json` + "`" + `, ` + "`" + `task_observation.json` + "`" + `,
-` + "`" + `lease.json` + "`" + ` and ` + "`" + `task_read.json` + "`" + ` -- is written out roughly hourly
+what it did -- ` + "`" + TablesDir + `/task_run.json` + "`" + `, ` + "`" + `task_observation.json` + "`" + `
+and ` + "`" + `lease.json` + "`" + ` -- is written out roughly hourly
 instead: those rows change on nearly every reconcile cycle, nobody sends
 a pull request against them, and committing them every thirty seconds
 would rewrite the largest files here 2,880 times a day forever. They are

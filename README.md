@@ -2682,8 +2682,8 @@ Every one of those 2,880 commits touched `task_observation.json`; ten of
 them were about anything a human would want to read. Three things
 changed, and the numbers above are all three together.
 
-**A churn tier on a slower clock.** Four tables -- `task_run`,
-`task_observation`, `lease`, `task_read` -- are exported hourly rather
+**A churn tier on a slower clock.** Three tables -- `task_run`,
+`task_observation` and `lease` -- are exported hourly rather
 than every 30 seconds (`pkg/staterepo/tier.go` names them and says why
 each one is on the list). Everything else, which is everything anybody
 reads or reviews, is still exported on every sync and still commits
@@ -2691,6 +2691,14 @@ within 30 seconds of changing. They were not dropped from the dump: a
 clone is still a complete restore, just up to an hour behind on runs,
 which is the one real cost here and is what the alternative -- leaving
 them out entirely -- would have made permanent.
+
+`task_read` was a fourth, and it was a mistake read off the name: it is
+not a record of which tasks a human has looked at, it is the read-only
+repos a task may clone, written by `PutTask` in the same transaction as
+the task row. An hour behind, it made a dump that disagreed with itself
+and a restore that handed a task back with no read scope, so it is on
+the state clock with `task_grant`, `task_link` and `task_tag`, which are
+the rows it belongs beside.
 
 **Packing.** Every commit writes a whole new blob per file it touched, so
 a repository committed to on a timer accumulates loose objects that are

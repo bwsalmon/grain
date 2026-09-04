@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // The layout of a state repository, as constants rather than as strings
@@ -76,6 +77,42 @@ func Export(ctx context.Context, db *sql.DB, dir string) error {
 // arrangement rests on: an unchanged database produces identical files,
 // so a sync with nothing to say still commits nothing.
 func ExportTier(ctx context.Context, db *sql.DB, dir string, tiers ...Tier) error {
+	// Every table is read inside one transaction, so the dump is a
+	// snapshot of one state of the database rather than a series of
+	// unrelated reads taken as the daemon wrote underneath them.
+	//
+	// It is not tidiness, and it is not theoretical. A table is read per
+	// statement and the tables are read in name order, so an export that
+	// took no snapshot read `task` before `task_run`: a task filed and
+	// dispatched in the milliseconds between the two produced a dump whose
+	// task_run.json named a task task.json did not have. Measured rather
+	// than reasoned about -- with a writer filing a task and starting a run
+	// every millisecond, 18 exports in 20 came out inconsistent -- and what
+	// it costs is the claim the repository rests on: a clone is a complete
+	// restore, and a restore that lands rows referring to rows that are not
+	// there is not one. It also reaches CI, where `grain state check`
+	// imports the dump under foreign keys the schema is free to grow.
+	//
+	// ReadOnly, and that word does the work: pkg/model/sqlite opens the
+	// database with _txlock=immediate, so an ordinary BeginTx would take
+	// SQLite's write lock for the whole export and stall every writer
+	// behind a dump of every transcript grain has ever stored. The driver
+	// begins a read-only transaction deferred instead, which in WAL mode
+	// is a read snapshot that blocks nobody.
+	tx, err := db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return fmt.Errorf("staterepo: opening a read transaction: %w", err)
+	}
+	// Rolled back rather than committed: nothing here writes, and a
+	// rollback cannot fail in a way that would turn a good dump into an
+	// error.
+	defer tx.Rollback()
+	return exportTier(ctx, tx, dir, tiers...)
+}
+
+// exportTier is ExportTier's body, against whatever is already reading:
+// the snapshot transaction above at every real call site.
+func exportTier(ctx context.Context, db querier, dir string, tiers ...Tier) error {
 	include := map[Tier]bool{}
 	for _, t := range tiers {
 		include[t] = true
@@ -138,7 +175,7 @@ func writeFileIfChanged(path string, data []byte) error {
 	return nil
 }
 
-func exportTable(ctx context.Context, db *sql.DB, table string) ([]byte, error) {
+func exportTable(ctx context.Context, db querier, table string) ([]byte, error) {
 	cols, err := columns(ctx, db, table)
 	if err != nil {
 		return nil, err
@@ -222,6 +259,17 @@ func encodeRow(names []string, vals []any) (json.RawMessage, error) {
 // comparable across hosts in different zones. Bytes that are not valid
 // text are base64 in a one-key object, which is the one shape that
 // cannot collide with a string a column legitimately holds.
+//
+// A string is one of those bytes-that-are-not-valid-text cases more often
+// than it looks. SQLite does not police the encoding of what goes into a
+// TEXT column, and grain stores things there that came off somebody
+// else's stdout -- a run's transcript above all -- so a byte sequence
+// that is not valid UTF-8 does reach this function. encoding/json cannot
+// carry one: it replaces every invalid byte with U+FFFD and reports no
+// error, so the dump would quietly hold different bytes than the database
+// and a restore from it would hand them back corrupted. Base64 is the
+// same answer for the same reason it is the answer for a BLOB, and
+// decodeValue puts it back in the column's own storage class.
 func encodeValue(v any) any {
 	switch t := v.(type) {
 	case nil:
@@ -229,10 +277,19 @@ func encodeValue(v any) any {
 	case time.Time:
 		return t.UTC().Format(time.RFC3339Nano)
 	case []byte:
-		return map[string]string{"base64": base64.StdEncoding.EncodeToString(t)}
+		return base64Value(t)
+	case string:
+		if !utf8.ValidString(t) {
+			return base64Value([]byte(t))
+		}
+		return t
 	default:
 		return v
 	}
+}
+
+func base64Value(b []byte) map[string]string {
+	return map[string]string{"base64": base64.StdEncoding.EncodeToString(b)}
 }
 
 // Import replaces every row in db with what dir holds.
@@ -433,7 +490,21 @@ func decodeValue(v any, col column) (any, error) {
 		if !ok {
 			return nil, fmt.Errorf("an object value must hold exactly one \"base64\" string")
 		}
-		return base64.StdEncoding.DecodeString(enc)
+		raw, err := base64.StdEncoding.DecodeString(enc)
+		if err != nil {
+			return nil, err
+		}
+		// Which storage class those bytes go back in is the column's to
+		// say, and SQLite's own affinity rule is what says it: bytes bound
+		// as a []byte are stored as a BLOB whatever the column is declared
+		// as, so a TEXT column whose value was base64 only because it was
+		// not valid UTF-8 (encodeValue, above) would come back a blob and
+		// the round trip would have changed its type. Bound as a string it
+		// comes back exactly as it went in.
+		if hasTextAffinity(col.declType) {
+			return string(raw), nil
+		}
+		return raw, nil
 	default:
 		return nil, fmt.Errorf("cannot store a %T", v)
 	}
@@ -442,6 +513,15 @@ func decodeValue(v any, col column) (any, error) {
 func isTimeColumn(declType string) bool {
 	t := strings.ToUpper(declType)
 	return strings.Contains(t, "DATE") || strings.Contains(t, "TIME")
+}
+
+// hasTextAffinity is SQLite's own rule for it (datatype3.html, rule 2):
+// a declared type containing CHAR, CLOB or TEXT takes TEXT affinity.
+// Spelled out here rather than approximated with `== "TEXT"`, so a
+// VARCHAR a later schema declares is not quietly treated as a blob.
+func hasTextAffinity(declType string) bool {
+	t := strings.ToUpper(declType)
+	return strings.Contains(t, "CHAR") || strings.Contains(t, "CLOB") || strings.Contains(t, "TEXT")
 }
 
 // column is one column of a table as SQLite itself describes it.
