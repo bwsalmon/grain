@@ -2124,6 +2124,46 @@ two happen to agree. Which efforts a model has is the model's own
 business (3.1 Pro has no `medium`); nothing in grain checks the pair, and
 agy refuses it before the run starts if it does not go together.
 
+Which leaves the model name itself, and it was the last free-text field
+over a vocabulary only the binary defines: a name agy has never heard of
+saved without complaint, and the refusal arrived on the next dispatch as a
+run that failed before it started. The effort had a picker because three
+words could be written down in Go (`antigravity.Efforts`); the models
+could not, because they change when agy is upgraded. So the pane asks the
+binary (grain/task-365). `antigravity.Catalog` runs `agy models` and
+`agy --help` under the same private, API-key-authenticated `HOME` a run
+gets -- minus the per-run MCP config and hooks a listing has no use for --
+parses the listing into ids, agy's own display labels, and the family and
+effort suffix each id carries, and reads the effort vocabulary out of
+`--effort`'s own usage line rather than assuming `Efforts()`, because that
+is the word list those suffixes are split against.
+`GET /api/agent-models` serves it, `cmd/grain`'s `agyModelLister` wires it
+to the same `-agy-path` and Gemini key a dispatch resolves (caching a
+successful listing for five minutes, and a failure not at all), and the
+model field becomes a drop-down grouped by family.
+
+The catalog also answers, for the first time in this repository, the
+question the table above leaves to agy: which efforts a given model
+actually has. It is written into the ids -- 3.1 Pro is listed `-high` and
+`-low` and never `-medium` -- so the effort picker beside the model now
+offers what that model was listed with, narrowed from (never widened
+beyond) the vocabulary `Settings.geminiEfforts` reports and
+`ui.UpdateSettings` validates against. Pick a model whose pairing agy
+would refuse and the refusal is simply not on the menu.
+
+The model half is a drop-down that still takes a written-in value, and
+that is not a hedge: reading the catalog needs an installed agy, a working
+credential and quota to spend, and a listing shaped the way this parser
+expects. Every one of those can be false on a deployment that is otherwise
+fine -- including on the very pane where the missing key would be pasted
+in. So `GET /api/agent-models` answers 200 in all cases, distinguishing
+"no lister is wired here" (`grain demo`, any UI not colocated with the
+daemon) from "one was asked and could not answer", and `GeminiModelFields`
+renders the same typable field either way with the reason under it, the
+effort picker falling back to the server's whole vocabulary. A model name
+grain has never seen still saves and is still passed to agy exactly as
+typed; the picker only ever removes the need to remember one.
+
 ### Proving a live run actually gets the tools
 
 Where that private `HOME` puts the MCP config is a fact about agy's

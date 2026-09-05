@@ -24,6 +24,7 @@ import api from "../api.js";
 import AgentKeysSection, { AGENT_KEY_SECRETS } from "./AgentKeysSection.jsx";
 import StateRepoPanel from "./StateRepoPanel.jsx";
 import CapabilitiesPanel from "./CapabilitiesPanel.jsx";
+import GeminiModelFields from "./GeminiModelFields.jsx";
 import GitHubTokensSection from "./GitHubTokensSection.jsx";
 import Overlay from "./Overlay.jsx";
 import SecretsPanel from "./SecretsPanel.jsx";
@@ -677,39 +678,20 @@ export default function SettingsOverlay({ onClose, onSaved, showError }) {
               credential below.
             </Typography>
             <AgentKeysSection settings={settings} showError={showError} />
-            <TextField
-              name="geminiModel"
-              label="Gemini model"
-              defaultValue={settings.geminiModel || ""}
-              autoComplete="off"
-              fullWidth
-              margin="normal"
+            {/* The model and the effort agy is given, both offered from
+                what this deployment's own agy says it can run rather
+                than from a list written out here (GeminiModelFields):
+                the names from `agy models`, the efforts a chosen model
+                was actually listed under, narrowed from the vocabulary
+                the server validates a save against
+                (Settings.geminiEfforts). The model stays typable through
+                every way that catalog can fail to load, which is the
+                whole reason it is an autocomplete and not a Select. */}
+            <GeminiModelFields
+              defaultModel={settings.geminiModel || ""}
+              defaultEffort={settings.geminiEffort || ""}
+              efforts={settings.geminiEfforts || []}
             />
-            {/* agy takes the model and the reasoning effort as two
-                values, so this is a field of its own rather than part of
-                the name above -- the same model runs shallow or deep.
-                The choices come from the server (Settings.geminiEfforts,
-                agy's own low|medium|high) rather than being written out
-                here, so there is one copy of the vocabulary a save is
-                checked against. Which of them a given model actually has
-                is that model's business: agy refuses a pair that does
-                not go together, and it ignores this entirely for a model
-                name that already carries an effort. */}
-            <TextField
-              select
-              name="geminiEffort"
-              label="Gemini reasoning effort"
-              helperText="ignored for a model name that already carries one, e.g. gemini-3.1-pro-high"
-              defaultValue={settings.geminiEffort || ""}
-              fullWidth
-              margin="normal"
-            >
-              {(settings.geminiEfforts || []).map((effort) => (
-                <MenuItem key={effort} value={effort}>
-                  {effort}
-                </MenuItem>
-              ))}
-            </TextField>
             <TextField
               name="claudeModel"
               label="Claude model"

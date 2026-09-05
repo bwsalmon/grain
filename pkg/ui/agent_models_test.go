@@ -1,0 +1,107 @@
+package ui_test
+
+// grain/task-365: the Gemini model setting is a name only agy's own
+// catalog defines, so the pane asks the binary rather than making an
+// operator remember one. These are the three answers the field renders
+// from: a listing, a deployment with no lister at all, and a lister that
+// could not answer -- the last two both leaving the field typable.
+
+import (
+	"context"
+	"errors"
+	"net/http"
+	"strings"
+	"testing"
+
+	"github.com/bwsalmon/grain/pkg/ui"
+)
+
+type fakeModelLister struct {
+	catalog ui.AgentModelCatalog
+	err     error
+}
+
+func (f fakeModelLister) ListModels(context.Context) (ui.AgentModelCatalog, error) {
+	return f.catalog, f.err
+}
+
+func TestListAgentModelsReportsTheCatalog(t *testing.T) {
+	srv, client := testServer(t)
+	client.Config.AgentModels = fakeModelLister{catalog: ui.AgentModelCatalog{
+		Models: []ui.AgentModel{
+			{ID: "gemini-3.1-pro-high", Label: "Gemini 3.1 Pro (High)", Effort: "high", Family: "gemini-3.1-pro"},
+			{ID: "gemini-3.1-pro-low", Label: "Gemini 3.1 Pro (Low)", Effort: "low", Family: "gemini-3.1-pro"},
+		},
+		Efforts: []string{"low", "medium", "high"},
+	}}
+
+	rec := do(t, srv, http.MethodGet, "/api/agent-models", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body)
+	}
+	got := decode[struct {
+		Available bool            `json:"available"`
+		Models    []ui.AgentModel `json:"models"`
+		Efforts   []string        `json:"efforts"`
+		Error     string          `json:"error"`
+	}](t, rec)
+	if !got.Available {
+		t.Fatalf("available = false, want true with a lister configured")
+	}
+	if len(got.Models) != 2 || got.Models[0].ID != "gemini-3.1-pro-high" {
+		t.Fatalf("models = %+v, want agy's own listing in its own order", got.Models)
+	}
+	if got.Models[0].Effort != "high" || got.Models[0].Family != "gemini-3.1-pro" {
+		t.Errorf("models[0] = %+v, want the effort and family split out", got.Models[0])
+	}
+	if len(got.Efforts) != 3 {
+		t.Errorf("efforts = %v, want the framework's own vocabulary", got.Efforts)
+	}
+	if got.Error != "" {
+		t.Errorf("error = %q, want none", got.Error)
+	}
+}
+
+func TestListAgentModelsReportsUnavailableWithNoLister(t *testing.T) {
+	srv, _ := testServer(t)
+
+	rec := do(t, srv, http.MethodGet, "/api/agent-models", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body)
+	}
+	got := decode[map[string]any](t, rec)
+	if got["available"] != false {
+		t.Fatalf("available = %v, want false", got["available"])
+	}
+	if _, ok := got["error"]; ok {
+		t.Errorf("body = %v, want no error: nothing was asked", got)
+	}
+}
+
+// A wired lister that fails answers 200 carrying why, rather than a 5xx:
+// the pane falls back to a text field either way, and the reason is the
+// only thing that tells an operator whether to install agy, set a key, or
+// simply type the model name.
+func TestListAgentModelsReportsWhyItCouldNotAsk(t *testing.T) {
+	srv, client := testServer(t)
+	client.Config.AgentModels = fakeModelLister{err: errors.New("the Antigravity CLI (agy) is not installed")}
+
+	rec := do(t, srv, http.MethodGet, "/api/agent-models", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body)
+	}
+	got := decode[struct {
+		Available bool            `json:"available"`
+		Models    []ui.AgentModel `json:"models"`
+		Error     string          `json:"error"`
+	}](t, rec)
+	if !got.Available {
+		t.Errorf("available = false, want true: a lister was configured, it just failed")
+	}
+	if len(got.Models) != 0 {
+		t.Errorf("models = %+v, want none", got.Models)
+	}
+	if !strings.Contains(got.Error, "not installed") {
+		t.Errorf("error = %q, want the lister's own reason", got.Error)
+	}
+}

@@ -395,12 +395,8 @@ func Efforts() []string { return []string{"low", "medium", "high"} }
 // `agy models` prints). Run passes no --effort alongside one of those;
 // DefaultModel has why.
 func modelNamesItsEffort(model string) bool {
-	for _, effort := range Efforts() {
-		if strings.HasSuffix(model, "-"+effort) {
-			return true
-		}
-	}
-	return false
+	effort, _ := splitEffort(model, Efforts())
+	return effort != ""
 }
 
 // publishedTools names the exact tools NewSandboxTools, NewMockTools,
@@ -1035,15 +1031,28 @@ func writeAgyHome(grainBinaryPath string, mcpArgs []string, apiKeyAuth bool) (ho
 		hooksConfigRelPath: hooks,
 	}
 
+	home, cleanup, err = writeHomeFiles(files)
+	if err != nil {
+		return "", nil, err
+	}
+	if err := os.MkdirAll(agyWorkspaceDir(home), 0o700); err != nil {
+		cleanup()
+		return "", nil, fmt.Errorf("antigravity: creating agy workspace: %w", err)
+	}
+	return home, cleanup, nil
+}
+
+// writeHomeFiles is the mechanics under writeAgyHome: a fresh temp
+// directory with each named file written under it, and the cleanup that
+// removes the lot. Shared with catalog.go's own smaller probe home, which
+// wants the same private-HOME discipline with none of a run's per-run
+// configuration in it.
+func writeHomeFiles(files map[string][]byte) (home string, cleanup func(), err error) {
 	home, err = os.MkdirTemp("", "grain-agy-home-*")
 	if err != nil {
 		return "", nil, fmt.Errorf("antigravity: creating agy home: %w", err)
 	}
 	cleanup = func() { os.RemoveAll(home) }
-	if err := os.MkdirAll(agyWorkspaceDir(home), 0o700); err != nil {
-		cleanup()
-		return "", nil, fmt.Errorf("antigravity: creating agy workspace: %w", err)
-	}
 	for rel, content := range files {
 		path := filepath.Join(home, rel)
 		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {

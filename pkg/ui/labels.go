@@ -249,6 +249,23 @@ type Config struct {
 	// nil-means-unavailable contract Secrets, Reboot and Credentials
 	// above already give.
 	CapabilityChecks CapabilityChecker
+	// AgentModels, when set, is what GET /api/agent-models calls to ask
+	// the installed agent CLI which models it can actually run --
+	// cmd/grain/daemon.go's agyModelLister over antigravity.Catalog,
+	// which runs `agy models` on the same host the dispatches run on. It
+	// is what turns Settings' Gemini model field from a name an operator
+	// has to remember exactly (a wrong one fails on the next dispatch,
+	// before the run starts) into a list of what this deployment's own
+	// binary offers, effort variants included (grain/task-365).
+	//
+	// nil means this UI was not handed one (`grain demo`'s throwaway UI,
+	// or any UI not colocated with a daemon that has the binary), and
+	// the route answers "not available" while the field stays free text
+	// -- the same nil-means-unavailable contract Secrets, Reboot,
+	// Credentials and CapabilityChecks above already give. A lister that
+	// is wired but fails is a different answer, reported rather than
+	// hidden; see agentModelsResponse.
+	AgentModels AgentModelLister
 	// StateRepo is set only when this UI runs inside the daemon that owns
 	// the state repository its store is exported to (pkg/staterepo) --
 	// nil means it does not, and the bootstrap pane and its API routes
