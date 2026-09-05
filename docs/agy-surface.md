@@ -822,7 +822,7 @@ $ agy changelog
 ... [truncated at 400 lines by scripts/agy-surface.sh]
 ``````
 
-The model catalog, whose names carry their reasoning effort. `antigravity.DefaultModel` has to be one of these, and so does anything a deployment puts in Settings.
+The model catalog. Every name here carries a reasoning effort, but that is the catalog's spelling rather than the only one agy accepts: `--model` also takes the bare family name (`gemini-3.1-pro`) as long as `--effort` names the other half, which is the pair `antigravity.DefaultModel` and `antigravity.DefaultEffort` ship as. So a deployment may put either form in Settings -- a name from this list, or a family name from it with an effort beside it -- and agy refuses the two mixed.
 
 ``````console
 $ agy models

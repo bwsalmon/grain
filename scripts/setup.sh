@@ -230,6 +230,13 @@ GRAIN_GITHUB_APP_PRIVATE_KEY="${GRAIN_GITHUB_APP_PRIVATE_KEY:-}"
 
 GRAIN_GEMINI_API_KEY="${GRAIN_GEMINI_API_KEY:-}"
 GRAIN_GEMINI_MODEL="${GRAIN_GEMINI_MODEL:-}"
+# The other half of that model selection: agy is given a model and a
+# reasoning effort (low|medium|high), and refuses a bare family name
+# without one. Empty leaves the daemon's own default
+# (antigravity.DefaultEffort), and it is ignored for a GRAIN_GEMINI_MODEL
+# whose name already carries an effort -- agy's own gemini-3.1-pro-high
+# spelling, which it refuses alongside an --effort that disagrees.
+GRAIN_GEMINI_EFFORT="${GRAIN_GEMINI_EFFORT:-}"
 # Path to an Antigravity CLI (agy) on *this host* to run instead of the
 # one baked into the image -- GRAIN_CLAUDE_PATH's exact counterpart for
 # the other agent framework, and empty for the same reason: the image
@@ -506,6 +513,9 @@ Recognized variables:
                              the image's own, for the third. Bind-mounted the
                              same way (default: empty, use the image's)
   GRAIN_GEMINI_MODEL        override the daemon's default Gemini model. Seeded once
+  GRAIN_GEMINI_EFFORT       override the reasoning effort asked for beside it
+                             (low|medium|high). Seeded once; ignored for a model
+                             name that already carries one
   GRAIN_CLAUDE_MODEL        override the daemon's default Claude model. Seeded once,
                              the exact counterpart of GRAIN_GEMINI_MODEL above
   GRAIN_CODEX_MODEL         override the daemon's default Codex model. Seeded
@@ -2103,6 +2113,7 @@ write_systemd_units() {
   daemon_args+=(-reboot-cmd touch -reboot-cmd "$CONTROL_DIR/reboot")
   [ -n "$GRAIN_AGY_PATH" ] && daemon_args+=(-agy-path "$GRAIN_AGY_PATH")
   [ -n "$GRAIN_GEMINI_MODEL" ] && daemon_args+=(-gemini-model "$GRAIN_GEMINI_MODEL")
+  [ -n "$GRAIN_GEMINI_EFFORT" ] && daemon_args+=(-gemini-effort "$GRAIN_GEMINI_EFFORT")
   [ -n "$GRAIN_CLAUDE_PATH" ] && daemon_args+=(-claude-path "$GRAIN_CLAUDE_PATH")
   [ -n "$GRAIN_CLAUDE_MODEL" ] && daemon_args+=(-claude-model "$GRAIN_CLAUDE_MODEL")
   [ -n "$GRAIN_CODEX_PATH" ] && daemon_args+=(-codex-path "$GRAIN_CODEX_PATH")

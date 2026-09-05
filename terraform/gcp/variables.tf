@@ -585,6 +585,19 @@ variable "gemini_model" {
   default     = ""
 }
 
+variable "gemini_effort" {
+  type        = string
+  description = <<-EOT
+    Reasoning effort override for the antigravity agent framework, asked
+    for beside gemini_model -- low, medium or high. agy takes the two as
+    separate values and refuses a pair that does not go together; a
+    gemini_model whose name already carries an effort ignores this
+    entirely. Empty uses the daemon's own default
+    (pkg/agent/antigravity.DefaultEffort).
+  EOT
+  default     = ""
+}
+
 variable "claude_model" {
   type        = string
   description = "Model override for the claude agent framework. Empty uses the daemon's own default (pkg/agent/claude.DefaultModel)."
