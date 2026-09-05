@@ -131,6 +131,8 @@ export default function SuitesList({
         className="template-list"
         items={visible}
         idOf={(s) => s.id}
+        nameOf={(s) => s.name}
+        noun="suite"
         reorder={sortBy === "custom" ? move : null}
       >
         {(s, { handle, dragging }) => (

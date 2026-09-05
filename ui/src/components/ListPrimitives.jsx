@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import {
   FormControl,
   InputLabel,
@@ -7,7 +7,13 @@ import {
   TextField,
   Typography,
 } from "@mui/material";
-import DragIndicatorIcon from "@mui/icons-material/DragIndicator";
+import {
+  MoveHandle,
+  MoveSlot,
+  MovingBar,
+  gapsOf,
+  usePickup,
+} from "./ReorderPickup.jsx";
 
 // ListHeader/ListToolbar/ListEmpty are the pieces TaskList, RepoList,
 // TemplatesList, and SchedulesList already agreed to share by convention
@@ -154,13 +160,43 @@ export function ListEmpty({ children }) {
 // The row is a render prop rather than a component prop so the handle
 // can go *inside* it: the handle belongs in the row's own flex line,
 // ahead of the name, and only the caller knows where that is.
-export function ReorderableList({ className, items, idOf, reorder, children }) {
+//
+// The handle is also the tap-to-move affordance these lists get on a
+// touchscreen (ReorderPickup.jsx): tapping it picks the row up and the
+// list draws a "Move here" slot at every position it could go to, since
+// a phone browser never fires the drag events the <li>s below use.
+//
+// `nameOf` is what a row is called, for the labels those slots and
+// handles carry ("Move here, above Nightly release") -- the one thing
+// about a row this component cannot read off `items` itself. A list that
+// leaves it out still reorders; its buttons just say "Move here" with no
+// mention of what they sit above, which is thin on a screen reader.
+// `noun` is the same for the bar at the top ("Moving 1 schedule").
+export function ReorderableList({
+  className,
+  items,
+  idOf,
+  nameOf,
+  noun,
+  reorder,
+  children,
+}) {
   // dragId is the row being dragged right now, or null. overId is
   // purely the drop-target highlight -- "__end__" for the trailing zone
   // -- and never drives the actual move, which only happens in onDrop.
   const [dragId, setDragId] = useState(null);
   const [overId, setOverId] = useState(null);
   const enabled = !!reorder;
+
+  // The tap-to-move half of the same gesture. A pick-up made while the
+  // list was in its custom order means nothing once it isn't, so a
+  // change of sort puts the row back down -- the same withdrawal
+  // `enabled` makes of the drag.
+  const { picked, toggle, cancel } = usePickup();
+  useEffect(() => {
+    if (!enabled) cancel();
+  }, [enabled, cancel]);
+  const pickedId = enabled && picked ? picked.ids[0] : null;
 
   const stop = () => {
     setDragId(null);
@@ -170,66 +206,113 @@ export function ReorderableList({ className, items, idOf, reorder, children }) {
     if (dragId !== null && dragId !== beforeId) reorder(dragId, beforeId);
     stop();
   };
+  const move = (beforeId) => {
+    if (pickedId !== null && pickedId !== beforeId) reorder(pickedId, beforeId);
+    cancel();
+  };
 
-  // One handle element for every row: it carries no per-row state, and
-  // the click it swallows is the row's own onClick (which on all four of
-  // these pages opens the thing the row names) rather than the drag.
-  const handle = enabled ? (
-    <DragIndicatorIcon
-      className="task-drag-handle"
-      fontSize="small"
-      titleAccess="Drag to reorder"
-      onClick={(e) => e.stopPropagation()}
-    />
-  ) : null;
+  const name = (item) => (nameOf ? nameOf(item) : null);
+
+  // The rows a pick-up can land between, and which of the gaps between
+  // them are worth a slot: gapsOf leaves out the one the row is already
+  // in, which for a single row lifted out of the middle of a list is one
+  // of the two either side of where it was.
+  const kept =
+    pickedId !== null ? items.filter((i) => idOf(i) !== pickedId) : items;
+  const gapBefore = new Map(kept.map((i, n) => [idOf(i), n]));
+  const gaps =
+    pickedId !== null ? new Set(gapsOf(items.map(idOf), [pickedId])) : null;
 
   return (
-    <ul className={className}>
-      {items.map((item) => {
-        const id = idOf(item);
-        const over = dragId !== null && dragId !== id && overId === id;
-        return (
-          <li
-            key={id}
-            className={over ? "task-drop-target" : undefined}
-            draggable={enabled}
-            onDragStart={enabled ? () => setDragId(id) : undefined}
-            onDragEnd={enabled ? stop : undefined}
-            onDragOver={
-              enabled
-                ? (e) => {
-                    if (dragId === null || dragId === id) return;
-                    e.preventDefault();
-                    setOverId(id);
-                  }
-                : undefined
-            }
-            onDrop={
-              enabled
-                ? (e) => {
-                    e.preventDefault();
-                    drop(id);
-                  }
-                : undefined
-            }
-          >
-            {children(item, { handle, dragging: dragId === id })}
-          </li>
-        );
-      })}
-      {enabled && dragId !== null && (
-        <li
-          className={`task-drop-end${overId === "__end__" ? " task-drop-target" : ""}`}
-          onDragOver={(e) => {
-            e.preventDefault();
-            setOverId("__end__");
-          }}
-          onDrop={(e) => {
-            e.preventDefault();
-            drop(null);
-          }}
-        />
+    <>
+      {pickedId !== null && (
+        <MovingBar count={1} noun={noun} onCancel={cancel} />
       )}
-    </ul>
+      <ul className={className}>
+        {items.map((item) => {
+          const id = idOf(item);
+          const over = dragId !== null && dragId !== id && overId === id;
+          const gap = gapBefore.has(id) ? gapBefore.get(id) : null;
+          // One handle per row rather than one shared element, now that
+          // it carries this row's own name and whether this row is the
+          // one picked up. The click it swallows is the row's own
+          // onClick (which on all four of these pages opens the thing
+          // the row names) rather than the drag.
+          const handle = enabled ? (
+            <MoveHandle
+              label={
+                pickedId === id
+                  ? `Stop moving ${name(item) || "this row"}`
+                  : `Move ${name(item) || "this row"}`
+              }
+              picked={pickedId === id}
+              onToggle={() => toggle([id])}
+            />
+          ) : null;
+          return (
+            <Fragment key={id}>
+              {pickedId !== null && gap !== null && gaps.has(gap) && (
+                <MoveSlot
+                  className="reorder-slot-gutter"
+                  label={
+                    name(item) ? `Move here, above ${name(item)}` : "Move here"
+                  }
+                  onMove={() => move(id)}
+                />
+              )}
+              <li
+                className={over ? "task-drop-target" : undefined}
+                draggable={enabled}
+                onDragStart={enabled ? () => setDragId(id) : undefined}
+                onDragEnd={enabled ? stop : undefined}
+                onDragOver={
+                  enabled
+                    ? (e) => {
+                        if (dragId === null || dragId === id) return;
+                        e.preventDefault();
+                        setOverId(id);
+                      }
+                    : undefined
+                }
+                onDrop={
+                  enabled
+                    ? (e) => {
+                        e.preventDefault();
+                        drop(id);
+                      }
+                    : undefined
+                }
+              >
+                {children(item, {
+                  handle,
+                  dragging: dragId === id,
+                  picked: pickedId === id,
+                })}
+              </li>
+            </Fragment>
+          );
+        })}
+        {pickedId !== null && gaps.has(kept.length) && (
+          <MoveSlot
+            className="reorder-slot-gutter"
+            label="Move here, to the end of the list"
+            onMove={() => move(null)}
+          />
+        )}
+        {enabled && dragId !== null && (
+          <li
+            className={`task-drop-end${overId === "__end__" ? " task-drop-target" : ""}`}
+            onDragOver={(e) => {
+              e.preventDefault();
+              setOverId("__end__");
+            }}
+            onDrop={(e) => {
+              e.preventDefault();
+              drop(null);
+            }}
+          />
+        )}
+      </ul>
+    </>
   );
 }

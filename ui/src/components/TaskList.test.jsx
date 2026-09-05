@@ -396,6 +396,127 @@ describe("TaskList", () => {
       ).not.toBeInTheDocument();
       expect(rowFor("First")).toHaveAttribute("draggable", "false");
     });
+
+    // grain/task-23: the same reorder for a device that fires no drag
+    // events at all. Tapping a handle picks the row up; the slots that
+    // appear between the rows are where it can be put down.
+    describe("tap to move (grain/task-23)", () => {
+      const slots = () =>
+        screen.queryAllByRole("button", { name: /^Move here/ });
+
+      it("offers a slot at every position the picked-up task is not already in", async () => {
+        const user = userEvent.setup();
+        renderList({ tasks: threeTasks, onReorder: vi.fn() });
+
+        expect(slots()).toHaveLength(0);
+
+        await user.click(screen.getByRole("button", { name: "Move task 2" }));
+
+        // Second is picked up out of the middle, so the two positions it
+        // can go to are the top of the list and the end of it -- the gap
+        // it is already in gets no slot, because tapping it would
+        // promise a move and make none.
+        expect(slots().map((b) => b.getAttribute("aria-label"))).toEqual([
+          "Move here, above First",
+          "Move here, to the end of the list",
+        ]);
+      });
+
+      it("moves the task between the two rows the slot sits between", async () => {
+        const onReorder = vi.fn();
+        const user = userEvent.setup();
+        renderList({ tasks: threeTasks, onReorder });
+
+        await user.click(screen.getByRole("button", { name: "Move task 3" }));
+        await user.click(
+          screen.getByRole("button", { name: "Move here, above Second" }),
+        );
+
+        expect(onReorder).toHaveBeenCalledWith([3], 1, 2);
+        // Putting it down ends the gesture: the slots go with it.
+        expect(slots()).toHaveLength(0);
+      });
+
+      it("moves it to the end of the list", async () => {
+        const onReorder = vi.fn();
+        const user = userEvent.setup();
+        renderList({ tasks: threeTasks, onReorder });
+
+        await user.click(screen.getByRole("button", { name: "Move task 1" }));
+        await user.click(
+          screen.getByRole("button", {
+            name: "Move here, to the end of the list",
+          }),
+        );
+
+        expect(onReorder).toHaveBeenCalledWith([1], 3, null);
+      });
+
+      it("picks up the whole selection when the row is part of one", async () => {
+        const onReorder = vi.fn();
+        const user = userEvent.setup();
+        renderList({
+          tasks: threeTasks,
+          onReorder,
+          selected: new Set([1, 3]),
+        });
+
+        await user.click(screen.getByRole("button", { name: "Move task 3" }));
+        expect(screen.getByText(/Moving 2 tasks/)).toBeInTheDocument();
+
+        await user.click(
+          screen.getByRole("button", { name: "Move here, above Second" }),
+        );
+        expect(onReorder).toHaveBeenCalledWith([1, 3], null, 2);
+      });
+
+      it("puts the task back down on a second tap of its own handle", async () => {
+        const onReorder = vi.fn();
+        const user = userEvent.setup();
+        renderList({ tasks: threeTasks, onReorder });
+
+        await user.click(screen.getByRole("button", { name: "Move task 2" }));
+        await user.click(
+          screen.getByRole("button", { name: "Stop moving task 2" }),
+        );
+
+        expect(slots()).toHaveLength(0);
+        expect(onReorder).not.toHaveBeenCalled();
+      });
+
+      it("puts it back down on Cancel, and on Escape", async () => {
+        const onReorder = vi.fn();
+        const user = userEvent.setup();
+        renderList({ tasks: threeTasks, onReorder });
+
+        await user.click(screen.getByRole("button", { name: "Move task 2" }));
+        await user.click(screen.getByRole("button", { name: "Cancel" }));
+        expect(slots()).toHaveLength(0);
+
+        await user.click(screen.getByRole("button", { name: "Move task 2" }));
+        expect(slots().length).toBeGreaterThan(0);
+        await user.keyboard("{Escape}");
+        expect(slots()).toHaveLength(0);
+        expect(onReorder).not.toHaveBeenCalled();
+      });
+
+      // The same rule the drag keeps: while the list is in some other
+      // order, a move has nowhere meaningful to land.
+      it("drops the pick-up when a display-only sort is chosen", async () => {
+        const user = userEvent.setup();
+        renderList({ tasks: threeTasks, onReorder: vi.fn() });
+
+        await user.click(screen.getByRole("button", { name: "Move task 2" }));
+        expect(slots().length).toBeGreaterThan(0);
+
+        await user.click(screen.getByLabelText("Sort"));
+        await user.click(
+          await screen.findByRole("option", { name: "Title (A–Z)" }),
+        );
+
+        expect(slots()).toHaveLength(0);
+      });
+    });
   });
 
   it("badges a task a schedule filed, and leaves an ordinary one unbadged", () => {

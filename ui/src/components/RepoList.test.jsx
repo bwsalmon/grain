@@ -151,7 +151,16 @@ describe("RepoList", () => {
     renderList({ config });
 
     const row = screen.getByText("acme/widgets").closest("li");
-    expect(within(row).queryAllByRole("button")).toHaveLength(0);
+    // The drag handle is the one button a row does carry, and only
+    // because it became one in grain/task-23 -- tapping it picks the row
+    // up, which is how this list is reordered without a drag. It is an
+    // affordance for moving the row, not an action on the repo, so it is
+    // named here rather than counted as one of the buttons this test is
+    // about.
+    expect(within(row).queryAllByRole("button")).toHaveLength(1);
+    expect(
+      within(row).getByRole("button", { name: "Move acme/widgets" }),
+    ).toBeInTheDocument();
     expect(screen.queryByText("Fix the widget")).not.toBeInTheDocument();
   });
 

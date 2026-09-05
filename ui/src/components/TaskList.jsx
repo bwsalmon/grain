@@ -1,6 +1,5 @@
-import { useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import { Button, Checkbox, Chip, FormControlLabel } from "@mui/material";
-import DragIndicatorIcon from "@mui/icons-material/DragIndicator";
 import {
   STATE_LABELS,
   capabilityName,
@@ -23,6 +22,13 @@ import {
   ListSortSelect,
   ListToolbar,
 } from "./ListPrimitives.jsx";
+import {
+  MoveHandle,
+  MoveSlot,
+  MovingBar,
+  gapsOf,
+  usePickup,
+} from "./ReorderPickup.jsx";
 import ItemGlyph from "./ItemGlyph.jsx";
 import StateDot, { isLiveRunning } from "./StateDot.jsx";
 
@@ -159,26 +165,62 @@ export default function TaskList({
   const [dragIds, setDragIds] = useState(null);
   const [overId, setOverId] = useState(null);
 
+  // The same reorder for a finger or a keyboard: tap the handle to pick
+  // a row up, then tap one of the slots that appear between the rows
+  // (ReorderPickup.jsx). The drag below is untouched -- this is the
+  // gesture for the devices that never fire a drag event at all.
+  const { picked, toggle: togglePickup, cancel: cancelPickup } = usePickup();
+  // A pick-up made under "Backlog order" means nothing once the list is
+  // showing some other order, for the same reason the drag is withdrawn
+  // there: the slots would be offering positions in an order the screen
+  // is not showing.
+  useEffect(() => {
+    if (!reorderEnabled) cancelPickup();
+  }, [reorderEnabled, cancelPickup]);
+  const pickedIds = reorderEnabled ? (picked?.ids ?? null) : null;
+
+  // The rows a pick-up can land between, and the gaps between them worth
+  // offering (gapsOf drops the one the block already sits in).
+  const kept = pickedIds
+    ? topLevel.filter((t) => !pickedIds.includes(t.id))
+    : topLevel;
+  const gapBefore = new Map(kept.map((t, i) => [t.id, i]));
+  const gaps = pickedIds
+    ? new Set(
+        gapsOf(
+          topLevel.map((t) => t.id),
+          pickedIds,
+        ),
+      )
+    : null;
+
+  // moveTo is where both gestures end up: `gap` is a position among the
+  // tasks currently visible under this filter, and its two neighbours
+  // are what onReorder is told. The store places the moved tasks between
+  // whatever those two names resolve to in the *full*, unfiltered
+  // backlog, which is what makes a move inside a filtered view still
+  // land correctly relative to tasks the filter is hiding: a move to the
+  // very top of a filtered view has no preceding job, so it goes just
+  // before the following one instead -- the same rule the issue itself
+  // asks for.
+  const moveTo = (ids, rows, gap) =>
+    onReorder(
+      ids,
+      gap > 0 ? rows[gap - 1].id : null,
+      gap < rows.length ? rows[gap].id : null,
+    );
+
   // dropOn resolves a drop at targetId (or at the very end, when
-  // targetId is null) to the two backlog neighbours -- among the tasks
-  // currently visible under this filter -- the drop landed between, and
-  // hands them to onReorder as afterId/beforeId. The store places the
-  // dragged tasks between whatever those two names resolve to in the
-  // *full*, unfiltered backlog, which is what makes a drag inside a
-  // filtered view still land correctly relative to tasks the filter is
-  // hiding: dropping at the very top of a filtered view has no
-  // preceding job, so it goes just before the following one instead --
-  // the same rule the issue itself asks for.
+  // targetId is null) to that same gap among the visible tasks.
   const dropOn = (targetId) => {
     if (!dragIds) return;
     const dragging = new Set(dragIds);
-    const visible = topLevel.map((t) => t.id).filter((id) => !dragging.has(id));
-    const idx = targetId === null ? visible.length : visible.indexOf(targetId);
-    onReorder(
-      dragIds,
-      idx > 0 ? visible[idx - 1] : null,
-      idx < visible.length ? visible[idx] : null,
-    );
+    const visible = topLevel.filter((t) => !dragging.has(t.id));
+    const idx =
+      targetId === null
+        ? visible.length
+        : visible.findIndex((t) => t.id === targetId);
+    moveTo(dragIds, visible, idx);
     setDragIds(null);
     setOverId(null);
   };
@@ -190,11 +232,17 @@ export default function TaskList({
   // be rescued from.
   const clearNarrowing = () => onNarrow({ search: "", filters: {} });
 
-  const startDrag = (t) => {
+  // blockFor is what grabbing this row moves -- itself, or the whole
+  // current selection when the row is part of one (bwsalmon/agents#476)
+  // -- in their own current backlog order. Both gestures start here, so
+  // a tap picks up exactly what a drag would have taken.
+  const blockFor = (t) => {
     const ids =
       selected.has(t.id) && selected.size > 1 ? selected : new Set([t.id]);
-    setDragIds(topLevel.filter((x) => ids.has(x.id)).map((x) => x.id));
+    return topLevel.filter((x) => ids.has(x.id)).map((x) => x.id);
   };
+
+  const startDrag = (t) => setDragIds(blockFor(t));
 
   return (
     <main>
@@ -262,59 +310,92 @@ export default function TaskList({
           />
         </div>
       )}
+      {pickedIds && (
+        <MovingBar count={pickedIds.length} onCancel={cancelPickup} />
+      )}
       <ul className="task-list">
         {topLevel.map((t) => (
-          <li
-            key={t.id}
-            className={
-              overId === t.id && dragIds && !dragIds.includes(t.id)
-                ? "task-drop-target"
-                : undefined
-            }
-            draggable={reorderEnabled}
-            onDragStart={() => reorderEnabled && startDrag(t)}
-            onDragEnd={() => {
-              setDragIds(null);
-              setOverId(null);
-            }}
-            onDragOver={(e) => {
-              if (!dragIds || dragIds.includes(t.id)) return;
-              e.preventDefault();
-              setOverId(t.id);
-            }}
-            onDrop={(e) => {
-              e.preventDefault();
-              dropOn(t.id);
-            }}
-          >
-            <TaskRow
-              t={t}
-              config={config}
-              onOpenTask={onOpenTask}
-              selected={selected}
-              onToggleSelect={onToggleSelect}
+          <Fragment key={t.id}>
+            {/* The place this row's own position offers, drawn above it
+                -- so the slots read as the gaps between the rows, which
+                is what they are. A row that is itself picked up gets
+                none: its neighbours' slots already name every position
+                it could take. */}
+            {pickedIds &&
+              gapBefore.has(t.id) &&
+              gaps.has(gapBefore.get(t.id)) && (
+                <MoveSlot
+                  className="reorder-slot-gutter"
+                  label={`Move here, above ${t.title}`}
+                  onMove={() => {
+                    moveTo(pickedIds, kept, gapBefore.get(t.id));
+                    cancelPickup();
+                  }}
+                />
+              )}
+            <li
+              className={
+                overId === t.id && dragIds && !dragIds.includes(t.id)
+                  ? "task-drop-target"
+                  : undefined
+              }
               draggable={reorderEnabled}
-              dragging={dragIds?.includes(t.id) ?? false}
-            />
-            {children.has(t.id) && (
-              <ul className="task-sublist">
-                {children.get(t.id).map((c) => (
-                  <li key={c.id}>
-                    <TaskRow
-                      t={c}
-                      config={config}
-                      onOpenTask={onOpenTask}
-                      selected={selected}
-                      onToggleSelect={onToggleSelect}
-                      dragPlaceholder={reorderEnabled}
-                      nested
-                    />
-                  </li>
-                ))}
-              </ul>
-            )}
-          </li>
+              onDragStart={() => reorderEnabled && startDrag(t)}
+              onDragEnd={() => {
+                setDragIds(null);
+                setOverId(null);
+              }}
+              onDragOver={(e) => {
+                if (!dragIds || dragIds.includes(t.id)) return;
+                e.preventDefault();
+                setOverId(t.id);
+              }}
+              onDrop={(e) => {
+                e.preventDefault();
+                dropOn(t.id);
+              }}
+            >
+              <TaskRow
+                t={t}
+                config={config}
+                onOpenTask={onOpenTask}
+                selected={selected}
+                onToggleSelect={onToggleSelect}
+                draggable={reorderEnabled}
+                dragging={dragIds?.includes(t.id) ?? false}
+                picked={pickedIds?.includes(t.id) ?? false}
+                onPickUp={() => togglePickup(blockFor(t))}
+              />
+              {children.has(t.id) && (
+                <ul className="task-sublist">
+                  {children.get(t.id).map((c) => (
+                    <li key={c.id}>
+                      <TaskRow
+                        t={c}
+                        config={config}
+                        onOpenTask={onOpenTask}
+                        selected={selected}
+                        onToggleSelect={onToggleSelect}
+                        dragPlaceholder={reorderEnabled}
+                        nested
+                      />
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </li>
+          </Fragment>
         ))}
+        {pickedIds && gaps.has(kept.length) && (
+          <MoveSlot
+            className="reorder-slot-gutter"
+            label="Move here, to the end of the list"
+            onMove={() => {
+              moveTo(pickedIds, kept, kept.length);
+              cancelPickup();
+            }}
+          />
+        )}
         {reorderEnabled && dragIds && (
           <li
             className={`task-drop-end${overId === "__end__" ? " task-drop-target" : ""}`}
@@ -351,6 +432,12 @@ export default function TaskList({
 // onToggleSelect/draggable and gets a plain row with no checkbox or drag
 // handle rather than a dead one.
 //
+// `draggable` brings the handle, and with it both ways of moving the row
+// -- the drag the <li> around this row carries, and the tap-to-move the
+// handle itself is a button for (ReorderPickup.jsx). A caller passing
+// `draggable` passes `onPickUp` and `picked` with it, or the handle
+// still drags but no longer picks anything up.
+//
 // nested says this row is already sitting in a .task-sublist under the
 // task it was generated from, which is the only thing that makes a
 // stacked task self-explaining -- so it is what decides whether the
@@ -377,6 +464,8 @@ export function TaskRow({
   onToggleSelect,
   draggable,
   dragging,
+  picked,
+  onPickUp,
   dragPlaceholder,
   nested,
 }) {
@@ -389,15 +478,14 @@ export function TaskRow({
   const activity = runActivity(t);
   return (
     <div
-      className={`task-row${dragging ? " task-row-dragging" : ""}`}
+      className={`task-row${dragging ? " task-row-dragging" : ""}${picked ? " task-row-picked" : ""}`}
       onClick={() => onOpenTask(t.id)}
     >
       {draggable ? (
-        <DragIndicatorIcon
-          className="task-drag-handle"
-          fontSize="small"
-          titleAccess="Drag to reorder"
-          onClick={(e) => e.stopPropagation()}
+        <MoveHandle
+          label={picked ? `Stop moving task ${t.id}` : `Move task ${t.id}`}
+          picked={!!picked}
+          onToggle={() => onPickUp?.()}
         />
       ) : (
         dragPlaceholder && (

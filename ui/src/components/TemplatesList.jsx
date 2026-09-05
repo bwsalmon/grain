@@ -121,6 +121,8 @@ export default function TemplatesList({
         className="template-list"
         items={visible}
         idOf={(tmpl) => tmpl.id}
+        nameOf={(tmpl) => tmpl.name}
+        noun="template"
         reorder={sortBy === "custom" ? move : null}
       >
         {(tmpl, { handle, dragging }) => (

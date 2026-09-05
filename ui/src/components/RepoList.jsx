@@ -238,6 +238,8 @@ export default function RepoList({
         className="repo-list"
         items={visible}
         idOf={(r) => r.repo}
+        nameOf={(r) => r.repo}
+        noun="repo"
         reorder={sortBy === "custom" ? move : null}
       >
         {(r, { handle, dragging }) => {

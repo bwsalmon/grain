@@ -133,6 +133,8 @@ export default function SchedulesList({
         className="schedules-list"
         items={visible}
         idOf={(s) => s.id}
+        nameOf={(s) => s.title}
+        noun="schedule"
         reorder={sortBy === "custom" ? move : null}
       >
         {(s, { handle, dragging }) => (

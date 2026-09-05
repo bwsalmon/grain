@@ -1,6 +1,5 @@
-import { useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import { Button, Checkbox, Chip, Typography } from "@mui/material";
-import DragIndicatorIcon from "@mui/icons-material/DragIndicator";
 import {
   STATE_LABELS,
   capabilityName,
@@ -30,6 +29,13 @@ import {
   ListSortSelect,
   ListToolbar,
 } from "./ListPrimitives.jsx";
+import {
+  MoveHandle,
+  MoveSlot,
+  MovingBar,
+  gapsOf,
+  usePickup,
+} from "./ReorderPickup.jsx";
 import BoardColumnsOverlay from "./BoardColumnsOverlay.jsx";
 import StateDot, { isLiveRunning } from "./StateDot.jsx";
 
@@ -130,15 +136,22 @@ export default function TaskBoard({
   const [dragColumn, setDragColumn] = useState(null);
   const [overId, setOverId] = useState(null);
 
-  const startDrag = (columnId, t) => {
+  // blockFor is what grabbing this card moves: itself, or the whole
+  // selection when the card is part of one -- restricted to the column
+  // it was grabbed in, since a card only ever moves within its own
+  // column. Both gestures start here, so a tap picks up exactly what a
+  // drag would have taken.
+  const blockFor = (columnId, t) => {
     const ids =
       selected.has(t.id) && selected.size > 1 ? selected : new Set([t.id]);
-    setDragIds(
-      cards
-        .get(columnId)
-        .filter((x) => ids.has(x.id))
-        .map((x) => x.id),
-    );
+    return cards
+      .get(columnId)
+      .filter((x) => ids.has(x.id))
+      .map((x) => x.id);
+  };
+
+  const startDrag = (columnId, t) => {
+    setDragIds(blockFor(columnId, t));
     setDragColumn(columnId);
   };
 
@@ -148,26 +161,44 @@ export default function TaskBoard({
     setOverId(null);
   };
 
+  // The same reorder for a finger or a keyboard: tap a card's handle to
+  // pick it up, then tap one of the slots that appear between that
+  // column's cards (ReorderPickup.jsx). The column it was picked up in
+  // is the pick-up's scope, so the slots only ever appear in the one
+  // column a card can be put back into -- the same rule the drag keeps
+  // by refusing a drop from another column.
+  const { picked, toggle: togglePickup, cancel: cancelPickup } = usePickup();
+  useEffect(() => {
+    if (!reorderEnabled) cancelPickup();
+  }, [reorderEnabled, cancelPickup]);
+  const pickedIds = reorderEnabled ? (picked?.ids ?? null) : null;
+  const pickedColumn = pickedIds ? picked.scope : null;
+
+  // moveTo is where both gestures end up: `gap` is a position among a
+  // column's own visible cards, and its two neighbours are what
+  // onReorder is told. The store places the moved tasks between whatever
+  // those names resolve to in the full backlog, so a card moved to the
+  // top of a column goes above the card that was there rather than to
+  // the top of the whole backlog.
+  const moveTo = (ids, rows, gap) =>
+    onReorder(
+      ids,
+      gap > 0 ? rows[gap - 1].id : null,
+      gap < rows.length ? rows[gap].id : null,
+    );
+
   // dropOn resolves a drop onto targetId -- or onto the end of the
-  // column, when targetId is null -- to the two neighbours it landed
-  // between among that column's own visible cards, and hands them to
-  // onReorder. The store places the dragged tasks between whatever those
-  // names resolve to in the full backlog, so a card dropped at the top
-  // of a column goes above the card that was there rather than to the
-  // top of the whole backlog.
+  // column, when targetId is null -- to that same gap among the
+  // column's visible cards.
   const dropOn = (columnId, targetId) => {
     if (!dragIds || columnId !== dragColumn) return endDrag();
     const dragging = new Set(dragIds);
-    const visible = cards
-      .get(columnId)
-      .map((t) => t.id)
-      .filter((id) => !dragging.has(id));
-    const idx = targetId === null ? visible.length : visible.indexOf(targetId);
-    onReorder(
-      dragIds,
-      idx > 0 ? visible[idx - 1] : null,
-      idx < visible.length ? visible[idx] : null,
-    );
+    const visible = cards.get(columnId).filter((t) => !dragging.has(t.id));
+    const idx =
+      targetId === null
+        ? visible.length
+        : visible.findIndex((t) => t.id === targetId);
+    moveTo(dragIds, visible, idx);
     endDrag();
   };
 
@@ -255,12 +286,33 @@ export default function TaskBoard({
         </Typography>
       )}
 
+      {pickedIds && (
+        <MovingBar count={pickedIds.length} onCancel={cancelPickup} />
+      )}
+
       <div className="board-columns">
         {columns.map((c) => {
           const columnCards = cards.get(c.id);
           const allSelected =
             columnCards.length > 0 &&
             columnCards.every((t) => selected.has(t.id));
+          // The cards a pick-up in *this* column can land between, and
+          // the gaps between them worth offering. Every other column
+          // renders exactly as it did: nothing was picked up there, and
+          // a card cannot move to it.
+          const lifted = pickedColumn === c.id ? pickedIds : null;
+          const kept = lifted
+            ? columnCards.filter((t) => !lifted.includes(t.id))
+            : columnCards;
+          const gapBefore = new Map(kept.map((t, i) => [t.id, i]));
+          const gaps = lifted
+            ? new Set(
+                gapsOf(
+                  columnCards.map((t) => t.id),
+                  lifted,
+                ),
+              )
+            : null;
           return (
             <section key={c.id} className="board-column">
               <header className="board-column-header">
@@ -279,49 +331,72 @@ export default function TaskBoard({
               </header>
               <ul className="board-column-cards">
                 {columnCards.map((t) => (
-                  <li
-                    key={t.id}
-                    className={
-                      overId === t.id &&
-                      dragIds &&
-                      dragColumn === c.id &&
-                      !dragIds.includes(t.id)
-                        ? "board-drop-target"
-                        : undefined
-                    }
-                    draggable={reorderEnabled}
-                    onDragStart={() => reorderEnabled && startDrag(c.id, t)}
-                    onDragEnd={endDrag}
-                    onDragOver={(e) => {
-                      if (
-                        !dragIds ||
-                        dragColumn !== c.id ||
-                        dragIds.includes(t.id)
-                      )
-                        return;
-                      e.preventDefault();
-                      setOverId(t.id);
-                    }}
-                    onDrop={(e) => {
-                      e.preventDefault();
-                      dropOn(c.id, t.id);
-                    }}
-                  >
-                    <BoardCard
-                      t={t}
-                      config={config}
-                      onOpenTask={onOpenTask}
-                      selected={selected}
-                      onToggleSelect={onToggleSelect}
+                  <Fragment key={t.id}>
+                    {lifted &&
+                      gapBefore.has(t.id) &&
+                      gaps.has(gapBefore.get(t.id)) && (
+                        <MoveSlot
+                          label={`Move here, above ${t.title}, in ${c.title}`}
+                          onMove={() => {
+                            moveTo(lifted, kept, gapBefore.get(t.id));
+                            cancelPickup();
+                          }}
+                        />
+                      )}
+                    <li
+                      className={
+                        overId === t.id &&
+                        dragIds &&
+                        dragColumn === c.id &&
+                        !dragIds.includes(t.id)
+                          ? "board-drop-target"
+                          : undefined
+                      }
                       draggable={reorderEnabled}
-                      dragging={dragIds?.includes(t.id) ?? false}
-                      // The state dot earns its space only where a column
-                      // holds more than one state -- in a "Running"
-                      // column every card would carry the same dot.
-                      showState={c.states.length > 1}
-                    />
-                  </li>
+                      onDragStart={() => reorderEnabled && startDrag(c.id, t)}
+                      onDragEnd={endDrag}
+                      onDragOver={(e) => {
+                        if (
+                          !dragIds ||
+                          dragColumn !== c.id ||
+                          dragIds.includes(t.id)
+                        )
+                          return;
+                        e.preventDefault();
+                        setOverId(t.id);
+                      }}
+                      onDrop={(e) => {
+                        e.preventDefault();
+                        dropOn(c.id, t.id);
+                      }}
+                    >
+                      <BoardCard
+                        t={t}
+                        config={config}
+                        onOpenTask={onOpenTask}
+                        selected={selected}
+                        onToggleSelect={onToggleSelect}
+                        draggable={reorderEnabled}
+                        dragging={dragIds?.includes(t.id) ?? false}
+                        picked={lifted?.includes(t.id) ?? false}
+                        onPickUp={() => togglePickup(blockFor(c.id, t), c.id)}
+                        // The state dot earns its space only where a column
+                        // holds more than one state -- in a "Running"
+                        // column every card would carry the same dot.
+                        showState={c.states.length > 1}
+                      />
+                    </li>
+                  </Fragment>
                 ))}
+                {lifted && gaps.has(kept.length) && (
+                  <MoveSlot
+                    label={`Move here, to the end of ${c.title}`}
+                    onMove={() => {
+                      moveTo(lifted, kept, kept.length);
+                      cancelPickup();
+                    }}
+                  />
+                )}
                 {reorderEnabled && dragIds && dragColumn === c.id && (
                   <li
                     className={`board-drop-end${overId === `__end__${c.id}` ? " board-drop-target" : ""}`}
@@ -386,6 +461,8 @@ export function BoardCard({
   onToggleSelect,
   draggable,
   dragging,
+  picked,
+  onPickUp,
   showState = true,
 }) {
   const phase = completionPhase(t);
@@ -396,16 +473,15 @@ export function BoardCard({
   const label = stateLabel(t);
   return (
     <div
-      className={`board-card${dragging ? " board-card-dragging" : ""}`}
+      className={`board-card${dragging ? " board-card-dragging" : ""}${picked ? " board-card-picked" : ""}`}
       onClick={() => onOpenTask(t.id)}
     >
       <div className="board-card-top">
         {draggable && (
-          <DragIndicatorIcon
-            className="task-drag-handle"
-            fontSize="small"
-            titleAccess="Drag to reorder"
-            onClick={(e) => e.stopPropagation()}
+          <MoveHandle
+            label={picked ? `Stop moving task ${t.id}` : `Move task ${t.id}`}
+            picked={!!picked}
+            onToggle={() => onPickUp?.()}
           />
         )}
         {onToggleSelect && (

@@ -338,6 +338,10 @@ main {
 /* Drag-and-drop backlog reordering (bwsalmon/agents#476). The handle is
    the drag affordance; the row itself stays draggable so grabbing
    anywhere on it still works, the handle just signals that it can be.
+   It is also the button that picks the row up for tap-to-move
+   (ReorderPickup.jsx, grain/task-23), hence the button reset -- a
+   <button> is what a finger and a keyboard can both reach, and the icon
+   inside it is the same figure it always was.
    .task-drag-placeholder is the same column left empty on a row that has
    no handle to put in it -- a stacked merge fix, which the merge queue
    always runs ahead of the backlog rather than letting it be dragged
@@ -350,8 +354,27 @@ main {
   width: 1.25rem;
 }
 .task-drag-handle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  background: none;
   color: var(--text-tertiary);
   cursor: grab;
+}
+.task-drag-handle:hover {
+  color: var(--text-secondary);
+}
+/* The row that is currently picked up, on both sides of the gesture: it
+   is still where it was, so it says so by holding the accent rather than
+   by fading out the way a row mid-drag does. */
+.task-drag-handle-picked {
+  color: var(--accent);
+}
+.task-row-picked,
+.board-card-picked {
+  box-shadow: inset 0 0 0 2px var(--accent);
 }
 .task-row-dragging {
   opacity: 0.4;
@@ -366,6 +389,93 @@ main {
 }
 .task-drop-end {
   min-height: 2.5rem;
+}
+
+/* Tap-to-move (ReorderPickup.jsx, grain/task-23): the drop targets a
+   drag draws as a 2px rule, drawn instead as things you can hit with a
+   thumb. A slot is a row of its own between two rows -- dashed, in the
+   accent, so it reads as a gap waiting to be filled rather than as
+   another item in the list -- and it is a button, so it is reachable
+   with a finger, a mouse and the Tab key alike.
+
+   The gutter modifier is for the lists whose rows carry the page's own
+   1.75rem side padding (the task list and the four ReorderableList
+   pages); a board column has its own padding and the slot sits inside
+   it, so it takes none. */
+.reorder-slot {
+  list-style: none;
+}
+.reorder-slot-gutter {
+  padding: 0.25rem 1.75rem;
+}
+.reorder-slot-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  width: 100%;
+  min-height: 2.5rem;
+  padding: 0 0.75rem;
+  border: 1px dashed var(--accent);
+  border-radius: 6px;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+.reorder-slot-button:hover {
+  background: var(--surface-hover);
+}
+
+/* The bar that says a row is up and offers the way back down. Sticky
+   because the slot somebody wants can be a scroll away, and the way out
+   should not be. */
+.reorder-bar {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.4rem 1.75rem;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  color: var(--text-secondary);
+  font-size: 0.85rem;
+}
+.reorder-bar-note {
+  flex: 1;
+  min-width: 0;
+}
+
+/* Touch targets, wherever the pointer is a finger rather than a mouse:
+   the handle's icon is 1.25rem and a row's checkbox not much more, both
+   comfortably under the ~44px a thumb needs. The handle grows its *hit
+   area* rather than its box -- a pseudo-element centred on the icon --
+   so a phone's rows keep the layout they have while the thing you press
+   stops being a 20px target. */
+@media (pointer: coarse) {
+  .task-drag-handle {
+    position: relative;
+  }
+  .task-drag-handle::after {
+    content: "";
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 44px;
+    height: 44px;
+    transform: translate(-50%, -50%);
+  }
+  .task-select,
+  .select-all .MuiCheckbox-root,
+  .board-column-header .MuiCheckbox-root {
+    padding: 0.7rem;
+  }
+  .reorder-slot-button {
+    min-height: 2.75rem;
+  }
 }
 .task-number {
   color: var(--text-tertiary);
@@ -1670,6 +1780,8 @@ fieldset legend {
 :root[data-phone="true"] .task-list-toolbar,
 :root[data-phone="true"] .select-all,
 :root[data-phone="true"] .task-row,
+:root[data-phone="true"] .reorder-slot-gutter,
+:root[data-phone="true"] .reorder-bar,
 :root[data-phone="true"] .board-columns,
 :root[data-phone="true"] .repo-list-row,
 :root[data-phone="true"] .repo-page-header,
@@ -1719,15 +1831,13 @@ fieldset legend {
   flex-wrap: wrap;
   row-gap: 0.35rem;
 }
-/* Reordering the backlog is a drag, and a drag is a gesture this list
-   has no touch implementation of (the rows use the HTML5 drag events,
-   which a phone browser does not fire). The handle is hidden rather than
-   left as an affordance that does nothing when pressed -- and with it
-   the empty column held open beside the rows that never had one. */
-:root[data-phone="true"] .task-drag-handle,
-:root[data-phone="true"] .task-drag-placeholder {
-  display: none;
-}
+/* The handle used to be hidden here: reordering was a drag, a drag was
+   the HTML5 drag events, and a phone browser fires none of them, so the
+   handle was an affordance that did nothing when pressed. It does
+   something now -- one tap picks the row up and the list draws a "Move
+   here" slot at every position it could go to (ReorderPickup.jsx,
+   grain/task-23) -- so it stays, and so does the empty column held open
+   beside the rows that never had one. */
 /* A stacked task still has to read as nested, but 3.25rem of indent on
    a phone leaves its title about a third of the screen. */
 :root[data-phone="true"] .task-sublist .task-row {
