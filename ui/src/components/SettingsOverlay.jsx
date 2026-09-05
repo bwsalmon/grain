@@ -24,6 +24,7 @@ import api from "../api.js";
 import AgentKeysSection, { AGENT_KEY_SECRETS } from "./AgentKeysSection.jsx";
 import StateRepoPanel from "./StateRepoPanel.jsx";
 import CapabilitiesPanel from "./CapabilitiesPanel.jsx";
+import GeminiModelField from "./GeminiModelField.jsx";
 import GitHubTokensSection from "./GitHubTokensSection.jsx";
 import Overlay from "./Overlay.jsx";
 import SecretsPanel from "./SecretsPanel.jsx";
@@ -673,14 +674,11 @@ export default function SettingsOverlay({ onClose, onSaved, showError }) {
               credential below.
             </Typography>
             <AgentKeysSection settings={settings} showError={showError} />
-            <TextField
-              name="geminiModel"
-              label="Gemini model"
-              defaultValue={settings.geminiModel || ""}
-              autoComplete="off"
-              fullWidth
-              margin="normal"
-            />
+            {/* A picker over what this deployment's own agy says it can
+                run, not a fixed list and not a plain text box -- see
+                GeminiModelField, which stays typable through every way
+                that catalog can fail to load. */}
+            <GeminiModelField defaultValue={settings.geminiModel || ""} />
             <TextField
               name="claudeModel"
               label="Claude model"

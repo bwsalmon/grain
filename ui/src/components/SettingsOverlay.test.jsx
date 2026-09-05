@@ -129,7 +129,14 @@ describe("SettingsOverlay", () => {
     expect(screen.getByText("set")).toBeInTheDocument();
     // One chip per framework with no key stored: two of the three here.
     expect(screen.getAllByText("not set")).toHaveLength(2);
-    expect(api).toHaveBeenCalledTimes(1);
+    // Nothing is fetched for the chips themselves. The one other request
+    // this tab makes is the model picker's own catalog (grain/task-365,
+    // GeminiModelField), which is a subprocess on the daemon and so is
+    // deliberately not folded into the Settings response.
+    expect(api.mock.calls.map((call) => call[0])).toEqual([
+      "/api/settings",
+      "/api/agent-models",
+    ]);
   });
 
   it("only includes changed fields in the PUT payload", async () => {

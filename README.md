@@ -2105,6 +2105,35 @@ passed alongside `--effort`. `antigravity.DefaultModel` is one of the
 catalog names, and a deployment overriding it in Settings or with
 `-gemini-model` should name one too.
 
+"Should" was the whole of the enforcement for a while, and it is a poor
+place to put a vocabulary only the binary defines: the Settings field was
+free text, a name agy has never heard of saved without complaint, and the
+refusal arrived on the next dispatch as a run that failed before it
+started. So the pane asks the binary instead. `antigravity.Catalog` runs
+`agy models` and `agy --help` under the same private, API-key-authenticated
+`HOME` a run gets (minus the per-run MCP config and hooks a listing has no
+use for), parses the listing into ids, agy's own display labels, and the
+effort suffix each id carries, and reads the effort vocabulary out of
+`--effort`'s own usage line -- `low|medium|high` on 1.1.26, taken from the
+binary rather than hard-coded, because that is the word list the suffixes
+are read against. `GET /api/agent-models` serves it, `cmd/grain`'s
+`agyModelLister` wires it to the same `-agy-path` and Gemini key a
+dispatch resolves (caching a successful listing for five minutes, and a
+failure not at all), and the field becomes a drop-down grouped by model
+family.
+
+It is a drop-down that still takes a written-in value, and that is not a
+hedge: reading the catalog needs an installed agy, a working credential
+and quota to spend, and a listing shaped the way this parser expects.
+Every one of those can be false on a deployment that is otherwise fine --
+including on the very pane where the missing key would be pasted in. So
+`GET /api/agent-models` answers 200 in all cases, distinguishing "no
+lister is wired here" (`grain demo`, any UI not colocated with the daemon)
+from "one was asked and could not answer", and `GeminiModelField` renders
+the same typable field either way with the reason under it. A model name
+grain has never seen still saves and is still passed to agy exactly as
+typed; the picker only ever removes the need to remember one.
+
 ### Proving a live run actually gets the tools
 
 Where that private `HOME` puts the MCP config is a fact about agy's
