@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Button, Chip } from "@mui/material";
 import { knownRepos } from "../state.js";
+import { useListOrder } from "../listOrder.js";
 import TemplateOverlay from "./TemplateOverlay.jsx";
 import {
   ListEmpty,
@@ -8,16 +9,22 @@ import {
   ListSearchField,
   ListSortSelect,
   ListToolbar,
+  ReorderableList,
 } from "./ListPrimitives.jsx";
 import ItemGlyph from "./ItemGlyph.jsx";
 
 // SORTS mirrors TaskList's own toolbar Select (bwsalmon/agents#545): a
 // template has no state or backlog order to sort by (it is never itself
-// something that runs), so "manual" drops out and Name (A-Z) takes its
-// place as the default -- the one property every template is guaranteed
-// to have that reads meaningfully in a fixed order.
+// something that runs), so the task list's "Backlog order" drops out.
+// What stands in its place, and is the default, is a custom order of
+// this browser's own (listOrder.js, grain/task-327) -- dragged into
+// whatever order the templates are actually reached for, and falling
+// back to Name (A-Z) for every template nobody has dragged, which is the
+// order this list had before it could be dragged at all.
+const byName = (a, b) => a.name.localeCompare(b.name);
 const SORTS = {
-  name: { label: "Name (A–Z)", cmp: (a, b) => a.name.localeCompare(b.name) },
+  custom: { label: "Custom order", cmp: byName },
+  name: { label: "Name (A–Z)", cmp: byName },
   newest: {
     label: "Newest first",
     cmp: (a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0),
@@ -51,7 +58,7 @@ export default function TemplatesList({
   showError,
 }) {
   const [search, setSearch] = useState("");
-  const [sortBy, setSortBy] = useState("name");
+  const [sortBy, setSortBy] = useState("custom");
   const [showNew, setShowNew] = useState(false);
   // Behind both of the overlay's repo pickers: the read-only repos it
   // reads, and the one repo it can optionally be bound to. Same list the
@@ -66,7 +73,17 @@ export default function TemplatesList({
     t.title.toLowerCase().includes(q) ||
     (t.repo || "").toLowerCase().includes(q);
 
-  const visible = templates.filter(matches).sort(SORTS[sortBy].cmp);
+  // Every template, not just the ones the search leaves showing: what a
+  // drag stores has to know where the hidden rows sit too (listOrder.js).
+  const [ordered, move] = useListOrder(
+    "templates",
+    templates,
+    (t) => t.id,
+    byName,
+  );
+  const sorted =
+    sortBy === "custom" ? ordered : [...templates].sort(SORTS[sortBy].cmp);
+  const visible = sorted.filter(matches);
 
   return (
     <main>
@@ -100,13 +117,18 @@ export default function TemplatesList({
           />
         </ListToolbar>
       )}
-      <ul className="template-list">
-        {visible.map((tmpl) => (
-          <li
-            className="template-row"
-            key={tmpl.id}
+      <ReorderableList
+        className="template-list"
+        items={visible}
+        idOf={(tmpl) => tmpl.id}
+        reorder={sortBy === "custom" ? move : null}
+      >
+        {(tmpl, { handle, dragging }) => (
+          <div
+            className={`template-row${dragging ? " task-row-dragging" : ""}`}
             onClick={() => onOpenTemplate(tmpl.id)}
           >
+            {handle}
             <span className="template-name">{tmpl.name}</span>
             {tmpl.repo && (
               <Chip
@@ -115,9 +137,9 @@ export default function TemplatesList({
               />
             )}
             <span className="template-title hint">{tmpl.title}</span>
-          </li>
-        ))}
-      </ul>
+          </div>
+        )}
+      </ReorderableList>
       {templates.length === 0 && <ListEmpty>No templates.</ListEmpty>}
       {templates.length > 0 && visible.length === 0 && (
         <ListEmpty>No templates match your search.</ListEmpty>

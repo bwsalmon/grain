@@ -1,7 +1,7 @@
 import { useState } from "react";
-import { render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import SuitesList from "./SuitesList.jsx";
 import api from "../api.js";
 
@@ -83,8 +83,90 @@ function renderList(props = {}) {
 }
 
 describe("SuitesList", () => {
+  // The row order is this browser's own now (listOrder.js), so one
+  // test's drag must not be the next test's starting order.
+  beforeEach(() => {
+    localStorage.clear();
+  });
+
   afterEach(() => {
     api.mockReset();
+  });
+
+  // grain/task-327: this page had no toolbar at all, unlike the other
+  // four list pages -- it has their search box, their sort menu, and the
+  // drag-into-your-own-order the sort menu's first entry stands for.
+  describe("toolbar and custom order", () => {
+    const other = { ...suite, id: "suite-2", name: "Aardvark check" };
+    // The page renders two .template-lists -- the suites, then the runs
+    // -- and this is the first one's rows, in the order they are on
+    // screen.
+    const namesInOrder = () =>
+      [
+        ...document
+          .querySelectorAll(".template-list")[0]
+          .querySelectorAll(".template-name"),
+      ].map((e) => e.textContent);
+    const rowFor = (name) => suiteRow(name).closest("li");
+    const renderBoth = () => renderList({ suites: [other, suite] });
+
+    it("filters the suites by name", async () => {
+      const user = userEvent.setup();
+      renderBoth();
+
+      await user.type(screen.getByPlaceholderText("Search suites…"), "aardv");
+
+      expect(namesInOrder()).toEqual(["Aardvark check"]);
+    });
+
+    it("shows a message when a search matches no suite", async () => {
+      const user = userEvent.setup();
+      renderBoth();
+
+      await user.type(screen.getByPlaceholderText("Search suites…"), "nope");
+
+      expect(
+        screen.getByText("No suites match your search."),
+      ).toBeInTheDocument();
+    });
+
+    it("opens in name order, before anything has been dragged", () => {
+      renderBoth();
+      expect(namesInOrder()).toEqual(["Aardvark check", "Nightly sweep"]);
+    });
+
+    it("keeps a dragged row where it was dropped, across a remount", () => {
+      const { unmount } = renderBoth();
+
+      fireEvent.dragStart(rowFor("Nightly sweep"));
+      fireEvent.dragOver(rowFor("Aardvark check"));
+      fireEvent.drop(rowFor("Aardvark check"));
+
+      expect(namesInOrder()).toEqual(["Nightly sweep", "Aardvark check"]);
+      expect(api).not.toHaveBeenCalled();
+
+      unmount();
+      renderBoth();
+      expect(namesInOrder()).toEqual(["Nightly sweep", "Aardvark check"]);
+    });
+
+    // Every other order is one this page computes, so there is nowhere
+    // for a drop to land: the handles go with the gesture. The runs
+    // below never carry one at all -- a run is an event, and dragging it
+    // somewhere else would say nothing true about it.
+    it("withdraws the handles when the list is sorted some other way, and never gives the runs one", async () => {
+      const user = userEvent.setup();
+      renderBoth();
+
+      expect(document.querySelectorAll(".task-drag-handle")).toHaveLength(2);
+
+      await user.click(screen.getByLabelText("Sort"));
+      await user.click(
+        await screen.findByRole("option", { name: "Name (A–Z)" }),
+      );
+
+      expect(document.querySelectorAll(".task-drag-handle")).toHaveLength(0);
+    });
   });
 
   it("lists suites with their mode and template count", () => {

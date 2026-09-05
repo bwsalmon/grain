@@ -1,10 +1,36 @@
 import { useState } from "react";
 import { Button, Chip } from "@mui/material";
 import { knownRepos } from "../state.js";
+import { useListOrder } from "../listOrder.js";
 import SuiteOverlay from "./SuiteOverlay.jsx";
 import SuiteRunOverlay from "./SuiteRunOverlay.jsx";
-import { ListEmpty, ListHeader } from "./ListPrimitives.jsx";
+import {
+  ListEmpty,
+  ListHeader,
+  ListSearchField,
+  ListSortSelect,
+  ListToolbar,
+  ReorderableList,
+} from "./ListPrimitives.jsx";
 import ItemGlyph from "./ItemGlyph.jsx";
+
+// SORTS is the suites list's own toolbar Select, TemplatesList's own
+// (grain/task-327): a custom order of this browser's own by default,
+// falling back to Name (A-Z) -- the order this list had when it had no
+// toolbar at all -- for every suite nobody has dragged.
+//
+// It orders the suites, not the runs below them. A run is an event, and
+// the runs list is the record of them newest first as the API hands it
+// over; dragging one somewhere else would say nothing true about it.
+const byName = (a, b) => a.name.localeCompare(b.name);
+const SORTS = {
+  custom: { label: "Custom order", cmp: byName },
+  name: { label: "Name (A–Z)", cmp: byName },
+  templates: {
+    label: "Most templates",
+    cmp: (a, b) => b.items.length - a.items.length || byName(a, b),
+  },
+};
 
 // STATUS_LABELS/STATUS_COLORS render model.TaskSuiteRunStatus's own
 // three values the way a human reads them -- Chip's own "color" prop
@@ -52,10 +78,22 @@ export default function SuitesList({
 }) {
   const [showNew, setShowNew] = useState(false);
   const [running, setRunning] = useState(null); // suite id a "Run" click opened SuiteRunOverlay for, or true for the bare "+ Run" button
+  const [search, setSearch] = useState("");
+  const [sortBy, setSortBy] = useState("custom");
   const repoOptions = knownRepos(config, tasks);
   const editing = suites.find((s) => s.id === openSuiteId) || null;
 
   const suiteName = (id) => suites.find((s) => s.id === id)?.name || id;
+
+  const q = search.trim().toLowerCase();
+  // Every suite, not just the ones the search leaves showing: what a
+  // drag stores has to know where the hidden rows sit too (listOrder.js).
+  const [ordered, move] = useListOrder("suites", suites, (s) => s.id, byName);
+  const sorted =
+    sortBy === "custom" ? ordered : [...suites].sort(SORTS[sortBy].cmp);
+  const visible = sorted.filter(
+    (s) => q === "" || s.name.toLowerCase().includes(q),
+  );
 
   return (
     <main>
@@ -74,13 +112,33 @@ export default function SuitesList({
           </Button>
         }
       />
-      <ul className="template-list">
-        {suites.map((s) => (
-          <li
-            className="template-row"
-            key={s.id}
+      {suites.length > 0 && (
+        <ListToolbar>
+          <ListSearchField
+            placeholder="Search suites…"
+            value={search}
+            onChange={setSearch}
+          />
+          <ListSortSelect
+            id="suite-sort"
+            value={sortBy}
+            onChange={setSortBy}
+            options={SORTS}
+          />
+        </ListToolbar>
+      )}
+      <ReorderableList
+        className="template-list"
+        items={visible}
+        idOf={(s) => s.id}
+        reorder={sortBy === "custom" ? move : null}
+      >
+        {(s, { handle, dragging }) => (
+          <div
+            className={`template-row${dragging ? " task-row-dragging" : ""}`}
             onClick={() => onOpenSuite(s.id)}
           >
+            {handle}
             <span className="template-name">{s.name}</span>
             <Chip size="small" label={describeMode(s)} />
             <Chip
@@ -101,14 +159,17 @@ export default function SuitesList({
             >
               Run…
             </Button>
-          </li>
-        ))}
-      </ul>
+          </div>
+        )}
+      </ReorderableList>
       {suites.length === 0 && (
         <ListEmpty>
           No suites yet -- combine one or more templates into a suite to qualify
           a branch before merging it, sweep for bugs, and the like.
         </ListEmpty>
+      )}
+      {suites.length > 0 && visible.length === 0 && (
+        <ListEmpty>No suites match your search.</ListEmpty>
       )}
 
       <ListHeader

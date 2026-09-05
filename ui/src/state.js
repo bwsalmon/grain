@@ -419,6 +419,62 @@ export function repoRows(config, tasks) {
   return [...byRepo.values()].sort((a, b) => a.repo.localeCompare(b.repo));
 }
 
+// repoActivity is one repoRows row read as a single status, for the dot
+// the repos list draws ahead of a repo's name (grain/task-327) -- the
+// same "what is going on here, at a glance" a task row's own state badge
+// gives, for a thing that has no state of its own.
+//
+// Three answers, because two would be a lie either way round: a repo
+// with an agent working in it right now and a repo with a fortnight of
+// queued work nobody has started are both "active", and neither is the
+// repo whose every task is closed. So:
+//
+//   - running: at least one task is running there this moment. The dot
+//     is the same accent the running state uses everywhere else.
+//   - open: work outstanding, none of it moving -- queued, waiting on a
+//     human, failed, or sitting on the merge queue. A hollow ring, the
+//     queued badge's own figure.
+//   - idle: nothing but closed tasks, or no tasks at all. A grey dot.
+//
+// "Closed" is the only state counted as finished. "Queued for merge"
+// (STATE_LABELS.completed) reads like an ending and is not one -- the
+// task is waiting on the merge queue and can still come back needing a
+// human -- so a repo whose last task sits there is still open work.
+export function repoActivity(row) {
+  const running = row.counts?.running || 0;
+  if (running > 0) {
+    return {
+      key: "running",
+      state: "running",
+      label: "Active",
+      title: `Active -- ${running} task${running === 1 ? "" : "s"} running now`,
+    };
+  }
+  const open = row.total - (row.counts?.closed || 0);
+  if (open > 0) {
+    return {
+      key: "open",
+      state: "queued",
+      label: "Open",
+      title: `${open} open task${open === 1 ? "" : "s"}, none running right now`,
+    };
+  }
+  return {
+    key: "idle",
+    state: "closed",
+    label: "Idle",
+    title:
+      row.total > 0
+        ? "Idle -- every task here is closed"
+        : "Idle -- no tasks here yet",
+  };
+}
+
+// ACTIVITY_RANK is repoActivity's own three answers in the order the
+// repos list's "Active first" sort wants them: what is moving, then what
+// is waiting, then what is done.
+export const ACTIVITY_RANK = { running: 0, open: 1, idle: 2 };
+
 // knownRepos is the option list behind the repo dropdowns
 // (bwsalmon/agents#447): config.targetRepos (what CreateTask actually
 // enforces a task's repo against, when the deployment restricts it) union

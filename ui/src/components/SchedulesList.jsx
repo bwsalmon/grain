@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Button, Chip } from "@mui/material";
 import { knownRepos } from "../state.js";
+import { useListOrder } from "../listOrder.js";
 import ScheduleOverlay from "./ScheduleOverlay.jsx";
 import {
   ListEmpty,
@@ -8,18 +9,29 @@ import {
   ListSearchField,
   ListSortSelect,
   ListToolbar,
+  ReorderableList,
 } from "./ListPrimitives.jsx";
 import ItemGlyph from "./ItemGlyph.jsx";
 
 // SORTS mirrors TaskList's own toolbar Select (bwsalmon/agents#547): a
 // schedule has no backlog order to sort by (it is never itself dispatched
-// against other schedules), so "manual" drops out and Title (A-Z) takes
-// its place as the default, TemplatesList's own precedent for a list with
-// no backlog of its own.
+// against other schedules), so the task list's "Backlog order" drops out
+// and a custom order of this browser's own takes its place as the
+// default (listOrder.js, grain/task-327), falling back to Title (A-Z) --
+// what this list was sorted by before it could be dragged --  for every
+// schedule nobody has moved. TemplatesList draws the same split.
+//
+// "Next run" is the one order here that is about a schedule rather than
+// about its name: what fires next, which is the question a schedules
+// page is usually open to answer.
+const byTitle = (a, b) => a.title.localeCompare(b.title);
 const SORTS = {
-  title: {
-    label: "Title (A–Z)",
-    cmp: (a, b) => a.title.localeCompare(b.title),
+  custom: { label: "Custom order", cmp: byTitle },
+  title: { label: "Title (A–Z)", cmp: byTitle },
+  next: {
+    label: "Next run",
+    cmp: (a, b) =>
+      new Date(a.nextRunAt || 0) - new Date(b.nextRunAt || 0) || byTitle(a, b),
   },
   newest: {
     label: "Newest first",
@@ -59,7 +71,7 @@ export default function SchedulesList({
   showError,
 }) {
   const [search, setSearch] = useState("");
-  const [sortBy, setSortBy] = useState("title");
+  const [sortBy, setSortBy] = useState("custom");
   const [showNew, setShowNew] = useState(false);
   const repoOptions = knownRepos(config, tasks);
   const editing = schedules.find((s) => s.id === openScheduleId) || null;
@@ -70,7 +82,17 @@ export default function SchedulesList({
     s.title.toLowerCase().includes(q) ||
     s.repo.toLowerCase().includes(q);
 
-  const visible = schedules.filter(matches).sort(SORTS[sortBy].cmp);
+  // Every schedule, not just the ones the search leaves showing: what a
+  // drag stores has to know where the hidden rows sit too (listOrder.js).
+  const [ordered, move] = useListOrder(
+    "schedules",
+    schedules,
+    (s) => s.id,
+    byTitle,
+  );
+  const sorted =
+    sortBy === "custom" ? ordered : [...schedules].sort(SORTS[sortBy].cmp);
+  const visible = sorted.filter(matches);
 
   return (
     <main>
@@ -104,40 +126,53 @@ export default function SchedulesList({
           />
         </ListToolbar>
       )}
-      <ul className="schedules-list">
-        {visible.map((s) => (
-          <li
-            className="schedule-row"
-            key={s.id}
+      <ReorderableList
+        className="schedules-list"
+        items={visible}
+        idOf={(s) => s.id}
+        reorder={sortBy === "custom" ? move : null}
+      >
+        {(s, { handle, dragging }) => (
+          <div
+            className={`schedule-row${dragging ? " task-row-dragging" : ""}`}
             onClick={() => onOpenSchedule(s.id)}
           >
-            <div className="schedule-summary">
-              <span className="schedule-title">{s.title}</span>
-              <Chip size="small" label={s.repo} />
-              <Chip size="small" label={describeRecurrence(s.recurrence)} />
-              {s.suiteId && (
-                <Chip
-                  size="small"
-                  variant="outlined"
-                  label={`Suite: ${s.suiteName || s.suiteId}`}
-                />
-              )}
-              {s.templateId && (
-                <Chip
-                  size="small"
-                  variant="outlined"
-                  label={`Template: ${s.templateName || s.templateId}`}
-                />
-              )}
-              {!s.enabled && <Chip size="small" color="error" label="Paused" />}
+            {/* Two lines of text, so the handle is a column beside them
+                rather than the first thing on the summary line -- the
+                same place it sits on a one-line row, held there by
+                .schedule-row's own flex (style.css). */}
+            {handle}
+            <div className="schedule-body">
+              <div className="schedule-summary">
+                <span className="schedule-title">{s.title}</span>
+                <Chip size="small" label={s.repo} />
+                <Chip size="small" label={describeRecurrence(s.recurrence)} />
+                {s.suiteId && (
+                  <Chip
+                    size="small"
+                    variant="outlined"
+                    label={`Suite: ${s.suiteName || s.suiteId}`}
+                  />
+                )}
+                {s.templateId && (
+                  <Chip
+                    size="small"
+                    variant="outlined"
+                    label={`Template: ${s.templateName || s.templateId}`}
+                  />
+                )}
+                {!s.enabled && (
+                  <Chip size="small" color="error" label="Paused" />
+                )}
+              </div>
+              <div className="schedule-meta hint">
+                Next run {formatWhen(s.nextRunAt)}
+                {s.lastRunAt && <> · last ran {formatWhen(s.lastRunAt)}</>}
+              </div>
             </div>
-            <div className="schedule-meta hint">
-              Next run {formatWhen(s.nextRunAt)}
-              {s.lastRunAt && <> · last ran {formatWhen(s.lastRunAt)}</>}
-            </div>
-          </li>
-        ))}
-      </ul>
+          </div>
+        )}
+      </ReorderableList>
       {schedules.length === 0 && <ListEmpty>No schedules yet.</ListEmpty>}
       {schedules.length > 0 && visible.length === 0 && (
         <ListEmpty>No schedules match your search.</ListEmpty>

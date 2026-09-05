@@ -1,6 +1,6 @@
-import { render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import RepoList from "./RepoList.jsx";
 import api from "../api.js";
 
@@ -64,6 +64,12 @@ function renderList(overrides = {}) {
 }
 
 describe("RepoList", () => {
+  // The row order is this browser's own now (listOrder.js), so one
+  // test's drag must not be the next test's starting order.
+  beforeEach(() => {
+    localStorage.clear();
+  });
+
   afterEach(() => {
     api.mockReset();
   });
@@ -290,6 +296,160 @@ describe("RepoList", () => {
     expect(api).not.toHaveBeenCalled();
     expect(onRefreshConfig).not.toHaveBeenCalled();
     vi.unstubAllGlobals();
+  });
+
+  // grain/task-327: a row opens with a status dot, so a repo with an
+  // agent working in it right now is visible without reading its counts.
+  describe("status dot", () => {
+    it("calls a repo with a running task active", () => {
+      renderList();
+
+      const row = screen.getByText("acme/widgets").closest("li");
+      expect(
+        within(row).getByLabelText("Active -- 1 task running now"),
+      ).toBeInTheDocument();
+    });
+
+    // "Queued for merge" is not an ending: the task is still waiting on
+    // the merge queue, so the repo still has work outstanding.
+    it("calls a repo with work but nothing running open", () => {
+      renderList();
+
+      const row = screen.getByText("acme/gadgets").closest("li");
+      expect(
+        within(row).getByLabelText("1 open task, none running right now"),
+      ).toBeInTheDocument();
+    });
+
+    it("calls a repo whose every task is closed idle", () => {
+      renderList({
+        tasks: [
+          {
+            id: "9",
+            title: "Old news",
+            repo: "acme/done",
+            state: "closed",
+            blocked: false,
+            capabilities: [],
+          },
+        ],
+      });
+
+      const row = screen.getByText("acme/done").closest("li");
+      expect(
+        within(row).getByLabelText("Idle -- every task here is closed"),
+      ).toBeInTheDocument();
+    });
+
+    it("calls a repo with no tasks at all idle", () => {
+      renderList({ config: { targetRepos: ["acme/fresh"] }, tasks: [] });
+
+      const row = screen.getByText("acme/fresh").closest("li");
+      expect(
+        within(row).getByLabelText("Idle -- no tasks here yet"),
+      ).toBeInTheDocument();
+    });
+  });
+
+  // grain/task-327: the rows can be dragged into an order of this
+  // browser's own -- a display order, stored here and nowhere else,
+  // which is why nothing is posted to the API when one moves.
+  describe("custom order", () => {
+    const namesInOrder = () =>
+      [...document.querySelectorAll(".repo-list-name")].map(
+        (e) => e.textContent,
+      );
+
+    const rowFor = (repo) => screen.getByText(repo).closest("li");
+
+    it("opens in alphabetical order, before anything has been dragged", () => {
+      renderList();
+      expect(namesInOrder()).toEqual(["acme/gadgets", "acme/widgets"]);
+    });
+
+    it("keeps a dragged row where it was dropped, across a remount", () => {
+      const { unmount } = render(
+        <RepoList
+          tasks={tasks}
+          config={null}
+          onOpenRepo={vi.fn()}
+          onRefreshConfig={vi.fn()}
+          showError={vi.fn()}
+        />,
+      );
+
+      fireEvent.dragStart(rowFor("acme/widgets"));
+      fireEvent.dragOver(rowFor("acme/gadgets"));
+      fireEvent.drop(rowFor("acme/gadgets"));
+
+      expect(namesInOrder()).toEqual(["acme/widgets", "acme/gadgets"]);
+      expect(api).not.toHaveBeenCalled();
+
+      unmount();
+      renderList();
+      expect(namesInOrder()).toEqual(["acme/widgets", "acme/gadgets"]);
+    });
+
+    it("drops a row at the very end of the list", () => {
+      renderList();
+
+      fireEvent.dragStart(rowFor("acme/gadgets"));
+      // The trailing drop zone only renders once a drag is in flight.
+      fireEvent.dragOver(document.querySelector(".repo-list .task-drop-end"));
+      fireEvent.drop(document.querySelector(".repo-list .task-drop-end"));
+
+      expect(namesInOrder()).toEqual(["acme/widgets", "acme/gadgets"]);
+    });
+
+    it("clicking the drag handle does not open the repo", async () => {
+      const onOpenRepo = vi.fn();
+      const user = userEvent.setup();
+      renderList({ onOpenRepo });
+
+      await user.click(document.querySelector(".task-drag-handle"));
+
+      expect(onOpenRepo).not.toHaveBeenCalled();
+    });
+
+    // Every other order is one this page computes, so there is nowhere
+    // for a drop to land: the handles go with the gesture.
+    it("withdraws the handles when the list is sorted some other way", async () => {
+      const user = userEvent.setup();
+      renderList();
+
+      expect(document.querySelectorAll(".task-drag-handle")).toHaveLength(2);
+
+      await user.click(screen.getByLabelText("Sort"));
+      await user.click(
+        await screen.findByRole("option", { name: "Name (A–Z)" }),
+      );
+
+      expect(document.querySelectorAll(".task-drag-handle")).toHaveLength(0);
+    });
+
+    it("sorts the busiest repo first when asked for most tasks", async () => {
+      const user = userEvent.setup();
+      renderList();
+
+      await user.click(screen.getByLabelText("Sort"));
+      await user.click(
+        await screen.findByRole("option", { name: "Most tasks" }),
+      );
+
+      expect(namesInOrder()).toEqual(["acme/widgets", "acme/gadgets"]);
+    });
+
+    it("sorts the repo with a run in flight first when asked for active first", async () => {
+      const user = userEvent.setup();
+      renderList();
+
+      await user.click(screen.getByLabelText("Sort"));
+      await user.click(
+        await screen.findByRole("option", { name: "Active first" }),
+      );
+
+      expect(namesInOrder()).toEqual(["acme/widgets", "acme/gadgets"]);
+    });
   });
 
   it("does not confirm an add that only widens an allowlist that already restricts", async () => {
