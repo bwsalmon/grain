@@ -907,26 +907,326 @@ describe("DetailOverlay", () => {
     vi.unstubAllGlobals();
   });
 
-  it("shows declared repo, base and auto-merge", () => {
+  // grain/task-328: repo, base and auto-merge are the controls that set
+  // them now, not three static rows under Declared -- so the pane shows
+  // each of them as what the task currently says, ready to be changed.
+  it("seeds the repo picker, the base box and the auto-merge box from the task", () => {
     render(
       <DetailOverlay
         task={{
           ...baseTask,
           repo: "acme/widgets",
-          base: "main",
+          base: "release/2",
           autoMerge: true,
         }}
+        tasks={[]}
+        config={{ ...config, targetRepos: ["acme/widgets", "acme/other"] }}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={vi.fn()}
+        showError={() => {}}
+      />,
+    );
+
+    expect(screen.getByLabelText("Repo")).toHaveValue("acme/widgets");
+    expect(screen.getByLabelText("Base branch")).toHaveValue("release/2");
+    expect(
+      screen.getByRole("checkbox", { name: /Auto-merge once checks pass/ }),
+    ).toBeChecked();
+  });
+
+  it("patches the repo when a different one is picked", async () => {
+    const user = userEvent.setup();
+    render(
+      <DetailOverlay
+        task={{ ...baseTask, repo: "acme/widgets" }}
+        tasks={[]}
+        config={{ ...config, targetRepos: ["acme/widgets", "acme/other"] }}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={vi.fn()}
+        showError={() => {}}
+      />,
+    );
+
+    await user.selectOptions(screen.getByLabelText("Repo"), "acme/other");
+
+    expect(api).toHaveBeenCalledWith("/api/tasks/12", {
+      method: "PATCH",
+      body: JSON.stringify({ repo: "acme/other" }),
+    });
+  });
+
+  // The picker keeps its own uncontrolled value, so a refused edit has to
+  // put it back on the repo the task actually has -- otherwise it goes on
+  // showing a repo nothing ever accepted, with no server change to
+  // correct it.
+  it("puts the repo picker back when the server refuses the edit", async () => {
+    const showError = vi.fn();
+    const user = userEvent.setup();
+    api.mockRejectedValueOnce(new Error("repo: not a repo"));
+    render(
+      <DetailOverlay
+        task={{ ...baseTask, repo: "acme/widgets" }}
+        tasks={[]}
+        config={{ ...config, targetRepos: ["acme/widgets", "acme/other"] }}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={vi.fn()}
+        showError={showError}
+      />,
+    );
+
+    await user.selectOptions(screen.getByLabelText("Repo"), "acme/other");
+
+    expect(showError).toHaveBeenCalled();
+    expect(await screen.findByLabelText("Repo")).toHaveValue("acme/widgets");
+  });
+
+  // Saved when the box is left, not per keystroke: a branch name typed
+  // into a field that PATCHed on change would be sent one letter at a
+  // time and refused all the way to the last one.
+  it("patches the base branch once the box is left", async () => {
+    const user = userEvent.setup();
+    render(
+      <DetailOverlay
+        task={{ ...baseTask, repo: "acme/widgets", base: "main" }}
         tasks={[]}
         config={config}
         onClose={() => {}}
         onOpenTask={() => {}}
         act={vi.fn()}
+        showError={() => {}}
       />,
     );
 
-    expect(screen.getByText("acme/widgets")).toBeInTheDocument();
-    expect(screen.getByText("main")).toBeInTheDocument();
-    expect(screen.getByText("true")).toBeInTheDocument();
+    const box = screen.getByLabelText("Base branch");
+    await user.clear(box);
+    await user.type(box, "release/3");
+    expect(api).not.toHaveBeenCalled();
+
+    await user.tab();
+
+    expect(api).toHaveBeenCalledExactlyOnceWith("/api/tasks/12", {
+      method: "PATCH",
+      body: JSON.stringify({ base: "release/3" }),
+    });
+  });
+
+  it("sends nothing when the base box is left unchanged", async () => {
+    const user = userEvent.setup();
+    render(
+      <DetailOverlay
+        task={{ ...baseTask, repo: "acme/widgets", base: "main" }}
+        tasks={[]}
+        config={config}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={vi.fn()}
+        showError={() => {}}
+      />,
+    );
+
+    await user.click(screen.getByLabelText("Base branch"));
+    await user.tab();
+
+    expect(api).not.toHaveBeenCalled();
+  });
+
+  // The same suggestion NewTaskOverlay prefills a new task's base with
+  // (lastBaseForRepo), offered rather than applied: changing the repo is
+  // the moment the base already on the task stops meaning anything, and
+  // rewriting it unasked would be an edit nobody made.
+  it("offers the base other tasks on a newly picked repo branch off", async () => {
+    const user = userEvent.setup();
+    render(
+      <DetailOverlay
+        task={{ ...baseTask, repo: "acme/widgets", base: "main" }}
+        tasks={[
+          {
+            id: "13",
+            repo: "acme/other",
+            base: "release/2",
+            state: "queued",
+            createdAt: "2026-01-02T00:00:00Z",
+          },
+        ]}
+        config={{ ...config, targetRepos: ["acme/widgets", "acme/other"] }}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={vi.fn()}
+        showError={() => {}}
+      />,
+    );
+
+    await user.selectOptions(screen.getByLabelText("Repo"), "acme/other");
+    await user.click(await screen.findByRole("button", { name: "use it" }));
+
+    expect(api).toHaveBeenLastCalledWith("/api/tasks/12", {
+      method: "PATCH",
+      body: JSON.stringify({ base: "release/2" }),
+    });
+  });
+
+  it("suggests no base for a repo nothing else has a task against", async () => {
+    const user = userEvent.setup();
+    render(
+      <DetailOverlay
+        task={{ ...baseTask, repo: "acme/widgets", base: "main" }}
+        tasks={[]}
+        config={{ ...config, targetRepos: ["acme/widgets", "acme/other"] }}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={vi.fn()}
+        showError={() => {}}
+      />,
+    );
+
+    await user.selectOptions(screen.getByLabelText("Repo"), "acme/other");
+
+    expect(
+      screen.queryByRole("button", { name: "use it" }),
+    ).not.toBeInTheDocument();
+  });
+
+  // An edit can name a repo off the deployment's list -- the picker's
+  // "Other…" takes any text, and ui.Client.UpdateTask does not park the
+  // task the way filing one off the list does -- so the pane is where
+  // that gets said, rather than a dispatch that fails with nothing to
+  // clone.
+  it("warns when the target repo is off the deployment's list", () => {
+    render(
+      <DetailOverlay
+        task={{ ...baseTask, repo: "acme/elsewhere" }}
+        tasks={[]}
+        config={{ ...config, targetRepos: ["acme/widgets"] }}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={vi.fn()}
+        showError={() => {}}
+      />,
+    );
+
+    expect(
+      screen.getByText(/not on this deployment's target repo list/),
+    ).toBeInTheDocument();
+  });
+
+  it("leaves that warning off a deployment with no repo list at all", () => {
+    render(
+      <DetailOverlay
+        task={{ ...baseTask, repo: "acme/elsewhere" }}
+        tasks={[]}
+        config={config}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={vi.fn()}
+        showError={() => {}}
+      />,
+    );
+
+    expect(
+      screen.queryByText(/not on this deployment's target repo list/),
+    ).not.toBeInTheDocument();
+  });
+
+  // The checkout is made once, when the run starts
+  // (orchestrator.prepareCheckout), so this is the opposite of the
+  // read-only repos picker below it: nothing about a live sandbox
+  // changes, and the edit is for the next run.
+  it("says a repo or base edit does not reach the run in flight", () => {
+    render(
+      <DetailOverlay
+        task={{ ...baseTask, state: "running", repo: "acme/widgets" }}
+        tasks={[]}
+        config={config}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={vi.fn()}
+        showError={() => {}}
+      />,
+    );
+
+    expect(
+      screen.getByText(/reaches this task's next run rather than the one/),
+    ).toBeInTheDocument();
+  });
+
+  // ui.Client.Submit is `task.AutoMerge = true` and nothing else, so the
+  // box and the button are one control: ticking it is what Submit does,
+  // and Submit has nothing left to do once it is ticked.
+  it("submits the task by ticking auto-merge", async () => {
+    const act = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <DetailOverlay
+        task={{ ...baseTask, pullRequest: "acme/widgets#1", autoMerge: false }}
+        tasks={[]}
+        config={config}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={act}
+        showError={() => {}}
+      />,
+    );
+
+    await user.click(
+      screen.getByRole("checkbox", { name: /Auto-merge once checks pass/ }),
+    );
+
+    act.mock.calls[0][0]();
+    expect(api).toHaveBeenCalledWith("/api/tasks/12", {
+      method: "PATCH",
+      body: JSON.stringify({ autoMerge: true }),
+    });
+  });
+
+  // The half Submit never had: taking a task back off the merge queue.
+  it("takes a task off the merge queue by unticking auto-merge", async () => {
+    const act = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <DetailOverlay
+        task={{ ...baseTask, pullRequest: "acme/widgets#1", autoMerge: true }}
+        tasks={[]}
+        config={config}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={act}
+        showError={() => {}}
+      />,
+    );
+
+    await user.click(
+      screen.getByRole("checkbox", { name: /Auto-merge once checks pass/ }),
+    );
+
+    act.mock.calls[0][0]();
+    expect(api).toHaveBeenCalledWith("/api/tasks/12", {
+      method: "PATCH",
+      body: JSON.stringify({ autoMerge: false }),
+    });
+  });
+
+  // Auto-merge is read after the run, not at checkout, so unlike the
+  // repo and base above it is the one edit here that does count for the
+  // run already in flight.
+  it("says an auto-merge edit still counts for the run in flight", () => {
+    render(
+      <DetailOverlay
+        task={{ ...baseTask, state: "running", repo: "acme/widgets" }}
+        tasks={[]}
+        config={config}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={vi.fn()}
+        showError={() => {}}
+      />,
+    );
+
+    expect(
+      screen.getByText(/still counts for the run in flight/),
+    ).toBeInTheDocument();
   });
 
   // grain/task-294: the task's read-only repos are the picker's own

@@ -26,6 +26,7 @@ import {
   completionPhase,
   frameworkLabel,
   knownRepos,
+  lastBaseForRepo,
   orphanedPullRequest,
   runActivity,
   stateLabel,
@@ -38,6 +39,7 @@ import Markdown from "./Markdown.jsx";
 import Overlay from "./Overlay.jsx";
 import PromptOverlay from "./PromptOverlay.jsx";
 import ReadOnlyReposField from "./ReadOnlyReposField.jsx";
+import RepoField from "./RepoField.jsx";
 import StateDot, { isLiveRunning } from "./StateDot.jsx";
 import TaskPicker from "./TaskPicker.jsx";
 
@@ -227,7 +229,13 @@ export default function DetailOverlay({
           )}
 
           <Actions t={t} config={config} act={act} />
-          <Declared t={t} />
+          <Target
+            t={t}
+            tasks={tasks}
+            config={config}
+            act={act}
+            showError={showError}
+          />
           <ReadOnlyRepos
             t={t}
             tasks={tasks}
@@ -235,6 +243,7 @@ export default function DetailOverlay({
             act={act}
             showError={showError}
           />
+          <Declared t={t} />
           <CapabilityToggles t={t} config={config} act={act} />
           <Dependencies t={t} tasks={tasks} act={act} onOpenTask={onOpenTask} />
         </div>
@@ -252,10 +261,10 @@ export default function DetailOverlay({
 // to reach one already running, not just show up here; PATCH /api/tasks/
 // {id} (ui.Client.UpdateTask) is what records that as an addendum
 // comment (noteEdit) for orchestrator.addendaPoller to pick up. Every
-// other UpdateTaskRequest field (repo, base, auto-merge, reads) already
-// has its own editor on this same page (Declared's own three rows have
-// none yet, but CapabilityToggles, Dependencies and ReadOnlyRepos cover
-// the three that do), so this form does not attempt to cover them too.
+// other UpdateTaskRequest field has its own editor on this same page --
+// repo and base in Target, auto-merge in Actions, and reads,
+// capabilities and dependencies in the three pickers below them -- so
+// this form does not attempt to cover them too.
 function EditTaskForm({ t, templates, act, onDone }) {
   const [title, setTitle] = useState(t.title);
   const [description, setDescription] = useState(t.description || "");
@@ -354,15 +363,16 @@ function pullRequestUrl(ref) {
 // Real columns on the task now, not directive lines parsed out of a
 // body -- so they are rendered as fields rather than as the /repo,
 // /base, /auto-merge syntax they used to have to be written in.
+//
+// What is left here is what nothing on this page can edit yet: the
+// sandbox shape, the framework, the prompt extension, the review and the
+// interactive flag. Every row this used to open with -- repo, base,
+// reads, auto-merge -- is now the control that sets it, above (Target,
+// ReadOnlyRepos) or in Actions (the auto-merge checkbox), and a static
+// row repeating one of them would be the same field on screen twice in a
+// 260px column.
 function Declared({ t }) {
   const rows = [];
-  if (t.repo) rows.push(["Repo", t.repo]);
-  if (t.base) rows.push(["Base", t.base]);
-  // No "Reads" row: read-only repos have their own editor below this
-  // (ReadOnlyRepos), whose chips already say which they are -- a static
-  // row saying the same thing above it would be the one field on this
-  // page listed twice.
-  rows.push(["Auto-merge", String(t.autoMerge)]);
   // bwsalmon/agents#534, grain/task-41: a per-task sandbox shape
   // override, shown only when set -- most tasks use the deployment
   // default and have none of the three fields, the same "0 means unset"
@@ -408,6 +418,11 @@ function Declared({ t }) {
   // ones that are -- the same "shown only when set" treatment the
   // sandbox override rows above already get.
   if (t.interactive) rows.push(["Mode", "Interactive"]);
+  // Most tasks override none of the above, so this block is usually
+  // empty now that the four fields every task has have moved to their
+  // own editors -- an empty bordered box saying nothing is worse than no
+  // box at all.
+  if (rows.length === 0) return null;
   return (
     <div className="declared">
       {rows.map(([key, value]) => (
@@ -417,6 +432,205 @@ function Declared({ t }) {
         </div>
       ))}
     </div>
+  );
+}
+
+// Target is the repo and base branch a task's runs check out
+// (model.Task.Target and .Base), as the two fields that set them rather
+// than as the two rows Declared used to open with: the same picker
+// NewTaskOverlay files a task through (RepoField, "Other…" escape hatch
+// and all) and a plain box for the branch, each PATCHing
+// /api/tasks/{id} as it is settled.
+//
+// Unlike the read-only repos below, an edit here reaches nothing that is
+// already running. The checkout is made once, from the repo and base as
+// they stood when the run started (orchestrator.prepareCheckout), so a
+// sandbox already up keeps the clone it was built with whatever this
+// says afterwards. What an edit does reach is the task's *next* run --
+// a retry, or a re-dispatch after a failure -- which is the case worth
+// being able to fix without filing the task again: a task pointed at a
+// base branch that has since been merged and deleted fails every attempt
+// until somebody corrects it, and until now the only correction was a
+// new task. The hint under the fields says that on a running task, the
+// same way ReadOnlyRepos says the opposite where the opposite is true.
+//
+// Saved on commit rather than on change (RepoField's own onCommit, and
+// blur or Enter on the branch box): every edit here is a request, and a
+// text field that saved per keystroke would send one PATCH per letter of
+// a branch name and have the server refuse all but the last.
+function Target({ t, tasks, config, act, showError }) {
+  const serverRepo = t.repo || "";
+  const serverBase = t.base || "";
+  // Held locally and re-seeded from the task the way ReadOnlyRepos holds
+  // its own chips, and for the same reason: the box shows what is being
+  // typed into it, which is not the task's base until it is committed.
+  // Keyed on the value rather than on the object, since t is a fresh
+  // object on every poll.
+  const [base, setBase] = useState(serverBase);
+  useEffect(() => {
+    setBase(serverBase);
+  }, [serverBase]);
+  // repoSeed exists to undo a refused repo edit. RepoField keeps its own
+  // uncontrolled <select>/<input> (defaultValue), so a rejected PATCH
+  // would otherwise leave it displaying a repo the task does not have,
+  // with nothing to correct it: the server value has not changed, so
+  // re-rendering shows the same field in the same state. Bumping this
+  // changes the key, which remounts the picker on the repo the task
+  // actually has.
+  const [repoSeed, setRepoSeed] = useState(0);
+  // suggestFor is the repo this pane last changed the task to, and the
+  // only thing the base suggestion below is offered for -- see it.
+  const [suggestFor, setSuggestFor] = useState("");
+
+  // act() refreshes the task once the edit lands, as every other editor
+  // on this page does. The failure half is handled here rather than left
+  // to act(), because a refused edit has to put the field back first:
+  // both controls are already showing the value that was sent by the
+  // time the server answers.
+  const patch = async (body, undo) => {
+    try {
+      await api(`/api/tasks/${t.id}`, {
+        method: "PATCH",
+        body: JSON.stringify(body),
+      });
+    } catch (err) {
+      undo();
+      showError(err);
+      return false;
+    }
+    await act(() => Promise.resolve(), t.id);
+    return true;
+  };
+
+  const changeRepo = async (picked) => {
+    const repo = picked.trim();
+    // "" is what an emptied text box comes back as, and ui.Client.
+    // UpdateTask refuses it outright ("a task with no target cannot be
+    // dispatched") -- there is no way to un-target a task, so this is a
+    // no-op rather than a request that could only ever fail. The picker
+    // itself is `required` whenever the task has a repo, so its "—" is
+    // not even offered there; a task filed with no repo at all keeps it,
+    // as the honest display of a task that has none.
+    if (repo === "" || repo === serverRepo) return;
+    if (!(await patch({ repo }, () => setRepoSeed((n) => n + 1)))) return;
+    setSuggestFor(repo);
+  };
+
+  const commitBase = () => {
+    const next = base.trim();
+    if (next === serverBase) return;
+    setBase(next);
+    setSuggestFor("");
+    patch({ base: next }, () => setBase(serverBase));
+  };
+
+  // The suggestion NewTaskOverlay prefills "Base branch" with
+  // (lastBaseForRepo, bwsalmon/agents#641), offered here instead of
+  // applied: on a task that already has a base, silently rewriting it
+  // because the repo changed would be an edit nobody made. Offered only
+  // after a repo change made in this pane, because that is the moment
+  // the base already on the task stops being evidence of anything -- a
+  // standing "other tasks here branch off release/2" note on a task
+  // nobody has touched would be second-guessing a branch somebody chose.
+  //
+  // Computed over the other tasks, never this one: this task is usually
+  // the most recent against its own repo, so counting it would only ever
+  // suggest back the base it already has.
+  const others = (tasks || []).filter((other) => other.id !== t.id);
+  const suggestion = suggestFor ? lastBaseForRepo(others, suggestFor) : "";
+  // An empty suggestion is never offered, though lastBaseForRepo returns
+  // one for a repo whose last task deliberately used the default branch:
+  // "" is what an empty box already says, and an offer to clear a branch
+  // somebody typed reads as a correction rather than a shortcut.
+  const suggested = suggestion !== "" && suggestion !== base;
+
+  const applySuggestion = () => {
+    setBase(suggestion);
+    setSuggestFor("");
+    patch({ base: suggestion }, () => setBase(serverBase));
+  };
+
+  // config.targetRepos empty is an unrestricted deployment (ui.
+  // targetAllowed), where there is nothing to be off. Said here because
+  // this picker's "Other…" can name any repo at all and an edit does not
+  // park the task the way filing one off the list does (ui.Client.
+  // parkOffAllowlist runs on CreateTask alone), so nothing else on the
+  // way would mention it -- the task would simply fail its next dispatch
+  // with nothing to clone.
+  const allowlist = config?.targetRepos || [];
+  const offAllowlist =
+    serverRepo !== "" &&
+    allowlist.length > 0 &&
+    !allowlist.includes(serverRepo);
+
+  return (
+    <fieldset>
+      <legend>Target</legend>
+      {/* Wrapped in a label the way NewTaskOverlay wraps the same field:
+          RepoField renders a bare <select>/<input> with no caption of its
+          own, and in a column of MUI fields that all carry one it would
+          otherwise be the only control nothing names. */}
+      <Box component="label" sx={{ display: "block" }}>
+        <Typography
+          variant="caption"
+          color="text.secondary"
+          sx={{ display: "block", mb: 0.5 }}
+        >
+          Repo
+        </Typography>
+        <RepoField
+          key={`${serverRepo}#${repoSeed}`}
+          name="repo"
+          options={knownRepos(config, tasks)}
+          defaultValue={serverRepo}
+          required={serverRepo !== ""}
+          onCommit={changeRepo}
+        />
+      </Box>
+      <TextField
+        label="Base branch"
+        placeholder="main"
+        value={base}
+        onChange={(e) => setBase(e.target.value)}
+        // Enter commits by blurring rather than by saving directly, so
+        // the two ways of leaving this box cannot both fire for one edit.
+        onBlur={commitBase}
+        onKeyDown={(e) => {
+          if (e.key !== "Enter") return;
+          e.preventDefault();
+          e.target.blur();
+        }}
+        helperText={
+          suggested ? (
+            <>
+              other tasks on {suggestFor} branch off {suggestion} --{" "}
+              <Link component="button" type="button" onClick={applySuggestion}>
+                use it
+              </Link>
+            </>
+          ) : (
+            "empty starts from the repo's default branch"
+          )
+        }
+        autoComplete="off"
+        fullWidth
+        size="small"
+        sx={{ mt: 1.5 }}
+      />
+      {offAllowlist && (
+        <Alert severity="warning" sx={{ mt: 1, fontSize: "0.8rem" }}>
+          {serverRepo} is not on this deployment&apos;s target repo list, so
+          nothing here can clone it, push to it or open a pull request against
+          it. An operator widens targetRepos under Settings.
+        </Alert>
+      )}
+      {t.state === "running" && (
+        <p className="hint">
+          This run&apos;s sandbox was checked out when it started, so a change
+          here reaches this task&apos;s next run rather than the one in flight.
+        </p>
+      )}
+    </fieldset>
   );
 }
 
@@ -578,6 +792,60 @@ function Actions({ t, config, act }) {
         >
           Submit
         </Button>
+      )}
+      {/* The flag Submit sets, as the flag rather than as the button:
+          ui.Client.Submit is `task.AutoMerge = true` and nothing else, so
+          this box and that button are one control, not two -- ticking it
+          is what Submit does, and Submit disappears the moment it is
+          ticked because there is nothing left for it to do. Which leaves
+          the box as the half Submit never was: the way to take a task
+          back off the merge queue, and the way to say "merge this when
+          it is done" before there is a pull request to submit at all.
+
+          It sits here, among the actions, rather than in Target above:
+          auto-merge decides nothing about how a task runs, only what
+          happens to what it produced, and this is the column where that
+          is decided (Submit, Close, "Close acme/widgets#42 too"). It is
+          also where the autoMergeDegraded warning below has always been,
+          and that warning keys off the flag itself, so it goes on
+          applying whichever of the two set it. */}
+      <FormControlLabel
+        control={
+          <Checkbox
+            size="small"
+            checked={!!t.autoMerge}
+            // The flag to send is computed from the task, not read back
+            // off the event's own checkbox: the box is controlled by
+            // t.autoMerge, so by the time act() runs the request the DOM
+            // has already snapped back to what the task still says.
+            onChange={() =>
+              act(
+                () =>
+                  api(`/api/tasks/${t.id}`, {
+                    method: "PATCH",
+                    body: JSON.stringify({ autoMerge: !t.autoMerge }),
+                  }),
+                t.id,
+              )
+            }
+          />
+        }
+        label="Auto-merge once checks pass"
+        title="The same flag Submit sets: grain puts this task's pull request on the merge queue and merges it once its checks pass. Untick to take it back off."
+        sx={{ display: "flex", m: 0 }}
+        slotProps={{ typography: { fontSize: "0.8rem" } }}
+      />
+      {/* The one field on this page an edit does reach mid-run, and the
+          reason it is worth saying: auto-merge is read after the run,
+          when its pull request is considered for the merge queue
+          (orchestrator's own merge pass), not when the run starts -- the
+          opposite of the repo and base above, whose checkout is already
+          made by then. */}
+      {t.state === "running" && (
+        <p className="hint">
+          Read after this run finishes, when its pull request is considered for
+          the merge queue, so a change now still counts for the run in flight.
+        </p>
       )}
       {/* Submit still sets autoMerge -- it just never resolves into an
           actual merge on a deployment whose GitHub credential can't read
