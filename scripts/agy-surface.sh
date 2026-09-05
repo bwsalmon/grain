@@ -382,7 +382,7 @@ printf '## What agy documents about itself\n\n'
 printf 'The changelog ships *in* the binary, which makes it the closest thing to release notes there is: a key or a flag appearing here is the announcement of it.\n\n'
 agy_capture "$(fresh_home)" changelog
 
-printf 'The model catalog, whose names carry their reasoning effort. `antigravity.DefaultModel` has to be one of these, and so does anything a deployment puts in Settings.\n\n'
+printf 'The model catalog. Every name here carries a reasoning effort, but that is the catalog'"'"'s spelling rather than the only one agy accepts: `--model` also takes the bare family name (`gemini-3.1-pro`) as long as `--effort` names the other half, which is the pair `antigravity.DefaultModel` and `antigravity.DefaultEffort` ship as. So a deployment may put either form in Settings -- a name from this list, or a family name from it with an effort beside it -- and agy refuses the two mixed.\n\n'
 agy_capture "$(configured_home)" models
 
 # ----------------------------------------------------------- a fresh HOME

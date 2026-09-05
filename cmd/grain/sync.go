@@ -202,6 +202,7 @@ var settingsDiffRows = []settingsDiffRow{
 	{"maxWorkers", "max workers", func(s ui.Settings) any { return s.MaxWorkers }},
 	{"maxMergers", "max mergers", func(s ui.Settings) any { return s.MaxMergers }},
 	{"geminiModel", "gemini model", func(s ui.Settings) any { return s.GeminiModel }},
+	{"geminiEffort", "gemini effort", func(s ui.Settings) any { return s.GeminiEffort }},
 	{"claudeModel", "claude model", func(s ui.Settings) any { return s.ClaudeModel }},
 	{"codexModel", "codex model", func(s ui.Settings) any { return s.CodexModel }},
 	{"maxAgentTurns", "max agent turns", func(s ui.Settings) any { return s.MaxAgentTurns }},

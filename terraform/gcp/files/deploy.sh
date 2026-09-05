@@ -149,6 +149,7 @@ POLL_INTERVAL="$(cfg poll_interval)"
 STATE_REPO_URL="$(cfg state_repo_url)"
 STATE_REPO_BRANCH="$(cfg state_repo_branch)"
 GEMINI_MODEL="$(cfg gemini_model)"
+GEMINI_EFFORT="$(cfg gemini_effort)"
 CLAUDE_MODEL="$(cfg claude_model)"
 CODEX_MODEL="$(cfg codex_model)"
 # Where the Antigravity CLI lives, if not on $PATH -- see setup.sh's own
@@ -310,6 +311,7 @@ env \
   GRAIN_OPENAI_API_KEY="$OPENAI_API_KEY" \
   GRAIN_CODEX_PATH="$CODEX_PATH" \
   GRAIN_GEMINI_MODEL="$GEMINI_MODEL" \
+  GRAIN_GEMINI_EFFORT="$GEMINI_EFFORT" \
   GRAIN_CLAUDE_MODEL="$CLAUDE_MODEL" \
   GRAIN_CODEX_MODEL="$CODEX_MODEL" \
   GRAIN_MAX_AGENT_TURNS="$MAX_AGENT_TURNS" \

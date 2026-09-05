@@ -35,7 +35,7 @@
 // README.md for what that merge kept and dropped.
 //
 // Most of this file's own flags (-max-workers, -max-mergers, -poll-interval, -agent-framework,
-// -gemini-model, -claude-model, -codex-model, -max-agent-turns, -github-host, -github-insecure-http, -gcp-project,
+// -gemini-model, -gemini-effort, -claude-model, -codex-model, -max-agent-turns, -github-host, -github-insecure-http, -gcp-project,
 // -gcp-agent-service-account, -target-repos) are store-backed now
 // (bwsalmon/agents#320):
 // loadConfig writes them into model.Store's grain_config row the first
@@ -181,6 +181,12 @@ func daemon(args []string) {
 		"seeded one with before that existed. With neither, a run driven by the gemini framework fails as "+
 		"setup-failed saying so, rather than the daemon refusing to start")
 	geminiModel := fs.String("gemini-model", antigravity.DefaultModel, "model the antigravity agent framework calls"+seedOnly)
+	geminiEffort := fs.String("gemini-effort", antigravity.DefaultEffort,
+		"reasoning effort the antigravity agent framework asks for beside -gemini-model ("+
+			strings.Join(antigravity.Efforts(), "|")+"). agy takes a model and an effort as two values, and "+
+			"which efforts a model has is the model's own business -- it refuses a pair that does not go "+
+			"together. Ignored for a -gemini-model whose name already carries an effort, agy's own "+
+			"gemini-3.1-pro-high spelling"+seedOnly)
 	claudeModel := fs.String("claude-model", claude.DefaultModel, "model the claude agent framework calls"+seedOnly)
 	codexModel := fs.String("codex-model", codex.DefaultModel, "model the codex agent framework calls"+seedOnly)
 	maxAgentTurns := fs.Int("max-agent-turns", 0, "cap on model/tool round trips per run (0 = uncapped; runs are bounded by wall-clock runtime instead)"+seedOnly)
@@ -430,9 +436,10 @@ func daemon(args []string) {
 		uiAddr:       *uiAddr, uiOpen: *uiOpen, actor: *actor, defaultTargetRepo: *defaultTargetRepo,
 		targetRepos:      targetReposList,
 		agentFramework:   *agentFramework,
-		geminiAPIKeyFile: *geminiAPIKeyFile, geminiModel: *geminiModel, maxAgentTurns: *maxAgentTurns,
-		agyPath:    *agyPath,
-		claudePath: *claudePath, claudeOAuthTokenFile: *claudeOAuthTokenFile, claudeModel: *claudeModel,
+		geminiAPIKeyFile: *geminiAPIKeyFile, geminiModel: *geminiModel, geminiEffort: *geminiEffort,
+		maxAgentTurns: *maxAgentTurns,
+		agyPath:       *agyPath,
+		claudePath:    *claudePath, claudeOAuthTokenFile: *claudeOAuthTokenFile, claudeModel: *claudeModel,
 		codexPath: *codexPath, openAIAPIKeyFile: *openAIAPIKeyFile, codexModel: *codexModel,
 		githubHost: *githubHost, githubInsecureHTTP: *githubInsecureHTTP,
 		gcpProject: *gcpProject, gcpServiceAccountEmail: *gcpServiceAccountEmail,
@@ -490,7 +497,11 @@ type config struct {
 
 	geminiAPIKeyFile string
 	geminiModel      string
-	maxAgentTurns    int
+	// geminiEffort is store-backed alongside geminiModel
+	// (model.Config.GeminiEffort): the other half of the model selection
+	// agy is given, -gemini-effort seeding it only the first time.
+	geminiEffort  string
+	maxAgentTurns int
 
 	// agentFramework is this deployment's default agent.Framework --
 	// one of model.AgentFrameworks() -- and is
@@ -1165,6 +1176,7 @@ func buildAntigravityFramework(ctx context.Context, cfg config, secretStore *sec
 			return agentCredential(ctx, secretStore, secrets.GeminiAPIKeySecret, cfg.geminiAPIKeyFile)
 		}),
 		antigravity.WithModel(cfg.geminiModel),
+		antigravity.WithEffort(cfg.geminiEffort),
 		// The controller's own GitHub credential ladder, so a run can
 		// call pull_request_status and see CI's verdict on the commits
 		// it pushed. Not a per-run secret and not a sandbox one: the
@@ -1768,8 +1780,8 @@ type defaultShaper interface {
 //	                                  built at (refresh, via defaultShaper)
 //	max-workers, max-mergers, max-agent-turns
 //	                                  orchestrator.RunCycle's own per-cycle re-read
-//	agent-framework, gemini-model, claude-model, codex-model
-//	                                  dispatchConfig's own per-dispatch re-read
+//	agent-framework, gemini-model, gemini-effort, claude-model,
+//	codex-model                       dispatchConfig's own per-dispatch re-read
 //	prompt-extension                  the deployment-wide standing instructions
 //	                                  RunCycle refreshes every cycle
 //	                                  (orchestrator.resolvePromptExtension)
@@ -1980,6 +1992,7 @@ func (c config) changesFrom(prev config) []string {
 	note("max-mergers", prev.maxMergers, c.maxMergers)
 	note("agent-framework", prev.agentFramework, c.agentFramework)
 	note("gemini-model", prev.geminiModel, c.geminiModel)
+	note("gemini-effort", prev.geminiEffort, c.geminiEffort)
 	note("claude-model", prev.claudeModel, c.claudeModel)
 	note("codex-model", prev.codexModel, c.codexModel)
 	note("max-agent-turns", prev.maxAgentTurns, c.maxAgentTurns)
@@ -2051,6 +2064,7 @@ func (c config) logStoreOverrides(mc model.Config) {
 	warn("max-mergers", c.maxMergers, mc.MaxMergers)
 	warn("agent-framework", c.agentFramework, mc.AgentFramework)
 	warn("gemini-model", c.geminiModel, mc.GeminiModel)
+	warn("gemini-effort", c.geminiEffort, mc.GeminiEffort)
 	warn("claude-model", c.claudeModel, mc.ClaudeModel)
 	warn("codex-model", c.codexModel, mc.CodexModel)
 	warn("max-agent-turns", c.maxAgentTurns, mc.MaxAgentTurns)
@@ -2079,6 +2093,7 @@ func (c config) toModelConfig() model.Config {
 	mc.PollInterval, mc.MaxWorkers, mc.MaxMergers = c.pollInterval, c.maxWorkers, c.maxMergers
 	mc.AgentFramework = c.agentFramework
 	mc.GeminiModel, mc.ClaudeModel, mc.CodexModel = c.geminiModel, c.claudeModel, c.codexModel
+	mc.GeminiEffort = c.geminiEffort
 	mc.MaxAgentTurns = c.maxAgentTurns
 	mc.GitHubHost, mc.GitHubInsecureHTTP = c.githubHost, c.githubInsecureHTTP
 	mc.GCPProject, mc.GCPServiceAccountEmail = c.gcpProject, c.gcpServiceAccountEmail
@@ -2118,6 +2133,15 @@ func (c config) withLiveModelConfig(mc model.Config) config {
 	if strings.TrimSpace(mc.GeminiModel) == "" {
 		live.geminiModel = c.geminiModel
 	}
+	// Like codex-model below rather than gemini-model above: the column
+	// holding this one was added after most deployments stored their
+	// settings (model.Config.GeminiEffort), so reading it back empty is
+	// the ordinary upgrade rather than a hand-written row, and
+	// -gemini-effort's own default is the effort agy is asked for until
+	// an operator chooses one in Settings.
+	if strings.TrimSpace(mc.GeminiEffort) == "" {
+		live.geminiEffort = c.geminiEffort
+	}
 	if strings.TrimSpace(mc.ClaudeModel) == "" {
 		live.claudeModel = c.claudeModel
 	}
@@ -2141,6 +2165,7 @@ func (c config) withModelConfig(mc model.Config) config {
 	c.maxMergers = mc.MaxMergers
 	c.agentFramework = mc.AgentFramework
 	c.geminiModel = mc.GeminiModel
+	c.geminiEffort = mc.GeminiEffort
 	c.claudeModel = mc.ClaudeModel
 	c.codexModel = mc.CodexModel
 	c.maxAgentTurns = mc.MaxAgentTurns

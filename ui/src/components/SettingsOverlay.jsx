@@ -266,6 +266,10 @@ export default function SettingsOverlay({ onClose, onSaved, showError }) {
     if (geminiModel !== (settings.geminiModel || ""))
       payload.geminiModel = geminiModel;
 
+    const geminiEffort = form.elements.geminiEffort.value.trim();
+    if (geminiEffort !== (settings.geminiEffort || ""))
+      payload.geminiEffort = geminiEffort;
+
     const claudeModel = form.elements.claudeModel.value.trim();
     if (claudeModel !== (settings.claudeModel || ""))
       payload.claudeModel = claudeModel;
@@ -681,6 +685,31 @@ export default function SettingsOverlay({ onClose, onSaved, showError }) {
               fullWidth
               margin="normal"
             />
+            {/* agy takes the model and the reasoning effort as two
+                values, so this is a field of its own rather than part of
+                the name above -- the same model runs shallow or deep.
+                The choices come from the server (Settings.geminiEfforts,
+                agy's own low|medium|high) rather than being written out
+                here, so there is one copy of the vocabulary a save is
+                checked against. Which of them a given model actually has
+                is that model's business: agy refuses a pair that does
+                not go together, and it ignores this entirely for a model
+                name that already carries an effort. */}
+            <TextField
+              select
+              name="geminiEffort"
+              label="Gemini reasoning effort"
+              helperText="ignored for a model name that already carries one, e.g. gemini-3.1-pro-high"
+              defaultValue={settings.geminiEffort || ""}
+              fullWidth
+              margin="normal"
+            >
+              {(settings.geminiEfforts || []).map((effort) => (
+                <MenuItem key={effort} value={effort}>
+                  {effort}
+                </MenuItem>
+              ))}
+            </TextField>
             <TextField
               name="claudeModel"
               label="Claude model"

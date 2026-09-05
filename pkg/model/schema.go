@@ -606,6 +606,15 @@ var Tables = []string{
 	// already-created grain_config). codex_model is agent/codex's, added
 	// the same way again (Store.ensureConfigCodexModelColumn).
 	//
+	// gemini_effort is Config.GeminiEffort's own column -- the other half
+	// of agent/antigravity's model selection, agy's --effort -- added the
+	// same way once more (Store.ensureConfigGeminiEffortColumn), DEFAULT
+	// '' both here and there. Empty is "this row predates the setting",
+	// which cmd/grain/daemon.go fills from -gemini-effort's default;
+	// nothing constrains the value in the schema, the same as every model
+	// name beside it, because which efforts a model offers is agy's
+	// answer to give and not this table's.
+	//
 	// approved_by_default and auto_merge_by_default (Config.ApprovedByDefault/
 	// AutoMergeByDefault) are DEFAULT 1, not 0: both settings are on for a
 	// deployment that has never chosen either way, the same default
@@ -664,6 +673,7 @@ var Tables = []string{
   ` + "`auto_merge_by_default`" + `        INTEGER NOT NULL DEFAULT 1,
   ` + "`claude_model`" + `                 TEXT    NOT NULL DEFAULT '',
   ` + "`codex_model`" + `                  TEXT    NOT NULL DEFAULT '',
+  ` + "`gemini_effort`" + `                TEXT    NOT NULL DEFAULT '',
   ` + "`task_defaults_on_backfilled`" + `  INTEGER NOT NULL DEFAULT 1,
   ` + "`default_capabilities`" + `         TEXT    NOT NULL DEFAULT '',
   ` + "`environment_name`" + `             TEXT    NOT NULL DEFAULT '',

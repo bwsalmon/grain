@@ -3,10 +3,12 @@ package ui
 import (
 	"context"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 	"unicode/utf8"
 
+	"github.com/bwsalmon/grain/pkg/agent/antigravity"
 	"github.com/bwsalmon/grain/pkg/kontur"
 	"github.com/bwsalmon/grain/pkg/model"
 )
@@ -42,16 +44,32 @@ type Settings struct {
 	// maxConcurrent, and was the whole limit, until the two were split --
 	// see model.Limits for the rule they make together, in particular why
 	// a merger may take a worker's free slot and never the reverse.
-	MaxWorkers             int    `json:"maxWorkers"`
-	MaxMergers             int    `json:"maxMergers"`
-	GeminiModel            string `json:"geminiModel"`
-	ClaudeModel            string `json:"claudeModel"`
-	CodexModel             string `json:"codexModel"`
-	MaxAgentTurns          int    `json:"maxAgentTurns"`
-	GitHubHost             string `json:"githubHost"`
-	GitHubInsecureHTTP     bool   `json:"githubInsecureHttp"`
-	GCPProject             string `json:"gcpProject"`
-	GCPServiceAccountEmail string `json:"gcpServiceAccountEmail"`
+	MaxWorkers  int    `json:"maxWorkers"`
+	MaxMergers  int    `json:"maxMergers"`
+	GeminiModel string `json:"geminiModel"`
+	// GeminiEffort is the reasoning effort agy is asked for beside
+	// GeminiModel -- model.Config.GeminiEffort, one of GeminiEfforts
+	// below. It is a field of its own rather than part of the model name
+	// because agy takes it as a flag of its own (--effort), and because
+	// the two are chosen separately: the same model runs shallow or deep.
+	GeminiEffort string `json:"geminiEffort"`
+	// GeminiEfforts is the vocabulary GeminiEffort is saved from --
+	// agent/antigravity.Efforts, agy's own low/medium/high -- reported
+	// here so a settings pane can offer the choices instead of asking
+	// somebody to remember three words a save would reject.
+	//
+	// Which of them a given model actually offers is that model's own
+	// business and only agy knows it (Gemini 3.1 Pro has no medium), so
+	// this is the widest list, not a promise about the model named beside
+	// it.
+	GeminiEfforts          []string `json:"geminiEfforts"`
+	ClaudeModel            string   `json:"claudeModel"`
+	CodexModel             string   `json:"codexModel"`
+	MaxAgentTurns          int      `json:"maxAgentTurns"`
+	GitHubHost             string   `json:"githubHost"`
+	GitHubInsecureHTTP     bool     `json:"githubInsecureHttp"`
+	GCPProject             string   `json:"gcpProject"`
+	GCPServiceAccountEmail string   `json:"gcpServiceAccountEmail"`
 	// TargetRepos restricts which repos a task's Repo may name -- empty
 	// means unrestricted. model.Config's own field of the same name.
 	TargetRepos []string `json:"targetRepos"`
@@ -354,6 +372,8 @@ func (c *Client) settingsFrom(cfg model.Config, repoConfigs []model.RepoConfig) 
 		MaxWorkers:                    cfg.MaxWorkers,
 		MaxMergers:                    cfg.MaxMergers,
 		GeminiModel:                   cfg.GeminiModel,
+		GeminiEffort:                  cfg.GeminiEffort,
+		GeminiEfforts:                 antigravity.Efforts(),
 		ClaudeModel:                   cfg.ClaudeModel,
 		CodexModel:                    cfg.CodexModel,
 		MaxAgentTurns:                 cfg.MaxAgentTurns,
@@ -471,10 +491,18 @@ func (c *Client) GetSettings(ctx context.Context) (Settings, error) {
 // bwsalmon/agents#320 explicitly did not ask for anything more graceful
 // than that yet.
 type UpdateSettingsRequest struct {
-	PollInterval           *string   `json:"pollInterval"`
-	MaxWorkers             *int      `json:"maxWorkers"`
-	MaxMergers             *int      `json:"maxMergers"`
-	GeminiModel            *string   `json:"geminiModel"`
+	PollInterval *string `json:"pollInterval"`
+	MaxWorkers   *int    `json:"maxWorkers"`
+	MaxMergers   *int    `json:"maxMergers"`
+	GeminiModel  *string `json:"geminiModel"`
+	// GeminiEffort is validated against agent/antigravity.Efforts rather
+	// than merely stored: a value agy does not know fails the run it is
+	// dispatched into before that run starts ("--model gemini-3.1-pro
+	// requires --effort (available: low, high)"), and a settings pane is
+	// where that can still be said to somebody who can fix it. Empty is
+	// refused for the same reason geminiModel's own empty is -- there is
+	// no "unset it" here, only "leave the field out of the request".
+	GeminiEffort           *string   `json:"geminiEffort"`
 	ClaudeModel            *string   `json:"claudeModel"`
 	CodexModel             *string   `json:"codexModel"`
 	MaxAgentTurns          *int      `json:"maxAgentTurns"`
@@ -575,6 +603,14 @@ func (c *Client) UpdateSettings(ctx context.Context, req UpdateSettingsRequest) 
 			return Settings{}, validationErrorf("geminiModel cannot be empty")
 		}
 		cfg.GeminiModel = *req.GeminiModel
+	}
+	if req.GeminiEffort != nil {
+		effort := strings.TrimSpace(*req.GeminiEffort)
+		if !slices.Contains(antigravity.Efforts(), effort) {
+			return Settings{}, validationErrorf("geminiEffort must be one of %s",
+				strings.Join(antigravity.Efforts(), ", "))
+		}
+		cfg.GeminiEffort = effort
 	}
 	if req.ClaudeModel != nil {
 		if strings.TrimSpace(*req.ClaudeModel) == "" {
