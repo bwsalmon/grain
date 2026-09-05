@@ -20,6 +20,7 @@ import (
 
 	"github.com/bwsalmon/grain/pkg/model"
 	"github.com/bwsalmon/grain/pkg/model/sqlite"
+	"github.com/bwsalmon/grain/pkg/orchestrator"
 	"github.com/bwsalmon/grain/pkg/ui"
 )
 
@@ -52,7 +53,30 @@ func captureStdout(t *testing.T, fn func()) string {
 // store with settings already saved once, since the first-ever
 // UpdateSettings demands the fields ui.Client.UpdateSettings's own doc
 // comment lists and the sandbox shape is not among them.
+//
+// It speaks for a deployment whose sandbox shape is actually applied --
+// the kontur-managed case -- since that is what every other test here
+// wants to read settings back from. shapelessSettingsTestServer below is
+// the other one.
 func settingsTestServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	return settingsTestServerFor(t, ui.Config{Actor: ui.DefaultActor("operator"), Capabilities: ui.OfferedCapabilities()})
+}
+
+// shapelessSettingsTestServer is the same server speaking for a
+// deployment running the default host-directory sandboxing, where the
+// stored sandbox shape sizes nothing at all
+// (ui.Config.SandboxShapeIgnored).
+func shapelessSettingsTestServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	return settingsTestServerFor(t, ui.Config{
+		Actor:               ui.DefaultActor("operator"),
+		Capabilities:        ui.OfferedCapabilities(),
+		SandboxShapeIgnored: true,
+	})
+}
+
+func settingsTestServerFor(t *testing.T, cfg ui.Config) *httptest.Server {
 	t.Helper()
 	db, err := sqlite.Open(sqlite.DefaultConfig(filepath.Join(t.TempDir(), "data")))
 	if err != nil {
@@ -63,7 +87,7 @@ func settingsTestServer(t *testing.T) *httptest.Server {
 	if err := store.Init(context.Background()); err != nil {
 		t.Fatalf("applying schema: %v", err)
 	}
-	srv := httptest.NewServer(ui.NewServer(ui.Config{Actor: ui.DefaultActor("operator"), Capabilities: ui.OfferedCapabilities()}, store))
+	srv := httptest.NewServer(ui.NewServer(cfg, store))
 	t.Cleanup(srv.Close)
 
 	if _, err := ui.NewHTTPClient(srv.URL).UpdateSettings(context.Background(),
@@ -179,6 +203,62 @@ func TestCmdSettingsPrintsTheSandboxShape(t *testing.T) {
 	}
 }
 
+// A deployment whose sandboxes are directories on the daemon's own
+// machine applies none of these three numbers -- cmd/grain/daemon.go's
+// defaultShaper path skips that backend entirely -- so every line that
+// prints one says so. Before this, `grain settings` printed a bare
+// "sandbox cpus: 2" there, which reads as the cap runs are held to when
+// they are held to nothing (grain/task-9).
+func TestCmdSettingsSaysTheSandboxShapeIsNotInEffect(t *testing.T) {
+	ctx := context.Background()
+	srv := shapelessSettingsTestServer(t)
+	c := ui.NewHTTPClient(srv.URL)
+
+	out := captureStdout(t, func() {
+		if err := cmdSettings(ctx, c, &printer{}, nil); err != nil {
+			t.Errorf("cmdSettings: %v", err)
+		}
+	})
+	for _, line := range []string{"sandbox cpus:", "sandbox memory mb:", "sandbox disk gb:"} {
+		for _, l := range strings.Split(out, "\n") {
+			if !strings.HasPrefix(l, line) {
+				continue
+			}
+			if !strings.Contains(l, "not in effect") || !strings.Contains(l, "no shape") {
+				t.Errorf("`grain settings` printed %q, which does not say the shape is not in effect", l)
+			}
+		}
+	}
+
+	// A stored value is still printed, not hidden: it is what this
+	// deployment would build VMs at if it were switched over, and it is
+	// the value the box on the pane is editing.
+	if _, err := c.UpdateSettings(ctx, ui.UpdateSettingsRequest{SandboxCPUs: intPtr(4)}); err != nil {
+		t.Fatalf("UpdateSettings: %v", err)
+	}
+	out = captureStdout(t, func() {
+		if err := cmdSettings(ctx, c, &printer{}, nil); err != nil {
+			t.Errorf("cmdSettings: %v", err)
+		}
+	})
+	if !strings.Contains(out, "sandbox cpus:   4 -- not in effect") {
+		t.Errorf("`grain settings` printed %q, want the stored 4 printed and annotated", out)
+	}
+
+	// And the annotation is this deployment's, not something every
+	// deployment now says: a kontur-managed one applies the shape, and
+	// saying otherwise there would be its own lie.
+	shaped := ui.NewHTTPClient(settingsTestServer(t).URL)
+	out = captureStdout(t, func() {
+		if err := cmdSettings(ctx, shaped, &printer{}, nil); err != nil {
+			t.Errorf("cmdSettings: %v", err)
+		}
+	})
+	if strings.Contains(out, "not in effect") {
+		t.Errorf("`grain settings` printed %q against a shaped backend, which should say nothing about shapes not applying", out)
+	}
+}
+
 func TestPrintSettingsDiffReportsTheSandboxShape(t *testing.T) {
 	before := ui.Settings{SandboxCPUs: 2, SandboxMemoryMB: 2048}
 	after := ui.Settings{SandboxCPUs: 8, SandboxMemoryMB: 2048}
@@ -213,14 +293,39 @@ func TestPrintSettingsDiffReportsTheSandboxShape(t *testing.T) {
 }
 
 func TestSandboxShapeValue(t *testing.T) {
-	if got := sandboxShapeValue(4, 2); got != "4" {
+	if got := sandboxShapeValue(4, 2, false); got != "4" {
 		t.Errorf("sandboxShapeValue(4, 2) = %q, want %q", got, "4")
 	}
-	if got := sandboxShapeValue(0, 2); !strings.Contains(got, "2") || !strings.Contains(got, "default") {
+	if got := sandboxShapeValue(0, 2, false); !strings.Contains(got, "2") || !strings.Contains(got, "default") {
 		t.Errorf("sandboxShapeValue(0, 2) = %q, want grain's own default named", got)
 	}
-	if got := sandboxShapeValue(0, 0); got != "unset" {
+	if got := sandboxShapeValue(0, 0, false); got != "unset" {
 		t.Errorf("sandboxShapeValue(0, 0) = %q, want %q", got, "unset")
+	}
+
+	// Ignored: the number stays -- it is what is stored, and what would
+	// be built to under a backend that has a shape -- and the line says
+	// it is not in effect here.
+	if got := sandboxShapeValue(4, 2, true); !strings.HasPrefix(got, "4 ") || !strings.Contains(got, "not in effect") {
+		t.Errorf("sandboxShapeValue(4, 2, ignored) = %q, want the stored 4 annotated as not in effect", got)
+	}
+	if got := sandboxShapeValue(0, 2, true); !strings.Contains(got, "grain default") || !strings.Contains(got, "not in effect") {
+		t.Errorf("sandboxShapeValue(0, 2, ignored) = %q, want the default named and annotated", got)
+	}
+	if got := sandboxShapeValue(0, 0, true); !strings.HasPrefix(got, "unset") || !strings.Contains(got, "not in effect") {
+		t.Errorf("sandboxShapeValue(0, 0, ignored) = %q, want %q annotated", got, "unset")
+	}
+}
+
+// The daemon reads the annotation off the backend it built rather than
+// off the flag that chose it, so what the pane calls "not in effect" is
+// exactly what liveConfig.refresh declines to hand a changed shape to.
+func TestSandboxShapeIgnoredFollowsTheBackend(t *testing.T) {
+	if got := sandboxShapeIgnored(orchestrator.NewHostSandboxes(t.TempDir())); !got {
+		t.Errorf("sandboxShapeIgnored(HostSandboxes) = %v, want true -- a host directory has no shape", got)
+	}
+	if got := sandboxShapeIgnored(orchestrator.NewKonturSandboxes(orchestrator.KonturConfig{})); got {
+		t.Errorf("sandboxShapeIgnored(KonturSandboxes) = %v, want false -- it implements SetDefaultShape", got)
 	}
 }
 

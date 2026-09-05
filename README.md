@@ -7158,3 +7158,49 @@ a host where something turned nesting off, writes the modprobe drop-in
 that turns it back on, reloading the module only if nothing is using it
 — never pulling KVM out from under a running sandbox, since that script
 is the updater as well as the installer.
+
+## A sandbox shape the backend ignores says so
+
+`grain settings` and the Settings pane's Sandbox tab print three numbers
+on every deployment — `sandbox cpus`, `sandbox memory mb`, `sandbox disk
+gb` — because they are stored on every deployment. Only one kind of
+deployment builds anything to them. Without `-kontur-sandboxes` a run
+gets an `orchestrator.HostSandboxes` directory on the daemon's own
+machine: `liveConfig.refresh` offers a changed shape to whatever
+implements `defaultShaper`, that backend deliberately does not, and the
+three settings size nothing. Read from inside such a sandbox, `cpu.max`
+and `memory.max` are both `max` and `nproc` reports every core the host
+has.
+
+Shown unannotated, that is worse than showing nothing. "2 vCPUs, 2048
+MiB" is a sentence about a cap, and it was describing a deployment whose
+runs have no cap at all — an operator reading the pane would have
+concluded the opposite of the truth, and would have gone looking for the
+throttle when a run ate the machine. The per-task half of the same
+setting was already honest about it: `HostSandboxes.Acquire` *refuses* a
+non-zero shape rather than ignoring it, naming both what was asked for
+and why a host directory has none of its own. The deployment-wide
+default was the one number still being dropped in silence.
+
+`ui.Config.SandboxShapeIgnored`, reported onward as
+`ui.Settings.SandboxShapeIgnored`, is that fact where the numbers are
+shown: the Sandbox tab carries a warning above the three fields, and
+`grain settings` ends each of the three lines with `-- not in effect:
+host-directory sandboxes have no shape`. Per line rather than once
+underneath them, since whoever is misled here reads one line and stops.
+
+The daemon works it out from the backend it built rather than from the
+flag that chose it — `sandboxShapeIgnored` asks whether `sandboxes` is a
+`defaultShaper`, which is exactly the test `refresh` applies before
+handing a changed shape on — so what the pane calls "not in effect"
+cannot drift from what is really applied. A backend that grew a
+`SetDefaultShape` would stop being annotated on the same commit that
+made the annotation false.
+
+The fields stay editable and the values stay stored. They are what this
+deployment would build VMs at the day it is pointed at kontur, and
+configuring a shape ahead of that switch is a reasonable thing to do:
+what was wrong was the silence, not the numbers. `false` is the quiet
+answer, so a UI with no backend to speak for (`grain demo`'s throwaway
+one) and an older daemon that predates the field both render the pane
+exactly as it was.
