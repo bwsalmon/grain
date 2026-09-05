@@ -19,6 +19,8 @@ import {
   Typography,
 } from "@mui/material";
 import api from "../api.js";
+import { useTimeZone } from "../TimeZoneContext.jsx";
+import { formatDateTime } from "../time.js";
 import Sparkline from "./Sparkline.jsx";
 import { STATE_LABELS, STATE_ORDER } from "../state.js";
 
@@ -232,6 +234,7 @@ export default function MetricsPage({ showError, onOpenTask }) {
   const [selectedWindow, setSelectedWindow] = useState(DEFAULT_WINDOW);
   const [report, setReport] = useState(null);
   const [loading, setLoading] = useState(false);
+  const zone = useTimeZone();
   // Every fetch carries a sequence number and only the newest one is
   // allowed to land: changing the window twice quickly otherwise races,
   // and a slow report for a window nobody is looking at any more would
@@ -326,8 +329,8 @@ export default function MetricsPage({ showError, onOpenTask }) {
             component="div"
             sx={{ mb: 2 }}
           >
-            {new Date(report.since).toLocaleString()} →{" "}
-            {new Date(report.until).toLocaleString()}
+            {formatDateTime(report.since, zone)} →{" "}
+            {formatDateTime(report.until, zone)}
             {" · "}
             {formatSeconds(report.windowSeconds)}
           </Typography>

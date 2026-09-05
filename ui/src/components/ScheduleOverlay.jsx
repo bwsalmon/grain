@@ -15,6 +15,8 @@ import {
   Typography,
 } from "@mui/material";
 import api from "../api.js";
+import { useTimeZone } from "../TimeZoneContext.jsx";
+import { zoneAbbreviation } from "../time.js";
 import { GlyphLabel } from "./ItemGlyph.jsx";
 import Overlay from "./Overlay.jsx";
 import ReadOnlyReposField from "./ReadOnlyReposField.jsx";
@@ -48,6 +50,18 @@ function RecurrenceFields({
   weekday,
   setWeekday,
 }) {
+  // The time typed here is read on the deployment's own clock, not on
+  // UTC and not on this browser's (grain/task-368) -- so the field says
+  // which clock that is, rather than leaving somebody to work out why
+  // "09:00" fired at two in the morning. Named for the zone itself with
+  // its current abbreviation beside it ("America/Los_Angeles, PDT"),
+  // since the abbreviation alone changes twice a year and the name alone
+  // is not what a clock on the wall says.
+  const zone = useTimeZone();
+  const abbreviation = zoneAbbreviation(zone);
+  const timeLabel = zone
+    ? `Time (${zone}${abbreviation ? `, ${abbreviation}` : ""})`
+    : "Time";
   return (
     <Box sx={{ mt: 1 }}>
       <FormControl fullWidth margin="normal" size="small">
@@ -79,7 +93,7 @@ function RecurrenceFields({
       {kind !== "everyNHours" && (
         <TextField
           name="timeOfDay"
-          label="Time (UTC)"
+          label={timeLabel}
           type="time"
           defaultValue={defaultValue?.timeOfDay || "09:00"}
           required

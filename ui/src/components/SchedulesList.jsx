@@ -1,6 +1,8 @@
 import { useState } from "react";
 import { Button, Chip } from "@mui/material";
 import { knownRepos } from "../state.js";
+import { useTimeZone } from "../TimeZoneContext.jsx";
+import { formatDateTime } from "../time.js";
 import { useListOrder } from "../listOrder.js";
 import ScheduleOverlay from "./ScheduleOverlay.jsx";
 import {
@@ -73,6 +75,7 @@ export default function SchedulesList({
   const [search, setSearch] = useState("");
   const [sortBy, setSortBy] = useState("custom");
   const [showNew, setShowNew] = useState(false);
+  const zone = useTimeZone();
   const repoOptions = knownRepos(config, tasks);
   const editing = schedules.find((s) => s.id === openScheduleId) || null;
 
@@ -166,8 +169,10 @@ export default function SchedulesList({
                 )}
               </div>
               <div className="schedule-meta hint">
-                Next run {formatWhen(s.nextRunAt)}
-                {s.lastRunAt && <> · last ran {formatWhen(s.lastRunAt)}</>}
+                Next run {formatWhen(s.nextRunAt, zone)}
+                {s.lastRunAt && (
+                  <> · last ran {formatWhen(s.lastRunAt, zone)}</>
+                )}
               </div>
             </div>
           </div>
@@ -228,6 +233,6 @@ function describeRecurrence(r) {
   }
 }
 
-function formatWhen(iso) {
-  return new Date(iso).toLocaleString();
+function formatWhen(iso, zone) {
+  return formatDateTime(iso, zone);
 }

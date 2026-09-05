@@ -1,6 +1,8 @@
 import { useState } from "react";
 import { Alert, Button } from "@mui/material";
 import api from "../api.js";
+import { useTimeZone } from "../TimeZoneContext.jsx";
+import { formatTime } from "../time.js";
 
 // AgentPauseBanner is what config.agentPause (ui.AgentPauseStatus,
 // orchestrator.Pause behind it) becomes on screen: the deployment's
@@ -23,6 +25,7 @@ import api from "../api.js";
 // on purpose, and will resume by itself.
 export default function AgentPauseBanner({ pause, onLifted, showError }) {
   const [lifting, setLifting] = useState(false);
+  const zone = useTimeZone();
 
   async function lift() {
     setLifting(true);
@@ -66,7 +69,7 @@ export default function AgentPauseBanner({ pause, onLifted, showError }) {
         </Button>
       }
     >
-      {pauseMessage(pause)}
+      {pauseMessage(pause, zone)}
     </Alert>
   );
 }
@@ -76,16 +79,17 @@ export default function AgentPauseBanner({ pause, onLifted, showError }) {
 // that names the framework and the window and is worth keeping verbatim
 // rather than paraphrasing.
 //
-// The instant is shown in the reader's own locale as well as as a
-// remaining duration: a countdown answers "is this nearly over?", and a
-// wall-clock time is what somebody deciding whether to wait or to go to
-// lunch actually plans around.
-export function pauseMessage(pause) {
-  const until = pause?.until ? new Date(pause.until) : null;
-  const when =
-    until && !Number.isNaN(until.getTime())
-      ? `${until.toLocaleTimeString()} (${formatRemaining(pause.secondsRemaining)})`
-      : "the provider's window resets";
+// The instant is shown as a wall-clock time as well as as a remaining
+// duration: a countdown answers "is this nearly over?", and a clock time
+// is what somebody deciding whether to wait or to go to lunch actually
+// plans around. On the deployment's clock (grain/task-368), like every
+// other absolute time on screen -- zone empty is the browser's own,
+// which is what a caller with no provider above it gets.
+export function pauseMessage(pause, zone = "") {
+  const until = pause?.until ? formatTime(pause.until, zone) : "";
+  const when = until
+    ? `${until} (${formatRemaining(pause.secondsRemaining)})`
+    : "the provider's window resets";
   const reason = pause?.reason ? ` — ${pause.reason}` : "";
   return `Agent usage limit reached: nothing is being dispatched until ${when}.${reason}`;
 }

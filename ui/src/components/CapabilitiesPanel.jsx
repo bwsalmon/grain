@@ -10,6 +10,8 @@ import {
 } from "@mui/material";
 import { SecretFields } from "./SecretField.jsx";
 import api from "../api.js";
+import { useTimeZone } from "../TimeZoneContext.jsx";
+import { formatDateTime } from "../time.js";
 
 // grain/task-172: the one control on this pane that asks a question of
 // somebody else's API rather than reading grain's own configuration.
@@ -31,6 +33,7 @@ import api from "../api.js";
 function CredentialCheck({ capability, showError }) {
   const [check, setCheck] = useState(null);
   const [busy, setBusy] = useState(false);
+  const zone = useTimeZone();
 
   const run = async () => {
     setBusy(true);
@@ -83,7 +86,7 @@ function CredentialCheck({ capability, showError }) {
               <>checked as {check.credentials.join(", ")} · </>
             )}
             {check.checkedAt
-              ? new Date(check.checkedAt).toLocaleString()
+              ? formatDateTime(check.checkedAt, zone)
               : "just now"}{" "}
             -- a point-in-time answer, not a badge
           </Typography>

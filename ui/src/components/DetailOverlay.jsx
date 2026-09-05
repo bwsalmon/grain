@@ -17,6 +17,8 @@ import {
   Typography,
 } from "@mui/material";
 import api from "../api.js";
+import { useTimeZone } from "../TimeZoneContext.jsx";
+import { formatDateTime } from "../time.js";
 import fileToAttachment from "../attachments.js";
 import {
   STATE_LABELS,
@@ -798,7 +800,7 @@ function setupBreadcrumb(a) {
 // answered (see model.Transitions' own doc comment on why that one is
 // unrecoverable) -- so this can skip a state without that being a bug to
 // chase.
-function timelineEvents(t) {
+function timelineEvents(t, zone) {
   const events = [];
   const transitions = t.transitions || [];
   const attempts = t.attempts || [];
@@ -863,9 +865,9 @@ function timelineEvents(t) {
         <>
           <div className="timeline-title">{title}</div>
           <div className="timeline-meta">
-            started {new Date(a.startedAt).toLocaleString()}
+            started {formatDateTime(a.startedAt, zone)}
             {a.finishedAt && (
-              <> · finished {new Date(a.finishedAt).toLocaleString()}</>
+              <> · finished {formatDateTime(a.finishedAt, zone)}</>
             )}
           </div>
           {/* Marked as grain's own words, the same way the live phrase
@@ -1251,7 +1253,8 @@ function Dependencies({ t, tasks, act, onOpenTask }) {
 // the conversation-only list this replaces.
 function Timeline({ t, act, showError }) {
   const textareaRef = useRef(null);
-  const events = timelineEvents(t);
+  const zone = useTimeZone();
+  const events = timelineEvents(t, zone);
   // openAttempt is the attempt (bwsalmon/agents#446's own Attempt shape,
   // off t.attempts) whose transcript is open, or null -- local to
   // Timeline, since nothing outside it needs to know.
@@ -1326,7 +1329,9 @@ function Timeline({ t, act, showError }) {
               </div>
               <div className="timeline-body">
                 {e.at && (
-                  <div className="timeline-when">{e.at.toLocaleString()}</div>
+                  <div className="timeline-when">
+                    {formatDateTime(e.at, zone)}
+                  </div>
                 )}
                 {e.render()}
               </div>
