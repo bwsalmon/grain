@@ -180,7 +180,7 @@ func Apply(ctx context.Context, r *Repo, db *sql.DB, version int) (bool, error) 
 	if err != nil {
 		return false, fmt.Errorf("%w: %w", ErrNotApplied, err)
 	}
-	marker, err := r.loadedHead(ctx)
+	marker, markerIdentity, err := r.loadedHead(ctx)
 	if err != nil {
 		return false, fmt.Errorf("%w: %w", ErrNotApplied, err)
 	}
@@ -189,6 +189,15 @@ func Apply(ctx context.Context, r *Repo, db *sql.DB, version int) (bool, error) 
 	// commits yet, and an empty marker is a working tree Load has not
 	// decided about -- neither is Apply's to import, and Load is where
 	// both are answered.
+	dbIdentity, err := ensureDatabaseIdentity(ctx, db)
+	if err != nil {
+		return false, fmt.Errorf("%w: %w", ErrNotApplied, err)
+	}
+	if markerIdentity != "" && markerIdentity != dbIdentity {
+		// Treat this as never loaded by this db
+		marker = ""
+		markerIdentity = ""
+	}
 	if head == "" || marker == "" || marker == head {
 		return false, nil
 	}
@@ -239,7 +248,7 @@ func Apply(ctx context.Context, r *Repo, db *sql.DB, version int) (bool, error) 
 	if err := ImportTables(ctx, db, r.Dir(), SettingsTables); err != nil {
 		return false, fmt.Errorf("%w: %w", ErrNotApplied, err)
 	}
-	if err := r.setLoadedHead(ctx, head); err != nil {
+	if err := r.setLoadedHead(ctx, head, dbIdentity); err != nil {
 		return true, err
 	}
 	return true, nil
@@ -363,7 +372,7 @@ func Load(ctx context.Context, r *Repo, db *sql.DB, version int) error {
 	if err != nil {
 		return err
 	}
-	marker, err := r.loadedHead(ctx)
+	marker, markerIdentity, err := r.loadedHead(ctx)
 	if err != nil {
 		return err
 	}
@@ -375,6 +384,26 @@ func Load(ctx context.Context, r *Repo, db *sql.DB, version int) error {
 	empty, err := databaseIsEmpty(ctx, db)
 	if err != nil {
 		return err
+	}
+	dbIdentity, err := databaseIdentity(ctx, db)
+	if err != nil {
+		return err
+	}
+	if dbIdentity == "" && !empty {
+		dbIdentity, err = ensureDatabaseIdentity(ctx, db)
+		if err != nil {
+			return err
+		}
+		markerIdentity = dbIdentity
+	} else if dbIdentity == "" {
+		dbIdentity, err = ensureDatabaseIdentity(ctx, db)
+		if err != nil {
+			return err
+		}
+	}
+	if markerIdentity != "" && markerIdentity != dbIdentity {
+		marker = ""
+		markerIdentity = ""
 	}
 	// The ordinary restart: the repository is exactly where this host left
 	// it, and this host has a database of its own to run on. Nothing is
@@ -438,7 +467,7 @@ func Load(ctx context.Context, r *Repo, db *sql.DB, version int) error {
 	} else if err := ImportTables(ctx, db, r.Dir(), SettingsTables); err != nil {
 		return err
 	}
-	if err := r.setLoadedHead(ctx, head); err != nil {
+	if err := r.setLoadedHead(ctx, head, dbIdentity); err != nil {
 		return err
 	}
 	return unreachable
@@ -449,6 +478,10 @@ func Load(ctx context.Context, r *Repo, db *sql.DB, version int) error {
 // repository next what they are looking at, and the CI step that checks
 // what they propose to change in it.
 func Seed(ctx context.Context, r *Repo, db *sql.DB, version int) error {
+	dbIdentity, err := ensureDatabaseIdentity(ctx, db)
+	if err != nil {
+		return err
+	}
 	if err := writeReadme(r.Dir(), deploymentName(ctx, db)); err != nil {
 		return err
 	}
@@ -467,7 +500,7 @@ func Seed(ctx context.Context, r *Repo, db *sql.DB, version int) error {
 	if err := r.recordChurnExport(ctx, r.now()); err != nil {
 		return err
 	}
-	if err := r.recordLoadedHead(ctx); err != nil {
+	if err := r.recordLoadedHead(ctx, dbIdentity); err != nil {
 		return err
 	}
 	if err := r.Push(ctx); err != nil {
@@ -478,7 +511,7 @@ func Seed(ctx context.Context, r *Repo, db *sql.DB, version int) error {
 	// .github/workflows (installWorkflow says why that happens) must not
 	// be able to take the dump down with it, and the undo that handles
 	// that case needs a commit to come back to.
-	_, err := r.installWorkflow(ctx)
+	_, err = r.installWorkflow(ctx, dbIdentity)
 	return err
 }
 
@@ -584,7 +617,11 @@ func sync(ctx context.Context, r *Repo, db *sql.DB, version int, forceChurn bool
 	// of, has to end up with it anyway. Unlike the README it is written
 	// only when it is missing, because it is a file an operator may edit
 	// and grain must not fight them for.
-	installed, err := r.installWorkflow(ctx)
+	dbIdentity, err := ensureDatabaseIdentity(ctx, db)
+	if err != nil {
+		return false, err
+	}
+	installed, err := r.installWorkflow(ctx, dbIdentity)
 	if err != nil {
 		return installed, err
 	}
@@ -638,7 +675,7 @@ func sync(ctx context.Context, r *Repo, db *sql.DB, version int, forceChurn bool
 		// unreachable remote) must not leave the next start believing the
 		// repository has moved on without it and importing its own stale
 		// dump back over a database that is ahead.
-		if err := r.recordLoadedHead(ctx); err != nil {
+		if err := r.recordLoadedHead(ctx, dbIdentity); err != nil {
 			return true, err
 		}
 	}
