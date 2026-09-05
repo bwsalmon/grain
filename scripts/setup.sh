@@ -1409,6 +1409,64 @@ ensure_kontur_kvm_access() {
   install -d -m0755 -o "$GRAIN_USER" -g "$GRAIN_USER" /var/lib/kontur/vms
 }
 
+# ensure_kontur_nested_virt makes this host's KVM pass hardware
+# virtualization through to the sandboxes it boots, so a dispatched task
+# can run VMs (docker's own runtimes, kind, a nested cloud-hypervisor) of
+# its own.
+#
+# Nothing has to be configured on either side to get that in the ordinary
+# case, which is worth stating before the code below suggests otherwise:
+# kvm_intel and kvm_amd both ship nested=Y, and cloud-hypervisor leaves
+# the CPU's vmx/svm flag in the guest's CPUID unless asked for "--cpus
+# nested=off" (v53.0, which third_party/kontur pins). The guest-side half
+# -- the sandbox account being in the "kvm" group -- is baked into the
+# image by scripts/kontur/guest-setup.sh.
+#
+# What this does is the case where the default was overridden: a distro
+# or an operator that set nested=0 in a modprobe drop-in, where every
+# sandbox gets a CPU with no virtualization flag and nothing in the guest
+# can say why. It writes the drop-in that turns it back on -- which takes
+# effect on the next module load, i.e. after a reboot -- and reloads the
+# module now if nothing is using it. It never unloads a module something
+# holds: that would be pulling KVM out from under a running VM, and this
+# script is the updater as well as the installer, so it runs against
+# hosts with live sandboxes on them.
+#
+# The reading itself is reported live on the sandbox health pane
+# (pkg/sysstat's NestedVirtualization, beside each sandbox's own
+# guest-side state), so this logging one line at install time is a
+# convenience rather than the only account of it.
+ensure_kontur_nested_virt() {
+  if [ "$GRAIN_KONTUR_ENABLE" != "1" ]; then
+    return
+  fi
+  local module param value
+  for module in kvm_intel kvm_amd; do
+    param="/sys/module/${module}/parameters/nested"
+    [ -r "$param" ] || continue
+    value="$(cat "$param")"
+    case "$value" in
+      Y | y | 1)
+        log "nested virtualization is on for ${module} (nested=${value}), so sandboxes can run VMs of their own"
+        return
+        ;;
+    esac
+    log "nested virtualization is off for ${module} (nested=${value}); turning it on so sandboxes can run VMs of their own"
+    install -d -m0755 /etc/modprobe.d
+    echo "options ${module} nested=1" > "/etc/modprobe.d/kvm-nested-grain.conf"
+    # `modprobe -r` refuses a module in use and says so; that is the
+    # answer here rather than a failure, so the reload is attempted and
+    # its outcome reported instead of being allowed to end the script.
+    if modprobe -r "$module" 2>/dev/null && modprobe "$module"; then
+      log "reloaded ${module} with nesting on"
+    else
+      log "${module} is in use, so it keeps nesting off until this host is rebooted (the drop-in in /etc/modprobe.d applies then)"
+    fi
+    return
+  done
+  log "neither kvm_intel nor kvm_amd is loaded on this host, so there is no nested-virtualization setting to read"
+}
+
 # ensure_kontur_git_proxy_host resolves GRAIN_KONTUR_GIT_PROXY_HOST -- the
 # address startGitProxy (cmd/grain/daemon.go) advertises to a kontur VM in
 # place of the loopback address it binds to by default, since a kontur VM's
@@ -3097,6 +3155,11 @@ main() {
   setup_data_dir
   ensure_kontur_images
   ensure_kontur_kvm_access
+  # After ensure_kontur_kvm_access: that step is the one that turns
+  # kontur sandboxing off entirely on a host with no /dev/kvm, and there
+  # is nothing to say about nesting on a host that is not booting VMs in
+  # the first place.
+  ensure_kontur_nested_virt
   ensure_kontur_git_proxy_host
   reformat_store_if_schema_changed
   format_target_repo_if_empty
