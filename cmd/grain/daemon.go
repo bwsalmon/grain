@@ -2583,9 +2583,13 @@ func startUIServer(cfg config, store *model.Store, transcriptDir string, sandbox
 		// in the same DataDir; "config-sync" reads the rollout loop that
 		// deployed this process in the first place -- terraform/gcp/
 		// files/config-sync.sh, installed as grain-config-sync.service
-		// by that same terraform's startup.sh. All three are colocated
-		// with this process by construction under a real deployment (v2
-		// runs the daemon directly on the host that config-sync watches,
+		// by that same terraform's startup.sh; "dmesg" reads the kernel
+		// log of the machine underneath all three, which is where the
+		// failures none of them can report land -- an agent CLI killed
+		// by the OOM killer writes nothing about it to the daemon's own
+		// journal (pkg/systemlog.Dmesg). All four are colocated with
+		// this process by construction under a real deployment (v2 runs
+		// the daemon directly on the host that config-sync watches,
 		// unlike v1's nested guest -- deploy.sh's own ensure_ops_agent
 		// comment) -- unlike Secrets/Credentials above, there is no case
 		// here where this deployment has one but not the others
@@ -2594,6 +2598,7 @@ func startUIServer(cfg config, store *model.Store, transcriptDir string, sandbox
 			"daemon":          systemlog.Journalctl{Unit: "grain-daemon.service"},
 			"git-proxy-audit": systemlog.File{Path: filepath.Join(cfg.dataDir, "state", "git-proxy", "audit.log")},
 			"config-sync":     systemlog.Journalctl{Unit: "grain-config-sync.service"},
+			"dmesg":           systemlog.Dmesg{},
 		},
 		// liveTranscriptDir reads back whatever the Framework driving a
 		// still-running attempt has mirrored so far into

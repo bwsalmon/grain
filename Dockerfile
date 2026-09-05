@@ -26,10 +26,15 @@
 #                     the UI's Debug pane, which is where an operator
 #                     asks what is spending the daemon's machine once
 #                     sandbox health has said it is loaded
-#   systemd           for `journalctl` alone -- pkg/systemlog.Journalctl
-#                     shells out to it for the UI's Logs pane, against
-#                     the host journal scripts/setup.sh mounts in (see
-#                     that script's own docker_run_args)
+#   systemd           for `journalctl` alone -- pkg/systemlog's Journalctl
+#                     and Dmesg both shell out to it for the UI's Logs
+#                     pane, against the host journal scripts/setup.sh
+#                     mounts in (see that script's own docker_run_args).
+#                     The kernel log is read through it too, rather than
+#                     through util-linux's dmesg(1): journald has already
+#                     collected those messages into that same mounted
+#                     journal, and dmesg(1) would want /dev/kmsg and
+#                     CAP_SYSLOG, neither of which this container is given
 #   docker CLI        pkg/kontur talks to the *host's* docker daemon over
 #                     the socket setup.sh mounts, to inspect the
 #                     container each sandbox VM runs in, and pkg/mcp's
