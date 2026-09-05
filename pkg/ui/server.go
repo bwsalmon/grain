@@ -131,6 +131,8 @@ func (s *Server) routes() {
 	s.route("GET /api/github-tokens", s.handleListGitHubTokens)
 	s.route("PUT /api/github-tokens/{name}", s.handleSetGitHubToken)
 	s.route("DELETE /api/github-tokens/{name}", s.handleDeleteGitHubToken)
+	s.route("PUT /api/github-credential-patterns", s.handleSetGitHubCredentialPattern)
+	s.route("DELETE /api/github-credential-patterns", s.handleDeleteGitHubCredentialPattern)
 
 	s.route("GET /api/secrets", s.handleListSecrets)
 	s.route("PUT /api/secrets/{secret}/{key}", s.handleSetSecret)

@@ -3,9 +3,11 @@ package ui
 import (
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"slices"
 	"sort"
+	"strings"
 
 	"github.com/bwsalmon/grain/pkg/model"
 )
@@ -79,6 +81,29 @@ type gitHubTokenInfo struct {
 	NeedsRestart bool `json:"needsRestart"`
 }
 
+// gitHubPatternInfo is one credentials.json entry: which credential the
+// repos a pattern covers are pushed and pulled with.
+//
+// grain/task-4 made these editable from here. They were the last part of
+// setting a deployment up that needed a shell on the host -- material
+// could be pasted into this pane, but the entry that makes a repo
+// resolve to it could not, so a deployment configured entirely through
+// the UI still failed every clone with "no credential configured."
+type gitHubPatternInfo struct {
+	// Pattern is "*" (the deployment default), "owner/*", or
+	// "owner/repo", canonicalized as gitproxy.ValidCredentialPattern
+	// writes it.
+	Pattern string `json:"pattern"`
+	// Credential is the name this pattern resolves to.
+	Credential string `json:"credential"`
+	// Missing is a pattern naming a credential that is not configured --
+	// the drift that makes every push it covers fail closed. SetPattern
+	// refuses to create one, so this only ever describes an entry that
+	// was already on the host, or one whose credential was removed
+	// outside this pane.
+	Missing bool `json:"missing,omitempty"`
+}
+
 // gitHubTokensResponse is GET /api/github-tokens' body, and what setting
 // or removing one answers with afterward -- the same
 // respond-with-the-current-shape convention every other mutation in this
@@ -89,6 +114,15 @@ type gitHubTokensResponse struct {
 	// explains what it just wrote -- a path, never any content of one.
 	Dir    string            `json:"dir,omitempty"`
 	Tokens []gitHubTokenInfo `json:"tokens"`
+	// Patterns is the credential ladder itself, sorted by pattern: the
+	// "which repos reach which credential" half, next to the "which
+	// credentials exist" half above.
+	Patterns []gitHubPatternInfo `json:"patterns"`
+	// DefaultName is the credential the "*" entry names, empty when this
+	// deployment has none -- the state a fresh one starts in, and the
+	// one worth saying plainly, since in it every repo not named
+	// explicitly fails its next clone.
+	DefaultName string `json:"defaultName,omitempty"`
 	// RestartRequired is any row's NeedsRestart, so the pane can show one
 	// banner rather than reading every row to find out whether to.
 	RestartRequired bool `json:"restartRequired"`
@@ -143,7 +177,82 @@ func (c *Client) gitHubTokens() []gitHubTokenInfo {
 	return out
 }
 
+// gitHubCredentialPatterns is the ladder as this pane reports it, sorted
+// by pattern, with each entry told whether anything actually backs it.
+func (c *Client) gitHubCredentialPatterns() []gitHubPatternInfo {
+	credentials := c.Config.Credentials
+	if credentials == nil {
+		return nil
+	}
+	present := credentials.Names()
+	patterns := credentials.Patterns()
+	out := make([]gitHubPatternInfo, 0, len(patterns))
+	for pattern, name := range patterns {
+		out = append(out, gitHubPatternInfo{
+			Pattern:    pattern,
+			Credential: name,
+			Missing:    name != "anonymous" && !slices.Contains(present, name),
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Pattern < out[j].Pattern })
+	return out
+}
+
 func (s *Server) handleListGitHubTokens(w http.ResponseWriter, r *http.Request) {
+	s.respondWithGitHubTokens(w)
+}
+
+type setGitHubPatternRequest struct {
+	// Pattern travels in the body rather than the path because it
+	// contains a "/" and may be a bare "*" -- neither of which survives
+	// a path segment without escaping that only makes the route harder
+	// to read. It is not secret material; this is legibility, not the
+	// reason a token's value is in a body.
+	Pattern    string `json:"pattern"`
+	Credential string `json:"credential"`
+}
+
+// handleSetGitHubCredentialPattern points one repo pattern at a
+// credential -- including "*", which is how a deployment gets a default
+// credential at all.
+//
+// Unlike a token, this takes effect without a restart: the git proxy
+// re-reads credentials.json when it changes
+// (gitproxy.CredentialSet.patternsLocked), so the repos this covers
+// resolve to the named credential on their very next clone. Which
+// *capabilities* this process offers is still fixed at startup, which is
+// what the pane's restart banner is about and is a separate question
+// from this one.
+func (s *Server) handleSetGitHubCredentialPattern(w http.ResponseWriter, r *http.Request) {
+	credentials := s.tasks.Config.Credentials
+	if credentials == nil {
+		writeError(w, http.StatusNotFound, errGitHubTokensUnavailable)
+		return
+	}
+	var req setGitHubPatternRequest
+	if !readJSON(w, r, &req) {
+		return
+	}
+	if _, err := credentials.SetPattern(req.Pattern, strings.TrimSpace(req.Credential)); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	s.respondWithGitHubTokens(w)
+}
+
+// handleDeleteGitHubCredentialPattern removes one credentials.json
+// entry. The pattern is a query parameter for the same reason it is a
+// body field above -- a DELETE with a body is worse than either.
+func (s *Server) handleDeleteGitHubCredentialPattern(w http.ResponseWriter, r *http.Request) {
+	credentials := s.tasks.Config.Credentials
+	if credentials == nil {
+		writeError(w, http.StatusNotFound, errGitHubTokensUnavailable)
+		return
+	}
+	if err := credentials.RemovePattern(r.URL.Query().Get("pattern")); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
 	s.respondWithGitHubTokens(w)
 }
 
@@ -164,9 +273,29 @@ func (s *Server) handleSetGitHubToken(w http.ResponseWriter, r *http.Request) {
 	if !readJSON(w, r, &req) {
 		return
 	}
-	if err := credentials.SetToken(r.PathValue("name"), req.Value); err != nil {
+	name := r.PathValue("name")
+	if err := credentials.SetToken(name, req.Value); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
+	}
+	// The first credential a deployment is given becomes its default.
+	//
+	// Without this, an operator who has done the only thing this pane
+	// offers on a fresh deployment -- paste a token -- has a ladder with
+	// material in it and no entry naming that material, which is exactly
+	// the state every clone fails closed in, and the state that used to
+	// be got out of by hand-editing credentials.json on the host
+	// (grain/task-4). Naming the only credential there is as the default
+	// is the only answer that could be meant, so it is made rather than
+	// asked for; once there is a default, adding a second token never
+	// touches it, and the pane can repoint it.
+	if credentials.DefaultName() == "" {
+		if _, err := credentials.SetPattern("*", name); err != nil {
+			// The token is written either way, and the pane shows the
+			// ladder it ended up with -- this is worth a log line and
+			// not worth failing a successful write over.
+			log.Printf("ui: making %q the default GitHub credential: %v", name, err)
+		}
 	}
 	s.respondWithGitHubTokens(w)
 }
@@ -176,9 +305,11 @@ func (s *Server) handleSetGitHubToken(w http.ResponseWriter, r *http.Request) {
 // A credential credentials.json still names is refused: the ladder would
 // go on selecting it and every push it covers would fail closed with "no
 // credential configured" (gitproxy.CredentialSet.Select), which is a
-// deployment-wide outage bought with one click. The pattern file is not
-// editable from here, so the error says where to go instead of quietly
-// rewriting a file this pane does not own.
+// deployment-wide outage bought with one click. Those entries are
+// editable from this same pane now (handleSetGitHubCredentialPattern),
+// so the error names them and leaves the order of the two decisions to
+// whoever is making them, rather than silently dropping ladder entries
+// on the way to deleting a token.
 func (s *Server) handleDeleteGitHubToken(w http.ResponseWriter, r *http.Request) {
 	credentials := s.tasks.Config.Credentials
 	if credentials == nil {
@@ -188,8 +319,8 @@ func (s *Server) handleDeleteGitHubToken(w http.ResponseWriter, r *http.Request)
 	name := r.PathValue("name")
 	if patterns := credentials.PatternsFor(name); len(patterns) > 0 {
 		writeError(w, http.StatusBadRequest, fmt.Errorf(
-			"credentials.json still maps %v to %q: remove that entry on the host first, "+
-				"or every repo those patterns cover fails its next push", patterns, name))
+			"the credential ladder still maps %v to %q: repoint or remove those entries first, "+
+				"or every repo they cover fails its next push", patterns, name))
 		return
 	}
 	if err := credentials.Remove(name); err != nil {
@@ -202,7 +333,8 @@ func (s *Server) handleDeleteGitHubToken(w http.ResponseWriter, r *http.Request)
 func (s *Server) respondWithGitHubTokens(w http.ResponseWriter) {
 	credentials := s.tasks.Config.Credentials
 	if credentials == nil {
-		writeJSON(w, http.StatusOK, gitHubTokensResponse{Enabled: false, Tokens: []gitHubTokenInfo{}})
+		writeJSON(w, http.StatusOK, gitHubTokensResponse{
+			Enabled: false, Tokens: []gitHubTokenInfo{}, Patterns: []gitHubPatternInfo{}})
 		return
 	}
 	tokens := s.tasks.gitHubTokens()
@@ -214,6 +346,8 @@ func (s *Server) respondWithGitHubTokens(w http.ResponseWriter) {
 		Enabled:         true,
 		Dir:             credentials.Dir(),
 		Tokens:          tokens,
+		Patterns:        s.tasks.gitHubCredentialPatterns(),
+		DefaultName:     credentials.DefaultName(),
 		RestartRequired: restart,
 	})
 }
