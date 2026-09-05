@@ -209,9 +209,26 @@ func install() (*deployment, error) {
 	return d, nil
 }
 
+// The suspend policy setup.sh imposes on the host it deploys to
+// (disable_host_suspend), named here so the assertion below and the
+// teardown that undoes it cannot drift apart.
+var sleepTargets = []string{
+	"sleep.target", "suspend.target", "hibernate.target", "hybrid-sleep.target",
+}
+
+const logindDropIn = "/etc/systemd/logind.conf.d/10-grain-no-suspend.conf"
+
 // teardown puts the host back: every unit this deploy installed, the
 // container it started, the wrappers it wrote, and the account it created.
 func (d *deployment) teardown() {
+	// Including the one thing this deploy changed about the host itself
+	// rather than adding to it. A runner left unable to suspend is a
+	// small thing; a runner left unable to suspend by a suite that never
+	// says so is how a machine ends up in a state nobody can account for.
+	sudo(append([]string{"systemctl", "unmask"}, sleepTargets...)...)
+	sudo("rm", "-f", logindDropIn)
+	sudo("systemctl", "reload", "systemd-logind.service")
+
 	for _, unit := range []string{
 		"grain-daemon.service", "grain-reboot.path", "grain-restart.path",
 		"grain-reboot.service", "grain-restart.service",
@@ -494,6 +511,31 @@ func TestTheHostControlUnitsAreInstalledAndWatching(t *testing.T) {
 	control := filepath.Join(d.data, "control")
 	if !sudoTest("-d", control) {
 		t.Errorf("%s was never created", control)
+	}
+}
+
+// The deployed host will not suspend under the task it was given.
+//
+// Asked of systemd, not of the script: "the script contains a mask
+// command" and "this machine cannot reach sleep.target" are different
+// claims, and only the second one is the reason the step exists. A host
+// that suspends mid-task takes the daemon's clock, its UI and whatever
+// the agent had open down with it, and says nothing about it afterwards.
+func TestTheDeployedHostCannotSuspend(t *testing.T) {
+	requireInstaller(t)
+	deployed(t)
+
+	// is-enabled exits non-zero for a masked unit, which is why this
+	// reads the state word rather than the exit code (`run` judges
+	// neither for us).
+	for _, target := range sleepTargets {
+		state := strings.TrimSpace(sudo("systemctl", "is-enabled", target).stdout)
+		if state != "masked" {
+			t.Errorf("%s is %q, so this host can still put itself to sleep under a running task", target, state)
+		}
+	}
+	if !sudoTest("-f", logindDropIn) {
+		t.Errorf("%s was never written, so a closed lid still asks for a suspend on every event", logindDropIn)
 	}
 }
 
