@@ -6929,3 +6929,42 @@ report those. A deployment with no reader wired in (`grain demo`, an
 image without `procps`) gets the same "not available" note every other
 optional panel already shows, rather than a pane that could only ever
 error.
+
+## The kernel log, in the Debug pane
+
+Top says which process is wearing the machine out. The failure it cannot
+describe is the one where the process is *gone*: an agent CLI picked off
+by the OOM killer mid-run, a disk erroring under a sandbox's checkout, an
+interface dropping the git proxy's traffic. None of those write a word to
+the daemon's own journal — the thing that would have written it is what
+the kernel stopped — so the Logs pane could show three sources that all
+went quiet at the same second and no way to ask why.
+
+`dmesg` is a fourth source in that same dropdown now
+(`GET /api/logs/dmesg`, `pkg/systemlog.Dmesg`). It is a `LogSource` like
+the other three rather than a tab of its own: the kernel ring buffer is
+lines of text with timestamps, which is exactly what the Logs pane
+already is, and putting it beside `daemon` means comparing the two is a
+change of dropdown rather than a change of pane.
+
+It reads that log with `journalctl --dmesg`, not `dmesg(1)`. The two
+print the same messages for the same boot — `--dmesg` implies
+`journalctl`'s own `-b` — but only one of them is reachable from where
+the daemon runs. `dmesg(1)` goes to the ring buffer through `/dev/kmsg`
+or `syslog(2)`, and the daemon's container is given neither: it runs
+unprivileged as `$GRAIN_USER`, with no `CAP_SYSLOG` and no such device
+(`scripts/setup.sh`'s `docker_run_args`). Getting it working would mean
+adding `util-linux` to the image *and* handing the container a capability
+it has no other use for. journald has already collected those same
+kernel messages into the host journal that `docker_run_args` bind-mounts
+in read-only for `Journalctl`, `systemd-journal` group and all — so the
+kernel log arrives through a mount and a group the deployment already
+has, and `Dockerfile` needs nothing it does not already carry. Both
+sources are one `journalctl` helper now, differing in the matcher they
+pass and the name their errors carry.
+
+The consequence worth knowing: this is the *host's* kernel log, not a
+sandbox's. Every kontur guest runs its own kernel, and an OOM inside one
+of those is that guest's business. What shows up here is what happened
+to the machine the daemon and every sandbox share — which is the level
+the questions that reach this pane are asked at.
