@@ -122,6 +122,8 @@ func (s *Server) routes() {
 	s.route("POST /api/suite-runs", s.handleCreateSuiteRun)
 	s.route("GET /api/suite-runs/{id}", s.handleGetSuiteRun)
 
+	s.route("GET /api/agent-models", s.handleListAgentModels)
+
 	s.route("GET /api/agent-keys", s.handleListAgentKeys)
 	s.route("PUT /api/agent-keys/{framework}", s.handleSetAgentKey)
 	s.route("DELETE /api/agent-keys/{framework}", s.handleDeleteAgentKey)
