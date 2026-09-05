@@ -1626,3 +1626,161 @@ fieldset legend {
 .comment-form textarea {
   flex: 1;
 }
+
+/* ---------- Phone (src/phone.js). ----------
+
+   App.jsx publishes phone.js's answer as data-phone on <html>, the way
+   AppThemeProvider publishes the resolved light/dark mode, so this is
+   the same question the layout asks in JS rather than a second media
+   query free to drift from it. It is an attribute rather than a class on
+   the shell for a second reason: the overlay panes are rendered into a
+   portal outside .app-shell, and they need these rules too.
+
+   Nothing here is a phone-only *feature*. It is the same views, given
+   the room a 390px screen has: the 1.75rem gutters every page draws come
+   in to 1rem, a task row wraps into two lines instead of truncating
+   everything after its title, a board column is a screen wide instead of
+   a third of one, and the two-column task detail stacks. A tablet
+   matches none of this and is untouched. */
+
+/* The shell is "rail, then page" beside each other everywhere else; on a
+   phone the rail is PhoneNav's top bar plus its drawer, so it is "bar,
+   then page" stacked. */
+:root[data-phone="true"] .app-shell {
+  flex-direction: column;
+  /* dvh rather than the vh above it: a phone browser's vh is measured
+     with the address bar retracted, so 100vh puts the bottom of the
+     page under a toolbar that is currently showing -- which on the task
+     list is the last row and on a form is the Save button. */
+  height: 100dvh;
+}
+
+/* Both page roots take what is left of that height and scroll their own
+   overflow, which in a *column* needs an explicit floor: without it a
+   long list grows its flex item instead of scrolling inside it, and the
+   bar above scrolls off with it. */
+:root[data-phone="true"] main,
+:root[data-phone="true"] .main-column {
+  min-height: 0;
+}
+
+/* The gutter, everywhere a page draws one. 1.75rem of it on each side of
+   a 390px screen is a fifth of the window spent on margin. */
+:root[data-phone="true"] .content-header,
+:root[data-phone="true"] .task-list-toolbar,
+:root[data-phone="true"] .select-all,
+:root[data-phone="true"] .task-row,
+:root[data-phone="true"] .board-columns,
+:root[data-phone="true"] .repo-list-row,
+:root[data-phone="true"] .repo-page-header,
+:root[data-phone="true"] .repo-tasks-switch,
+:root[data-phone="true"] .schedule-row,
+:root[data-phone="true"] .template-row,
+:root[data-phone="true"] .empty,
+:root[data-phone="true"] .overlay-pane,
+:root[data-phone="true"] .overlay-pane-back,
+:root[data-phone="true"] .overlay-pane-header {
+  padding-left: 1rem;
+  padding-right: 1rem;
+}
+:root[data-phone="true"] .board-hidden-note {
+  margin-left: 1rem;
+  margin-right: 1rem;
+}
+
+/* A task row is one line of "badge, number, title, status, chips" that
+   truncates the title and drops nothing, which needs a width a phone
+   does not have -- the chips alone (repo, base, capabilities) can be
+   wider than the screen. So it wraps: the title keeps the first line and
+   is allowed two of them, and the status and the chips take rows of
+   their own beneath it. Taller rows, but a row you can read.
+
+   The touch target grows with it: 0.6rem of padding on a 0.9rem line is
+   under 40px, which is below what a thumb can reliably hit. */
+:root[data-phone="true"] .task-row {
+  flex-wrap: wrap;
+  gap: 0.35rem 0.6rem;
+  padding-top: 0.75rem;
+  padding-bottom: 0.75rem;
+}
+:root[data-phone="true"] .task-title {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  flex: 1 1 8rem;
+}
+:root[data-phone="true"] .task-activity,
+:root[data-phone="true"] .chips {
+  flex: 1 1 100%;
+}
+:root[data-phone="true"] .chips {
+  flex-wrap: wrap;
+  row-gap: 0.35rem;
+}
+/* Reordering the backlog is a drag, and a drag is a gesture this list
+   has no touch implementation of (the rows use the HTML5 drag events,
+   which a phone browser does not fire). The handle is hidden rather than
+   left as an affordance that does nothing when pressed -- and with it
+   the empty column held open beside the rows that never had one. */
+:root[data-phone="true"] .task-drag-handle,
+:root[data-phone="true"] .task-drag-placeholder {
+  display: none;
+}
+/* A stacked task still has to read as nested, but 3.25rem of indent on
+   a phone leaves its title about a third of the screen. */
+:root[data-phone="true"] .task-sublist .task-row {
+  padding-left: 1.9rem;
+}
+
+/* A board column is a screen wide, and the strip snaps: the board is
+   the one view that scrolls sideways, and on a phone that turns into
+   swiping between whole columns rather than dragging a strip of
+   thirds about. */
+:root[data-phone="true"] .board-columns {
+  scroll-snap-type: x mandatory;
+  gap: 0.75rem;
+}
+:root[data-phone="true"] .board-column {
+  flex: 0 0 calc(100% - 2rem);
+  scroll-snap-align: center;
+}
+
+/* The task detail's two columns stack, for the reason the narrow-window
+   rule above (max-width: 720px) stacks them -- repeated under this
+   condition because a phone held sideways is wider than 720px and has
+   even less height to give a sticky side column. */
+:root[data-phone="true"] .detail-layout {
+  flex-direction: column;
+  gap: 1rem;
+}
+:root[data-phone="true"] .detail-side {
+  width: 100%;
+  position: static;
+}
+
+/* A textarea and a Comment button side by side leave the textarea about
+   half the screen; stacked, it gets the width and the button stays a
+   full-width target under it. */
+:root[data-phone="true"] .comment-form {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+/* Nothing on a phone can be reached by hovering, and a row that keeps
+   its hover tint after a tap reads as selected long after the tap is
+   over -- the pane that tap opened is already covering the row that
+   appears to still be highlighted. */
+@media (hover: none) {
+  .task-row:hover,
+  .repo-list-row:hover,
+  .schedule-row:hover,
+  .template-row:hover {
+    background: none;
+  }
+  /* A card, unlike those rows, has a ground of its own to go back to. */
+  .board-card:hover {
+    background: var(--surface);
+  }
+}
