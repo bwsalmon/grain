@@ -518,6 +518,7 @@ func TestKonturSandboxesAgainstARealDockerBackedVM(t *testing.T) {
 	assertGuestHasEgress(t, byName["run_command"], name)
 	assertGuestResolvesNames(t, byName["run_command"], name)
 	assertSandboxDiskSizeApplies(t, k, stateDir, byName["run_command"])
+	assertNestedVirtIsReported(t, k, "e1-1")
 
 	// A guest command's own exit status has to survive the guest's agent
 	// -> `kontur exec` -> `docker exec` chain intact. 42 proves the
@@ -602,6 +603,50 @@ func TestKonturSandboxesAgainstARealDockerBackedVM(t *testing.T) {
 	}
 	if status := string(bytes.TrimSpace(statusOut)); status != "running" {
 		t.Errorf("real VM container status = %q, want %q", status, "running")
+	}
+}
+
+// assertNestedVirtIsReported checks the nested-virtualization half of
+// KonturSandboxes.Health against a real guest: that the probe it adds to
+// its one stats command actually runs there and comes back as one of the
+// four states, and that the state is not the one the guest image is
+// responsible for.
+//
+// It deliberately does not require "ready". Whether a cloud-hypervisor
+// guest gets a CPU with vmx/svm at all depends on the machine underneath
+// -- a hosted CI runner is itself a VM, and what its own hypervisor
+// passes on is not this repository's to decide -- so "unsupported" here
+// is a fact about the runner rather than a regression.
+//
+// "denied" is different, and is the one thing asserted: it means
+// /dev/kvm is present and the account every tool call runs as cannot
+// open it, which is exactly the state a guest image built without
+// guest-setup.sh's kvm group grant is in, whatever the runner underneath
+// can do. This job builds its guest from that script, so it is the one
+// answer this test can attribute.
+func assertNestedVirtIsReported(t *testing.T, k *orchestrator.KonturSandboxes, sandbox string) {
+	t.Helper()
+
+	var health orchestrator.SandboxHealth
+	for _, h := range k.Health(context.Background()) {
+		if h.Sandbox == sandbox {
+			health = h
+		}
+	}
+	if health.Sandbox == "" {
+		t.Fatalf("Health reported no entry for the live sandbox %q", sandbox)
+	}
+	t.Logf("nested virtualization in this guest: %q", health.NestedVirt)
+
+	switch health.NestedVirt {
+	case orchestrator.NestedVirtReady, orchestrator.NestedVirtNoDevice, orchestrator.NestedVirtUnsupported:
+	case orchestrator.NestedVirtDenied:
+		t.Errorf("NestedVirt = %q: /dev/kvm is there and the sandbox account cannot open it, "+
+			"which means scripts/kontur/guest-setup.sh's kvm group grant did not reach this image",
+			health.NestedVirt)
+	default:
+		t.Errorf("NestedVirt = %q, want one of the four states the probe prints -- "+
+			"an empty value means it never ran in the guest at all", health.NestedVirt)
 	}
 }
 
