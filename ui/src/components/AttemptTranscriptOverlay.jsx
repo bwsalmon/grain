@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import api from "../api.js";
 import Overlay from "./Overlay.jsx";
 
@@ -13,6 +13,12 @@ import Overlay from "./Overlay.jsx";
 // this open on a long-running attempt is what "checking up on a
 // long-running agent" (bwsalmon/agents#446) means in practice.
 const REFRESH_MS = 5000;
+
+// How far from the bottom still counts as "at the bottom" when deciding
+// whether to keep following the tail: fractional line heights and a
+// browser's own rounding leave scrollTop a pixel or two short of the
+// arithmetic bottom even when the pane is scrolled all the way down.
+const PINNED_SLACK_PX = 24;
 
 // AttemptTranscriptOverlay is what typing on a task attempt in
 // DetailOverlay's own Timeline opens: the single scrolling pane over
@@ -29,6 +35,11 @@ export default function AttemptTranscriptOverlay({
   showError,
 }) {
   const [transcript, setTranscript] = useState(null);
+  const view = useRef(null);
+  // Whether the pane was scrolled to the bottom when the next lot of
+  // transcript arrived. It starts true so the first render lands at the
+  // end, and goes false the moment the reader scrolls up (below).
+  const pinned = useRef(true);
 
   const refresh = useCallback(async () => {
     try {
@@ -51,10 +62,34 @@ export default function AttemptTranscriptOverlay({
     return () => clearInterval(interval);
   }, [attempt.finishedAt, refresh]);
 
+  // Open at the end, not at the top (grain/task-22). A transcript is
+  // written oldest-first and can run to thousands of lines, and what
+  // anyone opening one wants to see is the last thing the agent did --
+  // why the attempt failed, or where a still-running one has got to --
+  // not the prompt it started from an hour ago. Scrolling to the end by
+  // hand every time was the complaint; the top is still one flick away.
+  //
+  // The same effect keeps following the tail as the 5s poll above
+  // brings in more of a running attempt's transcript, but only while
+  // the reader has left the pane at the bottom: once they scroll up to
+  // read something, the next poll must not yank them back down.
+  useEffect(() => {
+    const el = view.current;
+    if (!el || transcript === null || !pinned.current) return;
+    el.scrollTop = el.scrollHeight;
+  }, [transcript]);
+
+  const onScroll = useCallback(() => {
+    const el = view.current;
+    if (!el) return;
+    pinned.current =
+      el.scrollHeight - el.scrollTop - el.clientHeight <= PINNED_SLACK_PX;
+  }, []);
+
   return (
     <Overlay onClose={onClose} wide>
       <h2>Attempt #{attempt.number} transcript</h2>
-      <pre className="logs-view">
+      <pre className="logs-view" ref={view} onScroll={onScroll}>
         {transcript === null
           ? "Loading…"
           : transcript ||
