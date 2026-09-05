@@ -118,7 +118,14 @@ export default function TaskBoard({
     matches,
   );
   const shown = columns.reduce((n, c) => n + cards.get(c.id).length, 0);
-  const offBoard = hiddenStates(columns);
+  // The states behind `hidden` -- not every state no column names, only
+  // the ones some task is actually in right now. A board with no column
+  // for "Deferred" and no deferred tasks is not hiding anything of the
+  // sort, and naming it here would send somebody into the column editor
+  // after tasks that do not exist.
+  const offBoard = hiddenStates(columns).filter((s) =>
+    tasks.some((t) => t.state === s && matches(t)),
+  );
 
   const reorderEnabled = !!onReorder && sortBy === "manual";
 

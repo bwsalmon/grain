@@ -7,6 +7,12 @@ export const STATE_ORDER = [
   "failed",
   "awaiting_submit",
   "completed",
+  // The two states a task is in when it is not in play: one put aside
+  // for later and one over with. They sit together at the end because
+  // that is how they are read -- everything above this line is the work
+  // in flight, and both of these are hidden from a list until somebody
+  // asks for them (HIDDEN_BY_DEFAULT below).
+  "deferred",
   "closed",
 ];
 
@@ -48,8 +54,43 @@ export const STATE_LABELS = {
   // corrects, since there is no wait to report and it is rare enough not
   // to be worth a state of its own.
   completed: "Queued for merge",
+  // Put aside on purpose (model.StateDeferred): still work grain is
+  // meant to do one day, but not work anybody is waiting on today, so it
+  // is out of the way until somebody picks it back up. "Deferred" rather
+  // than "Later" or "Someday" because it is the word the store, the API
+  // and the CLI all use for it.
+  deferred: "Deferred",
   closed: "Closed",
 };
+
+// HIDDEN_BY_DEFAULT is the states a task list leaves out unless it is
+// asked for them: a list is about what is in play, and neither a closed
+// task nor one somebody deliberately put aside is. Each entry carries
+// the checkbox that turns it back on and, where there is one, the
+// deployment setting that decides what that checkbox starts at.
+//
+// deferred has no setting of its own on purpose. showClosedByDefault is
+// named for closed and means it (ui.Settings), and the case for a second
+// deployment-wide knob is unmade: deferring is a per-task "not now" and
+// the checkbox is right there in the toolbar for whoever wants to look.
+// The day somebody wants deferred tasks on by default, this is the one
+// place that has to learn a second key.
+//
+// Viewing a state's own filter is always a request to see it, so the
+// checkboxes have no say there -- see TaskList.jsx's inState, which is
+// the one reader of this list.
+export const HIDDEN_BY_DEFAULT = [
+  {
+    state: "deferred",
+    label: "Show deferred tasks",
+    configKey: null,
+  },
+  {
+    state: "closed",
+    label: "Show closed tasks",
+    configKey: "showClosedByDefault",
+  },
+];
 
 // stateLabel is STATE_LABELS for one task, plus the single thing a task's
 // state cannot say on its own: that the run it is in, or waiting for, is
@@ -434,9 +475,13 @@ export function repoRows(config, tasks) {
 //   - open: work outstanding, none of it moving -- queued, waiting on a
 //     human, failed, or sitting on the merge queue. A hollow ring, the
 //     queued badge's own figure.
-//   - idle: nothing but closed tasks, or no tasks at all. A grey dot.
+//   - idle: nothing but closed and deferred tasks, or no tasks at all.
+//     A grey dot.
 //
-// "Closed" is the only state counted as finished. "Queued for merge"
+// "Closed" and "Deferred" are the states counted as not-open, and they
+// are the same two a task list hides by default (HIDDEN_BY_DEFAULT): one
+// is over with, the other is work nobody is waiting on this month, and
+// neither is something to go and look at. "Queued for merge"
 // (STATE_LABELS.completed) reads like an ending and is not one -- the
 // task is waiting on the merge queue and can still come back needing a
 // human -- so a repo whose last task sits there is still open work.
@@ -450,7 +495,11 @@ export function repoActivity(row) {
       title: `Active -- ${running} task${running === 1 ? "" : "s"} running now`,
     };
   }
-  const open = row.total - (row.counts?.closed || 0);
+  // The states that are not open work, named in the order STATE_ORDER
+  // puts them so the idle title below reads "deferred or closed".
+  const setAside = HIDDEN_BY_DEFAULT.filter((h) => row.counts?.[h.state]);
+  const open =
+    row.total - setAside.reduce((n, h) => n + row.counts[h.state], 0);
   if (open > 0) {
     return {
       key: "open",
@@ -465,7 +514,9 @@ export function repoActivity(row) {
     label: "Idle",
     title:
       row.total > 0
-        ? "Idle -- every task here is closed"
+        ? `Idle -- every task here is ${setAside
+            .map((h) => h.state)
+            .join(" or ")}`
         : "Idle -- no tasks here yet",
   };
 }

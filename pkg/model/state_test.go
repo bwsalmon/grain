@@ -53,6 +53,11 @@ func goPrecedence() []string {
 	// the same completed_at the branch below tests).
 	unsubmitted := task(true)
 	unsubmitted.Links = []Link{{Kind: LinkFixes, Target: "acme/widgets#1"}}
+	// The other one: a deferral, also on the task itself. Approved, so
+	// that the row proves deferring outranks 'queued' rather than only
+	// restating the 'proposed' row below it.
+	deferred := task(true)
+	deferred.DeferredAt = &now
 	got := []State{
 		StateOf(approved, &Observation{ClosedAt: &now}, true, 0),
 		StateOf(unsubmitted, &Observation{CompletedAt: &now}, true, 0),
@@ -60,6 +65,7 @@ func goPrecedence() []string {
 		StateOf(approved, &Observation{PendingQuestionCommentID: &id}, true, 0),
 		StateOf(approved, nil, true, 0),
 		StateOf(approved, nil, false, MaxConsecutiveFailures),
+		StateOf(deferred, nil, false, 0),
 		StateOf(unapproved, nil, false, 0),
 		StateOf(approved, nil, false, 0),
 	}
@@ -101,7 +107,7 @@ func TestEveryStateIsReachable(t *testing.T) {
 	}
 	for _, s := range []State{StateProposed, StateQueued, StateRunning,
 		StateAwaitingReply, StateFailed, StateAwaitingSubmit, StateCompleted,
-		StateClosed} {
+		StateDeferred, StateClosed} {
 		if !seen[string(s)] {
 			t.Errorf("state %q is not reachable from the derivation", s)
 		}
@@ -186,6 +192,61 @@ func TestTransitionsNamesTheCompletionMomentAwaitingSubmit(t *testing.T) {
 	want[2] = Transition{StateCompleted, finished}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("Transitions once submitted = %+v, want %+v", got, want)
+	}
+}
+
+// TestDeferringLeavesApprovalAlone is the reason DeferredAt is a column
+// of its own rather than a second way of clearing approval: a task comes
+// back from a deferral into the state it went in with, so nobody has to
+// re-approve work they already approved.
+func TestDeferringLeavesApprovalAlone(t *testing.T) {
+	now := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name  string
+		task  Task
+		after State
+	}{
+		{"queued", task(true), StateQueued},
+		{"proposed", task(false), StateProposed},
+	} {
+		tk := tc.task
+		tk.DeferredAt = &now
+		if got := StateOf(tk, nil, false, 0); got != StateDeferred {
+			t.Errorf("a deferred %s task reads %q, want %q", tc.name, got, StateDeferred)
+		}
+		tk.DeferredAt = nil
+		if got := StateOf(tk, nil, false, 0); got != tc.after {
+			t.Errorf("undeferring a %s task leaves it %q, want %q", tc.name, got, tc.after)
+		}
+	}
+}
+
+// TestTransitionsNamesTheDeferralOnlyWhileItLasts is Transitions' own
+// half of the same rule the awaiting_reply test below covers: the record
+// holds the deferral a task is in, not the ones it has come back from,
+// so the timeline says so exactly while it is true.
+func TestTransitionsNamesTheDeferralOnlyWhileItLasts(t *testing.T) {
+	created := time.Date(2026, 8, 27, 10, 0, 0, 0, time.UTC)
+	deferred := created.Add(time.Hour)
+	tk := task(true)
+	tk.CreatedAt, tk.ApprovedAt = &created, &created
+	tk.DeferredAt = &deferred
+
+	got := Transitions(tk, nil, nil, nil, nil)
+	want := []Transition{
+		{StateProposed, created},
+		{StateQueued, created},
+		{StateDeferred, deferred},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("Transitions = %+v, want %+v", got, want)
+	}
+
+	tk.DeferredAt = nil
+	for _, tr := range Transitions(tk, nil, nil, nil, nil) {
+		if tr.State == StateDeferred {
+			t.Fatalf("a task picked back up should leave no deferred transition: %+v", tr)
+		}
 	}
 }
 

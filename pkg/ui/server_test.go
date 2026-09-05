@@ -253,6 +253,12 @@ func TestMutatingRoutesRespondWithTheTask(t *testing.T) {
 		// now implies, the same as every other row here.
 		{name: "withdraw approval", path: "/withdraw-approval", want: model.StateProposed},
 		{name: "approve again", path: "/approve", want: model.StateQueued},
+		// Deferring and picking back up, which is the other pair that
+		// moves a task without touching what it says: the approval
+		// survives the round trip, so the task lands back on 'queued'
+		// rather than among the proposals.
+		{name: "defer", path: "/defer", want: model.StateDeferred},
+		{name: "undefer", path: "/undefer", want: model.StateQueued},
 		{name: "capability", path: "/capabilities", body: `{"id":"gemini-key","attach":true}`, want: model.StateQueued},
 		{name: "comment", path: "/comments", body: `{"body":"hello"}`, want: model.StateQueued},
 		{name: "close", path: "/close", want: model.StateClosed},

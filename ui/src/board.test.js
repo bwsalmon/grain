@@ -21,12 +21,16 @@ describe("board columns", () => {
   });
 
   describe("the default board", () => {
-    it("covers every state but closed, once each", () => {
+    // The two states that are not "where is everything right now": one
+    // over with and one somebody put aside. Both are off the default
+    // board, and both are two clicks away in the editor for whoever
+    // disagrees.
+    it("covers every state but the deferred and closed ones, once each", () => {
       const states = boardStates(defaultColumns());
       expect(new Set(states).size).toBe(states.length);
       expect(states).toContain("proposed");
       expect(states).toContain("running");
-      expect(hiddenStates(defaultColumns())).toEqual(["closed"]);
+      expect(hiddenStates(defaultColumns())).toEqual(["deferred", "closed"]);
     });
 
     it("hands out a fresh copy, so an edit cannot leak into the next reset", () => {

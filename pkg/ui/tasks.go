@@ -959,6 +959,27 @@ func (s *Server) handleWithdrawApproval(w http.ResponseWriter, r *http.Request) 
 	s.respondWithTask(w, r, id)
 }
 
+// handleDefer and handleUndefer are the pair of buttons that put a task
+// aside and pick it back up again (Client.Defer, which says which states
+// it applies to and why the rest are refused).
+func (s *Server) handleDefer(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if err := s.tasks.Defer(r.Context(), id); err != nil {
+		writeClientError(w, err)
+		return
+	}
+	s.respondWithTask(w, r, id)
+}
+
+func (s *Server) handleUndefer(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if err := s.tasks.Undefer(r.Context(), id); err != nil {
+		writeClientError(w, err)
+		return
+	}
+	s.respondWithTask(w, r, id)
+}
+
 // handleSubmit is the UI's own "submit" button docs/data-model.md's UI
 // direction asks for, alongside the approve button handleApprove already
 // is: once a task's run has produced a pull request, this is what queues

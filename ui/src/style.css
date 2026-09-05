@@ -53,6 +53,12 @@
      a pull request to submit without reading the labels. */
   --state-awaiting-submit: #c2820b;
   --state-completed: #1a9c53;
+  /* Deferred is a cool slate, and the only cool grey on this palette:
+     every other quiet state here (proposed, queued, closed) is one of
+     the warm greys, and a task somebody put aside on purpose has to be
+     tellable at a glance from one nobody has approved yet and one that
+     is over with. */
+  --state-deferred: #7d8ea3;
   --state-closed: #9a9588;
   /* pr-merged is GitHub's own colour for a merged pull request -- the
      one timeline dot (Timeline's own "PR merged" event, bwsalmon/
@@ -113,6 +119,7 @@
   --state-failed: var(--danger);
   --state-awaiting-submit: #e2a33a;
   --state-completed: #3ec573;
+  --state-deferred: #8fa1b8;
   --state-closed: #85827b;
   --pr-merged: #a371f7;
 
@@ -246,6 +253,13 @@ body {
 }
 .dot-completed {
   background: var(--state-completed);
+}
+/* Hollow, like .dot-queued: a deferred task has not happened, and the
+   filled dots on this rail are the states that are happening or are
+   over. The colour is what tells it from queued. */
+.dot-deferred {
+  background: transparent;
+  border: 1.5px solid var(--state-deferred);
 }
 .dot-closed {
   background: var(--state-closed);
@@ -602,6 +616,11 @@ main.board {
 }
 .badge-completed::before {
   background: var(--state-completed);
+}
+.badge-deferred::before {
+  background: transparent;
+  border: 1.5px solid var(--state-deferred);
+  box-sizing: border-box;
 }
 .badge-closed::before {
   background: var(--state-closed);

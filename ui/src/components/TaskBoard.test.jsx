@@ -102,6 +102,28 @@ describe("TaskBoard", () => {
       ).toBeInTheDocument();
     });
 
+    // The default board has no column for "Deferred" either (board.js),
+    // and the note names it only when there is a deferred task to be
+    // hiding -- the board above has none, and says "Closed" alone.
+    it("leaves deferred tasks off the board too, and names that state as well", () => {
+      renderBoard({
+        tasks: [
+          ...tasks,
+          {
+            id: 9,
+            title: "Not this month",
+            state: "deferred",
+            capabilities: [],
+            blocked: false,
+          },
+        ],
+      });
+      expect(screen.queryByText("Not this month")).not.toBeInTheDocument();
+      expect(
+        screen.getByText(/2 tasks in no column \(Deferred, Closed\)/),
+      ).toBeInTheDocument();
+    });
+
     it("counts what is on the board, and what is in each column", () => {
       renderBoard();
       expect(

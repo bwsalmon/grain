@@ -202,6 +202,112 @@ describe("TaskList", () => {
     });
   });
 
+  // grain/task-21: a deferred task is one somebody put aside, and it gets
+  // exactly the treatment above -- out of the list until it is asked for
+  // -- through the same mechanism (state.js's HIDDEN_BY_DEFAULT). What it
+  // has that closed does not is any deployment-wide setting: its
+  // checkbox starts unticked, always.
+  describe("hiding deferred tasks", () => {
+    const withDeferred = [
+      ...tasks,
+      {
+        id: 4,
+        title: "Not this month",
+        state: "deferred",
+        capabilities: [],
+        blocked: false,
+      },
+    ];
+
+    it("hides deferred tasks by default", () => {
+      renderList({ tasks: withDeferred });
+      expect(screen.queryByText("Not this month")).not.toBeInTheDocument();
+      expect(
+        document.querySelector(".content-header .count"),
+      ).toHaveTextContent("2");
+    });
+
+    it("shows deferred tasks once the toggle is checked", async () => {
+      const user = userEvent.setup();
+      renderList({ tasks: withDeferred });
+
+      await user.click(
+        screen.getByRole("checkbox", { name: "Show deferred tasks" }),
+      );
+
+      expect(screen.getByText("Not this month")).toBeInTheDocument();
+    });
+
+    it("keeps them hidden even where closed tasks are shown by default", () => {
+      renderList({
+        tasks: withDeferred,
+        config: { showClosedByDefault: true },
+      });
+      expect(screen.queryByText("Not this month")).not.toBeInTheDocument();
+      expect(
+        screen.getByRole("checkbox", { name: "Show deferred tasks" }),
+      ).not.toBeChecked();
+    });
+
+    it("does not offer the toggle when there are no deferred tasks", () => {
+      renderList();
+      expect(
+        screen.queryByRole("checkbox", { name: "Show deferred tasks" }),
+      ).not.toBeInTheDocument();
+    });
+
+    it("does not hide deferred tasks while the Deferred filter itself is selected", () => {
+      renderList({ tasks: withDeferred, stateFilter: "deferred" });
+      expect(screen.getByText("Not this month")).toBeInTheDocument();
+      expect(
+        screen.queryByRole("checkbox", { name: "Show deferred tasks" }),
+      ).not.toBeInTheDocument();
+    });
+
+    // The two checkboxes are independent: ticking one says nothing about
+    // the other, and each hides its own state and no more.
+    it("shows deferred and closed tasks under their own toggles", async () => {
+      const user = userEvent.setup();
+      renderList({
+        tasks: [
+          ...withDeferred,
+          {
+            id: 5,
+            title: "Long done",
+            state: "closed",
+            capabilities: [],
+            blocked: false,
+          },
+        ],
+      });
+
+      await user.click(
+        screen.getByRole("checkbox", { name: "Show deferred tasks" }),
+      );
+      expect(screen.getByText("Not this month")).toBeInTheDocument();
+      expect(screen.queryByText("Long done")).not.toBeInTheDocument();
+
+      await user.click(
+        screen.getByRole("checkbox", { name: "Show closed tasks" }),
+      );
+      expect(screen.getByText("Not this month")).toBeInTheDocument();
+      expect(screen.getByText("Long done")).toBeInTheDocument();
+    });
+
+    // An empty list has to say it is empty because of what it is hiding,
+    // not just that it is empty -- otherwise the checkbox that would fix
+    // it is the one thing nobody thinks to look for.
+    it("says what it is hiding when that is why the list is empty", () => {
+      renderList({
+        tasks: [withDeferred[2]],
+        stateFilter: "all",
+      });
+      expect(
+        screen.getByText("No tasks in this state (deferred tasks are hidden)."),
+      ).toBeInTheDocument();
+    });
+  });
+
   it("opens a task when its row is clicked", async () => {
     const onOpenTask = vi.fn();
     const user = userEvent.setup();

@@ -507,7 +507,25 @@ const (
 	// produced no pull request at all. StateOf holds it here until that
 	// pull request merges or the task is closed.
 	StateCompleted State = "completed"
-	StateClosed    State = "closed"
+	// StateDeferred is a task somebody has put aside: it is not closed --
+	// it is still work grain is meant to do one day -- but it is not
+	// waiting on a dispatch either, and it should not sit in the list of
+	// things that are. Task.DeferredAt is the declaration behind it, and
+	// undeferring is the only way out, which puts the task back in
+	// whichever of 'proposed' or 'queued' its approval implies.
+	//
+	// Like 'proposed' it is a state a task reaches by a human saying so
+	// rather than by anything happening to it, which is why it sits down
+	// here beside it: task_ready only ever selects 'queued', so a
+	// deferred task dispatches no more than a proposed one does.
+	//
+	// Hidden by default wherever tasks are listed, the same treatment
+	// 'closed' already gets (ui/src/state.js's HIDDEN_BY_DEFAULT, and no
+	// column of its own on the board): the whole point of deferring is to
+	// get something out of the way of what is actually in play, which a
+	// state that still filled a row of the backlog would not do.
+	StateDeferred State = "deferred"
+	StateClosed   State = "closed"
 )
 
 // Task is the declared half: what a human, or grain proposing, asked for.
@@ -528,6 +546,29 @@ type Task struct {
 	// for. nil alongside a non-nil Approval means a task approved before
 	// this field existed, not that it was never approved.
 	ApprovedAt *time.Time
+	// DeferredAt is when somebody put this task aside, and nil for a task
+	// nobody has -- the whole of what makes StateDeferred (see its own
+	// doc comment for what that state means and where such a task goes).
+	//
+	// A declaration, beside Approval rather than in Observation, because
+	// deferring is somebody saying what should happen to this task and
+	// not grain reporting what has: it is withdrawing approval's
+	// neighbour, not closing's. Under the repo direction
+	// (docs/data-model.md) that puts it in the file a human edits and
+	// makes a deferral reviewable like any other declaration change --
+	// the argument that document already makes for withdrawing approval.
+	//
+	// Orthogonal to Approval, and deliberately not a clearing of it: a
+	// task deferred while queued is approved still, so undeferring puts
+	// it straight back on the queue rather than making somebody approve
+	// it a second time for a decision they never reversed. StateOf reads
+	// this ahead of both, so neither state can dispatch while it is set.
+	//
+	// A timestamp rather than a bool, for ApprovedAt's own reason: "set
+	// aside three months ago" and "set aside this morning" are different
+	// facts about the same task, and Transitions has a place on the
+	// timeline to put it.
+	DeferredAt *time.Time
 
 	Target  *RepoRef // the one write target
 	Binding RepoBinding

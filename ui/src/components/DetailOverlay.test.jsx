@@ -547,6 +547,86 @@ describe("DetailOverlay", () => {
     ).not.toBeInTheDocument();
   });
 
+  // Defer and Undefer, on exactly the states ui.Client.Defer accepts:
+  // both of the ones a task can be in before it has ever run, and the
+  // deferred state itself. Deferring keeps the approval, which is why a
+  // queued task gets the button too rather than being told to withdraw
+  // first.
+  it("shows a Defer button on a task that has not run, wired to the defer endpoint", async () => {
+    const act = vi.fn();
+    const user = userEvent.setup();
+    const { rerender } = render(
+      <DetailOverlay
+        task={{ ...baseTask, state: "proposed" }}
+        tasks={[]}
+        config={config}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={act}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Defer" }));
+    expect(act).toHaveBeenCalledWith(expect.any(Function), "12");
+    act.mock.calls[0][0]();
+    expect(api).toHaveBeenCalledWith("/api/tasks/12/defer", { method: "POST" });
+
+    rerender(
+      <DetailOverlay
+        task={baseTask}
+        tasks={[]}
+        config={config}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={act}
+      />,
+    );
+    expect(screen.getByRole("button", { name: "Defer" })).toBeInTheDocument();
+  });
+
+  it("offers Undefer, and no Defer, on a deferred task", async () => {
+    const act = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <DetailOverlay
+        task={{ ...baseTask, state: "deferred" }}
+        tasks={[]}
+        config={config}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={act}
+      />,
+    );
+
+    expect(
+      screen.queryByRole("button", { name: "Defer" }),
+    ).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Undefer" }));
+    act.mock.calls[0][0]();
+    expect(api).toHaveBeenCalledWith("/api/tasks/12/undefer", {
+      method: "POST",
+    });
+  });
+
+  it("offers no Defer button on a task whose run has already happened", () => {
+    for (const state of ["running", "completed", "closed"]) {
+      const { unmount } = render(
+        <DetailOverlay
+          task={{ ...baseTask, state }}
+          tasks={[]}
+          config={config}
+          onClose={() => {}}
+          onOpenTask={() => {}}
+          act={vi.fn()}
+        />,
+      );
+      expect(
+        screen.queryByRole("button", { name: "Defer" }),
+      ).not.toBeInTheDocument();
+      unmount();
+    }
+  });
+
   it("shows a Submit button once a pull request exists and auto-merge is off", async () => {
     const act = vi.fn();
     const user = userEvent.setup();

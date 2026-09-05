@@ -5,9 +5,9 @@
 // the browser frontend speaks, driven straight from a terminal instead.
 // It lets the caller do what a human does to a task: create one, edit its
 // fields, attach or detach a capability, accept (approve) a proposal or
-// withdraw that approval again, comment, and close (grain's own stand-in
-// for "delete" -- see Client.Close's own doc comment for why) or reopen
-// one.
+// withdraw that approval again, defer one for later or pick it back up,
+// comment, and close (grain's own stand-in for "delete" -- see
+// Client.Close's own doc comment for why) or reopen one.
 //
 // This used to open the task store directly -- embedded, or a Dolt SQL
 // server via -store-addr -- and call pkg/ui.Client's methods in-process,
@@ -177,6 +177,10 @@ Commands:
   update <id> [flags]                  edit a task's title or fields
   approve <id>                         accept a proposed task (proposed -> queued)
   withdraw <id>                        withdraw a queued task's approval (queued -> proposed)
+  defer <id>                           put a task aside without closing it (proposed/queued -> deferred);
+                                       deferred tasks are hidden from task lists until asked for
+  undefer <id>                         pick a deferred task back up, into whichever of proposed or
+                                       queued its approval says
   capability <id> <cap> attach|detach  attach or detach a capability
   comment <id> <body...>               post a comment (and answer a parked question)
   close [-close-pull-request] <id>     close a task (grain's "delete" -- see the package doc comment),
@@ -276,6 +280,10 @@ func runCLI(args []string) error {
 		return cmdApprove(ctx, c, out, cmdArgs)
 	case "withdraw":
 		return cmdWithdrawApproval(ctx, c, out, cmdArgs)
+	case "defer":
+		return cmdDefer(ctx, c, out, cmdArgs)
+	case "undefer":
+		return cmdUndefer(ctx, c, out, cmdArgs)
 	case "capability":
 		return cmdCapability(ctx, c, out, cmdArgs)
 	case "comment":
@@ -519,6 +527,41 @@ func cmdApprove(ctx context.Context, c *ui.HTTPClient, out *printer, args []stri
 		return err
 	}
 	if err := c.Approve(ctx, id); err != nil {
+		return err
+	}
+	return respond(ctx, c, out, id)
+}
+
+// cmdDefer and cmdUndefer put a task aside and pick it back up --
+// ui.Client.Defer's own doc comment for which states it applies to, and
+// for why deferring is not the same act as withdrawing approval (the
+// approval survives, so a task deferred off the queue comes back onto
+// it).
+func cmdDefer(ctx context.Context, c *ui.HTTPClient, out *printer, args []string) error {
+	fs := flag.NewFlagSet("grain defer", flag.ContinueOnError)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	id, err := taskID(fs.Arg(0))
+	if err != nil {
+		return err
+	}
+	if err := c.Defer(ctx, id); err != nil {
+		return err
+	}
+	return respond(ctx, c, out, id)
+}
+
+func cmdUndefer(ctx context.Context, c *ui.HTTPClient, out *printer, args []string) error {
+	fs := flag.NewFlagSet("grain undefer", flag.ContinueOnError)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	id, err := taskID(fs.Arg(0))
+	if err != nil {
+		return err
+	}
+	if err := c.Undefer(ctx, id); err != nil {
 		return err
 	}
 	return respond(ctx, c, out, id)

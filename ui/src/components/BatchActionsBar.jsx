@@ -5,11 +5,19 @@ import api from "../api.js";
 // BatchActionsBar is DetailOverlay's Actions and CapabilityToggles, but
 // aimed at every selected task at once instead of the one the overlay
 // has open -- the same handful of idempotent endpoints (approve,
-// submit, close, reopen, capabilities), each of which already no-ops on
-// a task it does not apply to (Client.Approve on an already-approved
-// task, Client.SetCapability detaching a capability that is not
-// attached, ...), so firing one at every selection member is safe even
-// when the selection mixes states.
+// submit, defer, undefer, close, reopen, capabilities), most of which
+// already no-op on a task they do not apply to (Client.Approve on an
+// already-approved task, Client.SetCapability detaching a capability
+// that is not attached, ...), so firing one at every selection member is
+// safe even when the selection mixes states.
+//
+// Defer is the one that refuses rather than no-ops -- a task that has
+// already run cannot be put aside (Client.Defer) -- and it is offered
+// here anyway, because putting a stack of proposals aside in one go is
+// the thing deferring is most often for. A mixed selection defers what
+// it can and says how many it could not: App's actBatch collects
+// failures rather than aborting the rest, and leaves the selection
+// standing so whoever ran it can see what is left.
 export default function BatchActionsBar({ count, config, onRun, onClear }) {
   const [capabilityId, setCapabilityId] = useState("");
 
@@ -47,6 +55,17 @@ export default function BatchActionsBar({ count, config, onRun, onClear }) {
         </Button>
         <Button variant="outlined" size="small" onClick={() => run("/submit")}>
           Submit
+        </Button>
+        <Button
+          variant="outlined"
+          size="small"
+          title="Put the selected tasks aside. They stop waiting to run and drop out of the lists until you ask for them."
+          onClick={() => run("/defer")}
+        >
+          Defer
+        </Button>
+        <Button variant="outlined" size="small" onClick={() => run("/undefer")}>
+          Undefer
         </Button>
         <Button
           variant="outlined"

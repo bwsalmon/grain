@@ -1183,6 +1183,112 @@ func TestWithdrawApprovalRefusesATaskThatHasStarted(t *testing.T) {
 	}
 }
 
+// Deferring is not withdrawing approval: the task leaves the queue, and
+// picking it back up puts it straight back on without anybody approving
+// it a second time. A proposal deferred and picked back up is a proposal
+// again, for the same reason.
+func TestDeferAndUndeferReturnATaskToTheStateItLeft(t *testing.T) {
+	c, store, ctx := testClient(t)
+
+	queued := create(t, c, ctx)
+	if err := c.Defer(ctx, queued.ID); err != nil {
+		t.Fatalf("deferring a queued task: %v", err)
+	}
+	got, err := c.Task(ctx, queued.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State != model.StateDeferred {
+		t.Fatalf("state = %q, want deferred", got.State)
+	}
+	stored, err := store.GetTask(ctx, queued.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Approval == nil {
+		t.Fatal("deferring cleared the approval, which is withdrawing's job and not this one's")
+	}
+	if stored.DeferredAt == nil || !stored.DeferredAt.Equal(baseTime) {
+		t.Fatalf("deferredAt = %v, want the client's own clock at %v", stored.DeferredAt, baseTime)
+	}
+	// Nothing dispatchable while it is put aside.
+	if ready, _ := store.Ready(ctx); len(ready) != 0 {
+		t.Fatalf("ready while deferred = %v, want nothing", ready)
+	}
+
+	if err := c.Undefer(ctx, queued.ID); err != nil {
+		t.Fatalf("undeferring: %v", err)
+	}
+	if got, err = c.Task(ctx, queued.ID); err != nil || got.State != model.StateQueued {
+		t.Fatalf("state after undeferring = %q (err %v), want queued", got.State, err)
+	}
+	// Undeferring a task nobody deferred is a no-op, mirroring Approve on
+	// an already-approved one.
+	if err := c.Undefer(ctx, queued.ID); err != nil {
+		t.Fatalf("undeferring twice: %v", err)
+	}
+
+	proposal, err := c.CreateTask(ctx, ui.CreateTaskRequest{Title: "maybe"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Defer(ctx, proposal.ID); err != nil {
+		t.Fatalf("deferring a proposal: %v", err)
+	}
+	// Deferring twice restamps rather than failing.
+	if err := c.Defer(ctx, proposal.ID); err != nil {
+		t.Fatalf("deferring twice: %v", err)
+	}
+	if err := c.Undefer(ctx, proposal.ID); err != nil {
+		t.Fatal(err)
+	}
+	if got, err = c.Task(ctx, proposal.ID); err != nil || got.State != model.StateProposed {
+		t.Fatalf("state after undeferring a proposal = %q (err %v), want proposed", got.State, err)
+	}
+}
+
+// The states deferring is refused on: a run in flight, and every task
+// whose work has already happened. Nothing there is waiting on a dispatch
+// that putting it aside could call off (Client.Defer).
+func TestDeferRefusesATaskThatHasRun(t *testing.T) {
+	c, store, ctx := testClient(t)
+	var ve *ui.ValidationError
+
+	running := create(t, c, ctx)
+	if err := store.StartRun(ctx, model.Run{
+		ID: "r1", TaskID: running.ID, Sandbox: "s1", Attempt: 1, StartedAt: baseTime,
+	}, model.Limits{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Defer(ctx, running.ID); !errors.As(err, &ve) {
+		t.Fatalf("deferring a running task: error = %v, want a ValidationError", err)
+	}
+
+	completed := create(t, c, ctx)
+	done := baseTime.Add(time.Hour)
+	if err := store.Observe(ctx, model.Observation{TaskID: completed.ID, CompletedAt: &done}); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Defer(ctx, completed.ID); !errors.As(err, &ve) {
+		t.Fatalf("deferring a completed task: error = %v, want a ValidationError", err)
+	}
+	stored, err := store.GetTask(ctx, completed.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.DeferredAt != nil {
+		t.Fatal("a refused deferral put the task aside anyway")
+	}
+
+	var nf *ui.NotFoundError
+	if err := c.Defer(ctx, "404"); !errors.As(err, &nf) {
+		t.Fatalf("deferring an unknown task: error = %v, want a NotFoundError", err)
+	}
+	if err := c.Undefer(ctx, "404"); !errors.As(err, &nf) {
+		t.Fatalf("undeferring an unknown task: error = %v, want a NotFoundError", err)
+	}
+}
+
 func TestSubmitOptsIntoTheMergeQueue(t *testing.T) {
 	c, store, ctx := testClient(t)
 	task := create(t, c, ctx)

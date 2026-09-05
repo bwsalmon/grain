@@ -72,6 +72,7 @@ var Tables = []string{
   ` + "`approval_behalf_kind`" + `  TEXT    NULL,
   ` + "`approval_behalf_id`" + `    TEXT    NULL,
   ` + "`approved_at`" + `           DATETIME NULL,
+  ` + "`deferred_at`" + `           DATETIME NULL,
 
   ` + "`target_owner`" + `          TEXT    NULL,
   ` + "`target_name`" + `           TEXT    NULL,
@@ -1087,6 +1088,12 @@ GROUP BY ` + "`tr`.`task_id`" + ``},
 	// proposed task can carry no streak at all -- dispatch never ran an
 	// unapproved task -- so the two branches never compete in practice.
 	//
+	// 'deferred' sits between 'failed' and 'proposed' for the reason
+	// StateOf gives at the same branch: it is a declaration about what
+	// should happen next, so it outranks the two states that are also
+	// read off the declaration and never overrides grain's own account of
+	// what already happened.
+	//
 	// 'awaiting_submit' sits immediately above 'completed' and tests the
 	// same completed_at: the two are one condition split by whether
 	// anything is going to land the pull request without a human
@@ -1107,6 +1114,7 @@ SELECT
     WHEN ` + "`o`.`pending_question_comment_id`" + ` IS NOT NULL THEN 'awaiting_reply'
     WHEN ` + "`r`.`id`" + ` IS NOT NULL THEN 'running'
     WHEN COALESCE(` + "`st`.`streak`" + `, 0) >= ` + strconv.Itoa(MaxConsecutiveFailures) + ` THEN 'failed'
+    WHEN ` + "`t`.`deferred_at`" + ` IS NOT NULL THEN 'deferred'
     WHEN ` + "`t`.`approval_actor_kind`" + ` IS NULL THEN 'proposed'
     ELSE 'queued'
   END AS ` + "`state`" + `

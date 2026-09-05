@@ -56,6 +56,29 @@ describe("BatchActionsBar", () => {
     });
   });
 
+  // No confirmation on either of these, unlike Close: deferring loses
+  // nothing and undoes with the button beside it.
+  it("runs defer and undefer against each selected task", async () => {
+    const onRun = vi.fn((mutate) => mutate(42));
+    const user = userEvent.setup();
+    render(
+      <BatchActionsBar
+        count={2}
+        config={null}
+        onRun={onRun}
+        onClear={() => {}}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Defer" }));
+    expect(api).toHaveBeenCalledWith("/api/tasks/42/defer", { method: "POST" });
+
+    await user.click(screen.getByRole("button", { name: "Undefer" }));
+    expect(api).toHaveBeenCalledWith("/api/tasks/42/undefer", {
+      method: "POST",
+    });
+  });
+
   it("asks for confirmation before closing, and does nothing when declined", async () => {
     const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
     const onRun = vi.fn();

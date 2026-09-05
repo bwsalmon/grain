@@ -494,6 +494,21 @@ describe("repoActivity", () => {
     });
   });
 
+  // A deferred task is work nobody is waiting on, so a repo holding
+  // nothing else is idle rather than open -- and the title names both
+  // states when both are there, so "idle" is never a claim that
+  // everything here is finished.
+  it("counts a deferred task as set aside rather than as open work", () => {
+    expect(repoActivity(row({ deferred: 2 }))).toMatchObject({
+      key: "idle",
+      title: "Idle -- every task here is deferred",
+    });
+    expect(repoActivity(row({ deferred: 1, closed: 1 })).title).toBe(
+      "Idle -- every task here is deferred or closed",
+    );
+    expect(repoActivity(row({ deferred: 1, queued: 1 })).key).toBe("open");
+  });
+
   it("calls a repo with no tasks at all idle, and says which kind", () => {
     expect(repoActivity(row({})).title).toBe("Idle -- no tasks here yet");
   });
