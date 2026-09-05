@@ -110,6 +110,10 @@ export default function SettingsOverlay({ onClose, onSaved, showError }) {
   // carries the field back, so saving another tab does not strand it.
   const [defaultCapabilities, setDefaultCapabilities] = useState([]);
   const { mode: themeMode, setMode: setThemeMode } = useThemeMode();
+  // Read once rather than per option: the time zone selector below is
+  // several hundred of them, and this asks Intl the same question every
+  // time.
+  const browserZone = browserTimeZone();
 
   useEffect(() => {
     (async () => {
@@ -559,7 +563,7 @@ export default function SettingsOverlay({ onClose, onSaved, showError }) {
                 {timeZoneOptions(settings.timeZone).map((zone) => (
                   <option key={zone} value={zone}>
                     {zone}
-                    {zone === browserTimeZone() ? " (this browser)" : ""}
+                    {zone === browserZone ? " (this browser)" : ""}
                   </option>
                 ))}
               </TextField>
