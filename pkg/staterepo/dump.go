@@ -3,6 +3,8 @@ package staterepo
 import (
 	"context"
 	"database/sql"
+"crypto/rand"
+	"encoding/binary"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -621,6 +623,50 @@ var schemaStampTables = map[string]bool{"grain_schema": true}
 // scanned out of it, table by table until something has one. On the
 // ordinary tick, where this runs before every export, the answer comes
 // out of the first table that holds anything.
+// databaseIdentity queries the database for its PRAGMA application_id.
+// It returns the ID as a string, or "" if it is 0 (the default).
+func databaseIdentity(ctx context.Context, db querier) (string, error) {
+	var id uint32
+	rows, err := db.QueryContext(ctx, "PRAGMA application_id")
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+	if rows.Next() {
+		if err := rows.Scan(&id); err != nil {
+			return "", err
+		}
+	}
+	if id == 0 {
+		return "", nil
+	}
+	return strconv.FormatUint(uint64(id), 10), nil
+}
+
+// ensureDatabaseIdentity ensures the database has a non-zero PRAGMA application_id.
+func ensureDatabaseIdentity(ctx context.Context, db *sql.DB) (string, error) {
+	id, err := databaseIdentity(ctx, db)
+	if err != nil {
+		return "", err
+	}
+	if id != "" {
+		return id, nil
+	}
+	var b [4]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	newID := binary.BigEndian.Uint32(b[:]) & 0x7FFFFFFF
+	if newID == 0 {
+		newID = 1
+	}
+	_, err = db.ExecContext(ctx, fmt.Sprintf("PRAGMA application_id = %d", newID))
+	if err != nil {
+		return "", err
+	}
+	return strconv.FormatUint(uint64(newID), 10), nil
+}
+
 func databaseIsEmpty(ctx context.Context, db querier) (bool, error) {
 	tables, err := tableNames(ctx, db)
 	if err != nil {

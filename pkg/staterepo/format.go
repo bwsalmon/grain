@@ -498,7 +498,7 @@ const workflowRetryInterval = 24 * time.Hour
 // that push either succeeds whole or is refused whole. Contained to a
 // deployment that already has a remote, a refusal costs one commit that
 // is undone on the spot.
-func (r *Repo) installWorkflow(ctx context.Context) (bool, error) {
+func (r *Repo) installWorkflow(ctx context.Context, identity string) (bool, error) {
 	if r.cfg.NoWorkflow || r.cfg.Remote == "" {
 		return false, nil
 	}
@@ -578,7 +578,7 @@ func (r *Repo) installWorkflow(ctx context.Context) (bool, error) {
 	// leaving it behind would tell the next Apply that a pull request had
 	// been merged, and have it import the repository's settings back over
 	// every one changed since the last export.
-	if err := r.recordLoadedHead(ctx); err != nil {
+	if err := r.recordLoadedHead(ctx, identity); err != nil {
 		return false, err
 	}
 	pushErr := r.Push(ctx)
@@ -612,7 +612,7 @@ func (r *Repo) installWorkflow(ctx context.Context) (bool, error) {
 	}
 	// Back where the marker was, for the reason it was moved above: HEAD
 	// is the commit it names again.
-	if err := r.recordLoadedHead(ctx); err != nil {
+	if err := r.recordLoadedHead(ctx, identity); err != nil {
 		return false, err
 	}
 	if !workflowRefused(pushErr) {

@@ -628,40 +628,48 @@ func (r *Repo) HasSecrets(ctx context.Context) (bool, error) {
 // the repository, and a clone onto a new machine must arrive without one.
 const loadedHeadFile = "grain-loaded-head"
 
-// loadedHead reads the marker, reporting "" when there is none.
-func (r *Repo) loadedHead(ctx context.Context) (string, error) {
+// loadedHead reads the marker, reporting (commit, identity, error).
+func (r *Repo) loadedHead(ctx context.Context) (string, string, error) {
 	path, err := r.loadedHeadPath(ctx)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
-		return "", nil
+		return "", "", nil
 	}
 	if err != nil {
-		return "", fmt.Errorf("staterepo: reading %s: %w", path, err)
+		return "", "", fmt.Errorf("staterepo: reading %s: %w", path, err)
 	}
-	return strings.TrimSpace(string(data)), nil
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) == 1 {
+		return lines[0], "", nil
+	}
+	return lines[0], lines[1], nil
 }
 
-func (r *Repo) setLoadedHead(ctx context.Context, commit string) error {
+func (r *Repo) setLoadedHead(ctx context.Context, commit string, identity string) error {
 	path, err := r.loadedHeadPath(ctx)
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(path, []byte(commit+"\n"), 0o600); err != nil {
+	content := commit + "\n"
+	if identity != "" {
+		content += identity + "\n"
+	}
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		return fmt.Errorf("staterepo: writing %s: %w", path, err)
 	}
 	return nil
 }
 
 // recordLoadedHead records wherever the working tree is now.
-func (r *Repo) recordLoadedHead(ctx context.Context) error {
+func (r *Repo) recordLoadedHead(ctx context.Context, identity string) error {
 	head, err := r.Head(ctx)
 	if err != nil {
 		return err
 	}
-	return r.setLoadedHead(ctx, head)
+	return r.setLoadedHead(ctx, head, identity)
 }
 
 // loadedHeadPath asks git where the git directory is rather than

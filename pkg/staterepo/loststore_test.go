@@ -21,6 +21,7 @@ import (
 	"errors"
 	"path/filepath"
 	"strings"
+	"fmt"
 	"testing"
 
 	"github.com/bwsalmon/grain/pkg/model"
@@ -64,7 +65,7 @@ func TestAStartWithTheStoreLostRestoresFromTheWorkingTree(t *testing.T) {
 	// sqlite.Open handed a fresh path amounts to.)
 	head := strings.TrimSpace(git(t, dir, "rev-parse", "HEAD"))
 	marker := strings.TrimSpace(read(t, filepath.Join(dir, ".git", "grain-loaded-head")))
-	if marker != head {
+	if !strings.HasPrefix(marker, head) {
 		t.Fatalf("this test means to start from a marker that agrees with HEAD; it reads %q against %q",
 			marker, head)
 	}
@@ -188,6 +189,15 @@ func TestATickWillNotApplyAMergeIntoAnEmptyDatabase(t *testing.T) {
 	mergeATemplateTitle(t, remote, "tpl-1", "Retitled by a pull request")
 
 	emptied, freshDB := openDB(t)
+	// Make freshDB have the same identity so it looks like the SAME database, just emptied.
+	var oldIdent int
+	if err := db.QueryRow("PRAGMA application_id").Scan(&oldIdent); err != nil {
+		t.Fatalf("reading old ident: %v", err)
+	}
+	if _, err := freshDB.Exec(fmt.Sprintf("PRAGMA application_id = %d", oldIdent)); err != nil {
+		t.Fatalf("setting new ident: %v", err)
+	}
+
 	_, err = staterepo.Apply(ctx, repo, freshDB, model.SchemaVersion)
 	if !errors.Is(err, staterepo.ErrDatabaseEmpty) {
 		t.Fatalf("applying a merge into an empty database: got %v, want an ErrDatabaseEmpty", err)
