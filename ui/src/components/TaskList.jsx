@@ -479,6 +479,9 @@ export function TaskRow({
           />
         )}
         {t.repo && <Chip size="small" label={t.repo} />}
+        {t.base && t.base !== "main" && (
+          <Chip size="small" variant="outlined" label={t.base} />
+        )}
         {(t.reads || []).map((repo) => (
           <Chip
             key={repo}
