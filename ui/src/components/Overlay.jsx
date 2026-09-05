@@ -15,7 +15,7 @@ import { SIDEBAR_WIDTH } from "../theme.js";
 // 900px porthole was the complaint. The three lists whose "+" button and
 // whose rows open the same component (schedules, templates, suites) get
 // it for both, so opening one item is the same gesture with the same
-// result everywhere. Settings and Debugging are panes too now
+// result everywhere. Settings and System are panes too now
 // (grain/task-115): both are a whole destination behind a tab strip
 // rather than one form to fill in and dismiss, and a centered box was
 // making a log tail, a sandbox table and a six-tab settings form share
@@ -38,7 +38,7 @@ import { SIDEBAR_WIDTH } from "../theme.js";
 // gestures for the same "go back where I came from", in opposite corners
 // of the screen, was the inconsistency. `backLabel` names where that is
 // for the panes that only ever open from one list; the default says just
-// "Back", for the panes (a task, Settings, Debug, Metrics) that can be
+// "Back", for the panes (a task, Settings, System, Metrics) that can be
 // opened from more than one place and so cannot honestly name one.
 //
 // The centered shape keeps its X: New task, Run a suite and an attempt's

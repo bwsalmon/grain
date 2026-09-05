@@ -15,7 +15,7 @@ import {
 import api from "../api.js";
 import Sparkline from "./Sparkline.jsx";
 
-// REFRESH_MS matches LogsPage's own polling cadence -- the Debug overlay
+// REFRESH_MS matches LogsPage's own polling cadence -- the System overlay
 // (bwsalmon/agents#640) these two panels share should feel like the same
 // kind of live view.
 const REFRESH_MS = 5000;
@@ -221,10 +221,10 @@ function HostDisks({ disks, history }) {
   );
 }
 
-// SandboxHealthPage is the Sandbox health panel of DebugOverlay.jsx -- it
+// SandboxHealthPage is the Sandbox health panel of SystemOverlay.jsx -- it
 // used to be a full nav entry of its own (bwsalmon/agents#536), then a
 // tab inside Settings alongside Logs and the reboot control (bwsalmon/
-// agents#623), before settling on its own "Debugging" sidebar entry,
+// agents#623), before settling on a sidebar entry of its own,
 // apart from Settings (bwsalmon/agents#640). It shows a live view of
 // every live run's own sandbox -- a kontur VM or a host directory,
 // whichever backend this deployment runs -- plus the daemon's own host
@@ -234,7 +234,7 @@ function HostDisks({ disks, history }) {
 // means looking at both at once. GET /api/sandboxes' own "enabled" flag
 // says whether this deployment has either piece configured at all, the
 // same convention LogsPage's own GET /api/logs already establishes for
-// the Debug overlay this panel sits alongside.
+// the System overlay this panel sits alongside.
 export default function SandboxHealthPage({ showError }) {
   const [data, setData] = useState(null);
   const [history, setHistory] = useState({

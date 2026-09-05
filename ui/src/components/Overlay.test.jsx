@@ -8,7 +8,7 @@ import Overlay from "./Overlay.jsx";
 // wider one for an action that shows a lot (an attempt's transcript),
 // and the full pane beside the sidebar for anything you *open* -- a
 // task, a schedule, a template, a suite (grain/task-94), plus Settings
-// and Debugging, which are destinations rather than actions
+// and System, which are destinations rather than actions
 // (grain/task-115).
 describe("Overlay", () => {
   it("draws a centered dialog by default", () => {
@@ -50,7 +50,7 @@ describe("Overlay", () => {
   });
 
   // A pane's header is chrome that has to sit outside the part that
-  // scrolls (Settings' and Debugging's tab strips, grain/task-115) --
+  // scrolls (Settings' and System's tab strips, grain/task-115) --
   // inside .overlay-pane it would scroll away with everything else.
   it("pins a pane's header above the scrolling body", () => {
     render(

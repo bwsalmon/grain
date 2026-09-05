@@ -206,6 +206,96 @@ describe("GitHubTokensSection", () => {
     );
   });
 
+  // grain/task-16: the gap the ladder form exists to close, named where
+  // it can be closed. /api/settings computes it; this section only shows
+  // it, since /api/github-tokens knows nothing about target repos.
+  it("names every target repo the ladder does not cover", async () => {
+    api.mockResolvedValueOnce(listing([bot]));
+    render(
+      <GitHubTokensSection
+        showError={() => {}}
+        targetReposMissingCredentials={["acme/widgets", "other/thing"]}
+      />,
+    );
+
+    expect(
+      await screen.findByText(/Nothing in the ladder covers/i),
+    ).toBeInTheDocument();
+    expect(screen.getByText("acme/widgets")).toBeInTheDocument();
+    expect(screen.getByText("other/thing")).toBeInTheDocument();
+  });
+
+  it("says nothing about uncovered repos when every one is covered", async () => {
+    api.mockResolvedValueOnce(listing([bot]));
+    render(
+      <GitHubTokensSection
+        showError={() => {}}
+        targetReposMissingCredentials={[]}
+      />,
+    );
+    await screen.findAllByText("bot");
+
+    expect(
+      screen.queryByText(/Nothing in the ladder covers/i),
+    ).not.toBeInTheDocument();
+  });
+
+  // The list comes from settings, so the pane holding them has to be
+  // told when a change here could have closed the gap it is showing --
+  // otherwise the warning stays on screen naming a repo the entry just
+  // added now covers.
+  it("asks for a settings re-read after a ladder entry is added", async () => {
+    api.mockResolvedValueOnce(listing([bot, releaseBot]));
+    const onLadderChanged = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <GitHubTokensSection
+        showError={() => {}}
+        targetReposMissingCredentials={["acme/widgets"]}
+        onLadderChanged={onLadderChanged}
+      />,
+    );
+    await screen.findAllByText("bot");
+
+    api.mockResolvedValueOnce(
+      listing([bot, releaseBot], {
+        patterns: [
+          { pattern: "*", credential: "bot" },
+          { pattern: "acme/widgets", credential: "release-bot" },
+        ],
+      }),
+    );
+    await user.type(screen.getByLabelText("Repo pattern"), "acme/widgets");
+    await user.click(screen.getByLabelText("Credential"));
+    await user.click(screen.getByRole("option", { name: "release-bot" }));
+    await user.click(screen.getByRole("button", { name: "Save entry" }));
+
+    await waitFor(() => expect(onLadderChanged).toHaveBeenCalled());
+  });
+
+  it("does not ask for a settings re-read when the write failed", async () => {
+    api.mockResolvedValueOnce(listing([bot, releaseBot]));
+    const onLadderChanged = vi.fn();
+    const showError = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <GitHubTokensSection
+        showError={showError}
+        onLadderChanged={onLadderChanged}
+      />,
+    );
+    await screen.findAllByText("bot");
+
+    api.mockRejectedValueOnce(new Error("unknown credential"));
+    await user.type(screen.getByLabelText("Repo pattern"), "acme/widgets");
+    await user.click(screen.getByLabelText("Credential"));
+    await user.click(screen.getByRole("option", { name: "release-bot" }));
+    await user.click(screen.getByRole("button", { name: "Save entry" }));
+
+    await waitFor(() => expect(showError).toHaveBeenCalled());
+    expect(onLadderChanged).not.toHaveBeenCalled();
+  });
+
   it("flags a ladder entry whose credential is gone", async () => {
     api.mockResolvedValueOnce(
       listing([bot], {

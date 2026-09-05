@@ -125,7 +125,7 @@ type HostPressure struct {
 // false, with nothing else set, when this deployment's UI has neither
 // Config.Sandboxes nor Config.HostStats configured -- the same
 // nil-means-unavailable convention logSourcesResponse's own Enabled
-// already establishes for the Logs pane the debug section
+// already establishes for the Logs pane the System overlay
 // (bwsalmon/agents#536) puts this one alongside.
 type sandboxHealthResponse struct {
 	Enabled   bool              `json:"enabled"`

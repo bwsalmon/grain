@@ -303,12 +303,12 @@ type Config struct {
 	// report themselves unavailable rather than erroring on every call,
 	// the same as a nil Secrets above.
 	Upgrader Upgrader
-	// Logs is the set of named log sources a debugging page in the UI can
+	// Logs is the set of named log sources the System pane in the UI can
 	// tail -- "daemon" for grain daemon's own journal, and, on a
 	// deployment colocated with one, the git proxy's audit log
 	// (bwsalmon/agents#444). Keyed by the name a caller passes to
 	// GET /api/logs/{source}. nil or empty means no sources are
-	// configured, and the debugging page reports itself unavailable
+	// configured, and that pane reports itself unavailable
 	// rather than a page with nothing on it, the same nil-means-
 	// unavailable contract Secrets, Reboot and Upgrader above already
 	// give their own panes.
@@ -332,7 +332,7 @@ type Config struct {
 	// colocated with the orchestrator that owns a real sandbox pool), and
 	// the sandbox health pane reports itself unavailable rather than
 	// erroring on every call, the same nil-means-unavailable contract
-	// Logs above already gives the debug section it now sits alongside
+	// Logs above already gives the System pane it now sits alongside
 	// (bwsalmon/agents#536).
 	Sandboxes SandboxHealth
 	// HostStats, when set, is what GET /api/sandboxes' own host section
