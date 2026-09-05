@@ -520,14 +520,14 @@ a guest-writable path inside it would let the sandbox appear to have
 authored a prompt, a credential or a setup script. `/run/grain/activity`
 keeps the two directions separate, and a test holds the line.
 
-**Settled since**: the writer is a verb of `grainctl` rather than a second
-binary, because the guest gets one CLI ("Three binaries, one per trust
-zone" in `grain.md`). The objection that argued for two — `grainctl` needs
-a placed credential and an address, this needs neither — becomes a
-constraint on `grainctl` instead: the credential is per-verb, so
-`grainctl activity` runs in a deployment that configured no controller
-verbs at all. The file stays the contract, so a setup script with nothing
-but a shell can still `echo` into it.
+**Settled since**: the writer is a verb of the guest CLI rather than a
+second binary, because the guest gets one CLI ("Three binaries, one per
+trust zone" in `grain.md`). The objection that argued for two — the
+controller verbs need a placed credential and an address, this needs
+neither — becomes a constraint on that CLI instead: the credential is
+per-verb, so `grain activity` runs in a deployment that configured no
+controller verbs at all. The file stays the contract, so a setup script
+with nothing but a shell can still `echo` into it.
 
 ## Can stdout and stderr be told apart?
 
@@ -748,7 +748,7 @@ inside one run today, deliberately: "instead of exiting blind and leaving
 the pull request to orchestrator's finish path."
 
 Worth noting what survived it: the guest CLI keeps the in-run property the
-message tool lost — `grainctl wait-for-checks` blocks in the guest and the
+message tool lost — `grain wait-for-checks` blocks in the guest and the
 run continues after it — while keeping the message tool's best property,
 that a grain needs no controller connection to run.
 

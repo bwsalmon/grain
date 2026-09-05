@@ -7,7 +7,7 @@ import (
 )
 
 // Version is the wire format this build speaks: the subcommand set of the
-// in-container `grain` CLI, the JSON documents that cross it, and the
+// in-container grain-shim, the JSON documents that cross it, and the
 // trajectory records on the container's stdout (docs/grain.md).
 //
 // It is stamped on every document in both directions, which is the whole

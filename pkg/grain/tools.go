@@ -21,9 +21,9 @@ package grain
 // blocked on.
 //
 // There is no seventh tool, and nothing outside the sandbox is a tool at
-// all. An escape hatch is a CLI in the guest with a credential
-// placed beside it (Spec.Placements), which the agent runs with
-// run_command: "grainctl open-pull-request --title ..." rather than a
+// all. An escape hatch is a CLI in the guest with a credential placed
+// beside it (Spec.Placements), which the agent runs with run_command --
+// "grain open-pull-request --title ..." in the guest -- rather than a
 // tool call the shim would have to declare, relay and keep in sync. That
 // is how the git proxy already works, and reusing its shape rather than
 // inventing one is the point -- a deployment adds a capability by
