@@ -238,6 +238,7 @@ func (d *deployment) teardown() {
 	for _, unit := range []string{
 		"grain-daemon.service", "grain-reboot.path", "grain-restart.path",
 		"grain-reboot.service", "grain-restart.service",
+		"grain-shell.path", "grain-shell.service",
 	} {
 		sudo("systemctl", "disable", "--now", unit)
 		sudo("rm", "-f", "/etc/systemd/system/"+unit)
@@ -508,7 +509,7 @@ func TestTheHostControlUnitsAreInstalledAndWatching(t *testing.T) {
 	requireInstaller(t)
 	d := deployed(t)
 
-	for _, unit := range []string{"grain-reboot.path", "grain-restart.path"} {
+	for _, unit := range []string{"grain-reboot.path", "grain-restart.path", "grain-shell.path"} {
 		state := strings.TrimSpace(sudo("systemctl", "is-active", unit).stdout)
 		if state != "active" {
 			t.Errorf("%s is %q, so nothing is watching for requests", unit, state)
@@ -517,6 +518,53 @@ func TestTheHostControlUnitsAreInstalledAndWatching(t *testing.T) {
 	control := filepath.Join(d.data, "control")
 	if !sudoTest("-d", control) {
 		t.Errorf("%s was never created", control)
+	}
+}
+
+// The root shell, end to end against the real responder (grain/task-13).
+//
+// Everything else about this exchange is checked against stubs -- the
+// daemon's half in pkg/rootshell, the script's shape in tests/deploy --
+// and the one thing neither can see is whether systemd actually notices
+// the write and runs the thing as root. That is the whole mechanism: a
+// path unit that does not fire leaves an operator with a pane that
+// times out on every command, on the day they had no other way in.
+//
+// This drives it the way pkg/rootshell.Runner does rather than through
+// the UI, because what is being asked is about the host half: write the
+// command, wait for the status file the responder writes last, read what
+// it printed.
+func TestTheRootShellRunsACommandAsRoot(t *testing.T) {
+	requireInstaller(t)
+	d := deployed(t)
+
+	control := filepath.Join(d.data, "control")
+	for _, name := range []string{"shell.out", "shell.status"} {
+		sudo("rm", "-f", filepath.Join(control, name))
+	}
+	if r := sudo("bash", "-c", "printf 'id -un' > "+filepath.Join(control, "shell")); r.exitCode != 0 {
+		t.Fatalf("writing the request: %s", r)
+	}
+
+	deadline := time.Now().Add(30 * time.Second)
+	for !sudoTest("-f", filepath.Join(control, "shell.status")) {
+		if time.Now().After(deadline) {
+			t.Fatalf("grain-shell.path never turned a request into an answer:\n%s",
+				sudo("systemctl", "status", "grain-shell.service").stdout)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	if status := strings.TrimSpace(sudoRead(filepath.Join(control, "shell.status"))); status != "0" {
+		t.Errorf("exit status is %q, want 0", status)
+	}
+	// As root: the daemon's own account could have run this, and the
+	// point of the whole channel is that this one did not.
+	if out := sudoRead(filepath.Join(control, "shell.out")); !strings.Contains(out, "root") {
+		t.Errorf("the command ran as %q, want root", strings.TrimSpace(out))
+	}
+	for _, name := range []string{"shell.out", "shell.status"} {
+		sudo("rm", "-f", filepath.Join(control, name))
 	}
 }
 

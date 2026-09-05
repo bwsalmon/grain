@@ -3,6 +3,7 @@ import { Alert, Button, Tab, Tabs, Typography } from "@mui/material";
 import api from "../api.js";
 import Overlay from "./Overlay.jsx";
 import LogsPage from "./LogsPage.jsx";
+import RootShellPage from "./RootShellPage.jsx";
 import SandboxHealthPage from "./SandboxHealthPage.jsx";
 import TopPage from "./TopPage.jsx";
 
@@ -10,6 +11,7 @@ const TABS = [
   { id: "logs", label: "Logs" },
   { id: "sandboxHealth", label: "Sandbox health" },
   { id: "top", label: "Top" },
+  { id: "rootShell", label: "Root shell" },
   { id: "restart", label: "Restart" },
 ];
 
@@ -33,6 +35,12 @@ const TABS = [
 // is the question that follows it: that panel's host section says the
 // daemon's machine is loaded, and only a per-process view says by what
 // (grain/task-120).
+//
+// Root shell (POST /api/host/shell, grain/task-13) comes last of the
+// four reading panes and just before the danger zone, which is where it
+// belongs in both directions: it is the pane an operator reaches only
+// once the three above have failed to explain anything, and it is the
+// only one that changes the machine rather than reporting on it.
 //
 // Metrics (GET /api/metrics) was a fourth tab here for a while, on the
 // reasoning that it is the same kind of read-only, deployment-wide view
@@ -105,6 +113,9 @@ export default function SystemOverlay({ config, onClose, showError }) {
       {tab === "logs" && <LogsPage showError={showError} />}
       {tab === "sandboxHealth" && <SandboxHealthPage showError={showError} />}
       {tab === "top" && <TopPage showError={showError} />}
+      {tab === "rootShell" && (
+        <RootShellPage config={config} showError={showError} />
+      )}
       {tab === "restart" &&
         (config && config.rebootEnabled ? (
           <fieldset>

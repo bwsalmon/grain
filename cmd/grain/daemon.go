@@ -102,6 +102,7 @@ import (
 	"github.com/bwsalmon/grain/pkg/model"
 	"github.com/bwsalmon/grain/pkg/model/sqlite"
 	"github.com/bwsalmon/grain/pkg/orchestrator"
+	"github.com/bwsalmon/grain/pkg/rootshell"
 	"github.com/bwsalmon/grain/pkg/secrets"
 	"github.com/bwsalmon/grain/pkg/sysstat"
 	"github.com/bwsalmon/grain/pkg/systemlog"
@@ -273,6 +274,17 @@ func daemon(args []string) {
 	fs.Var(&rebootCmd, "reboot-cmd",
 		"one argument of the command the UI's reboot-host button runs -- repeat for every argument. "+
 			"Defaults to `sudo systemctl reboot`.")
+
+	// Where the UI's root shell writes its requests (pkg/rootshell): the
+	// same control directory the reboot request above is touched in,
+	// watched on the host by grain-shell.path. Empty -- the default --
+	// means this deployment has no root shell at all and the System
+	// overlay's tab says so, which is the right answer for anything
+	// standing this daemon up without setup.sh's host-side half.
+	rootShellControlDir := fs.String("root-shell-control-dir", "",
+		"directory the UI's root shell exchanges requests and answers in with this host's "+
+			"grain-shell.service (scripts/setup.sh writes $GRAIN_DATA_DIR/control here). "+
+			"Empty disables the root shell entirely.")
 
 	// Sandboxing still falls back to orchestrator.HostSandboxes (execute
 	// on this host, no isolation) when nothing else is selected -- see
@@ -467,11 +479,12 @@ func daemon(args []string) {
 		gcpProject: *gcpProject, gcpServiceAccountEmail: *gcpServiceAccountEmail,
 		upgradeSrcDir: *upgradeSrcDir, upgradeInstallPath: *upgradeInstallPath, upgradeRestartCmd: upgradeRestartCmd,
 		upgradeImage: *upgradeImage, upgradeImageRefFile: *upgradeImageRefFile,
-		rebootCmd:       rebootCmd,
-		hostSandboxes:   *hostSandboxes,
-		konturSandboxes: *konturSandboxes,
-		konturStateDir:  *konturStateDir,
-		konturSSHUser:   *konturSSHUser, konturWorkspace: *konturWorkspace,
+		rebootCmd:           rebootCmd,
+		rootShellControlDir: *rootShellControlDir,
+		hostSandboxes:       *hostSandboxes,
+		konturSandboxes:     *konturSandboxes,
+		konturStateDir:      *konturStateDir,
+		konturSSHUser:       *konturSSHUser, konturWorkspace: *konturWorkspace,
 		konturExecKey:    *konturExecKey,
 		konturCreateArgs: konturCreateArgs, konturNet: *konturNet,
 		konturBaseIP: *konturBaseIP, konturBasePort: *konturBasePort,
@@ -582,6 +595,12 @@ type config struct {
 	// rebootHost's own `sudo systemctl reboot` default.
 	rebootCmd []string
 
+	// rootShellControlDir is where the UI's root shell asks this host to
+	// run a command as root (pkg/rootshell); empty -- the default --
+	// means this deployment has no root shell, the same "empty disables"
+	// shape upgradeSrcDir above uses.
+	rootShellControlDir string
+
 	// hostSandboxes records that this deployment asked for
 	// orchestrator.HostSandboxes rather than merely ending up on it --
 	// see -host-sandboxes' own flag doc comment. It selects nothing
@@ -589,6 +608,7 @@ type config struct {
 	// changes is whether startup reports host sandboxing as a choice or
 	// as an unnoticed default.
 	hostSandboxes bool
+
 	// konturSandboxes selects orchestrator.KonturSandboxes over the
 	// default orchestrator.HostSandboxes when non-empty; the rest of the
 	// kontur* fields are only consulted then. See run()'s own comment on
@@ -2696,6 +2716,14 @@ func startUIServer(cfg config, store *model.Store, transcriptDir string, sandbox
 		// from. A sandbox's own processes belong to its VM and are not
 		// in it -- that is what the sandbox rows beside this report.
 		HostTop: hostTop,
+		// The last-resort tab beside the three above (ui.Config.
+		// RootShell): when Logs, Top and Sandbox health have all failed
+		// to explain what is wrong, one command as root on this same
+		// machine. nil unless -root-shell-control-dir names the control
+		// directory a host-side responder is watching, since there is
+		// nothing this container can do about the host on its own --
+		// see rootShell and pkg/rootshell.
+		RootShell: rootShell(cfg.rootShellControlDir),
 		// ReconcilerDown mirrors this same process's own package-level
 		// reconcilerDown (daemon.go), the same way AutoMergeDegraded above
 		// mirrors orchestrator.ChecksUnavailable -- bwsalmon/agents#576.
@@ -2865,6 +2893,36 @@ func rebootHost(argv []string) func(context.Context) error {
 	}
 	return func(ctx context.Context) error {
 		return exec.CommandContext(ctx, argv[0], argv[1:]...).Run()
+	}
+}
+
+// rootShell builds startUIServer's ui.Config.RootShell out of
+// -root-shell-control-dir: the System overlay's Root shell tab, over the
+// file exchange pkg/rootshell describes. An empty directory returns nil,
+// which is what makes the tab report itself unavailable rather than
+// offering a prompt with nothing behind it.
+//
+// Every command is logged before it runs, at the daemon's own log, which
+// is the System overlay's own "daemon" log source. That is deliberate and
+// it is the only record there is: the exchange leaves no file behind
+// (pkg/rootshell.Runner.clear) and the host-side responder is a systemd
+// oneshot whose journal names the unit, not the command. A root shell
+// that leaves no trace of what was run in it is the kind of thing an
+// operator discovers they wanted only after the fact.
+func rootShell(controlDir string) func(context.Context, string) (ui.RootShellResult, error) {
+	if controlDir == "" {
+		return nil
+	}
+	runner := rootshell.New(controlDir)
+	return func(ctx context.Context, command string) (ui.RootShellResult, error) {
+		log.Printf("grain daemon: root shell: running as root on this host: %s", command)
+		out, err := runner.Run(ctx, command)
+		if err != nil {
+			log.Printf("grain daemon: root shell: %v", err)
+			return ui.RootShellResult{}, err
+		}
+		log.Printf("grain daemon: root shell: exit status %d", out.ExitCode)
+		return ui.RootShellResult{Output: out.Output, ExitCode: out.ExitCode}, nil
 	}
 }
 

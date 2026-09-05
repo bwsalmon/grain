@@ -459,6 +459,32 @@ GRAIN_ENABLE_UI_UPGRADE="${GRAIN_ENABLE_UI_UPGRADE:-1}"
 # suspend policy back the way this script found it.
 GRAIN_DISABLE_SUSPEND="${GRAIN_DISABLE_SUSPEND:-1}"
 
+# The UI's root shell (pkg/rootshell, the System overlay's Root shell tab):
+# a third control unit that runs whatever command the daemon writes to
+# $CONTROL_DIR/shell, as root, and writes back what it printed.
+#
+# On by default, and this is the one default in this file that hands
+# something real away, so it is worth being plain about both halves. What
+# it grants is unrestricted root on this host to whatever can reach the
+# UI -- where the two units beside it grant one fixed command each. The
+# UI carries no auth of its own (see this file's header), so that is
+# "whatever can reach GRAIN_UI_ADDR", which is loopback until an operator
+# puts it on a tailnet.
+#
+# It is on anyway because of what the pane is for. A deployment that has
+# gone wrong in a way the Logs, Top and Sandbox health panes cannot
+# explain is exactly when an operator needs a shell on the host, and it is
+# also when the usual ways in are least likely to work: a machine that
+# stopped accepting SSH, a VM in a cloud project whose console is three
+# support tickets away. A debug hatch that has to be installed in advance
+# is one that is not there on the day it is wanted -- and this deployment
+# already lets the same UI reboot the machine.
+#
+# Set to 0 for a deployment that would rather not have it: a re-run with 0
+# removes the unit and stops passing the flag, so the route reports itself
+# unavailable and the tab says so.
+GRAIN_ROOT_SHELL="${GRAIN_ROOT_SHELL:-1}"
+
 # --- Tailscale (how anyone reaches the UI at all) -----------------------
 #
 # Off by default, because turning it on publishes this deployment's UI to
@@ -686,6 +712,19 @@ Recognized variables:
                              rollout mechanism (e.g. terraform/gcp's
                              config-sync.sh/deploy.sh), so the two cannot
                              race or drift out of sync with each other
+
+  GRAIN_ROOT_SHELL          1 (default) to install the host-side responder
+                             behind the UI's System -> Root shell tab: one
+                             command, run as root on this machine, for the
+                             failure the Logs/Top/Sandbox health panes
+                             cannot explain and the machine SSH will no
+                             longer let you into. NOTE: this grants
+                             unrestricted root on this host to whatever can
+                             reach the UI, which carries no auth of its own
+                             -- the same reach as the reboot button, and
+                             considerably more of it. Set to 0 to install
+                             no responder; a re-run with 0 removes one an
+                             earlier run installed
 
   GRAIN_DISABLE_SUSPEND     1 (default) to stop this host suspending,
                              hibernating or idling itself to sleep while a
@@ -1200,9 +1239,10 @@ ensure_user() {
 
 # --- 4. the control channel: acting on the host from inside the container -
 #
-# Two UI buttons ask grain to do something to the machine it runs on:
-# "reboot host" (pkg/ui/host.go, bwsalmon/agents#395) and the restart
-# at the end of an Upgrade (bwsalmon/agents#396). Both used to be a
+# Three things in the UI ask grain to do something to the machine it runs
+# on: "reboot host" (pkg/ui/host.go, bwsalmon/agents#395), the restart
+# at the end of an Upgrade (bwsalmon/agents#396), and the Root shell tab
+# (pkg/rootshell, grain/task-13). The first two used to be a
 # NOPASSWD sudoers line each, granting $GRAIN_USER exactly one command --
 # and neither can work from inside a container, where `systemctl` reaches
 # no systemd that matters and sudo grants nothing that crosses the
@@ -1211,15 +1251,23 @@ ensure_user() {
 # So the container asks instead of acting. The daemon touches a file
 # under $GRAIN_DATA_DIR/control -- a directory it already has mounted --
 # and a systemd .path unit out here notices and runs the real command as
-# root. write_systemd_units points -reboot-cmd and -upgrade-restart-cmd
-# at exactly those two files.
+# root. write_systemd_units points -reboot-cmd, -upgrade-restart-cmd and
+# -root-shell-control-dir at exactly those files.
 #
-# What this grants is the same pair of actions the two sudoers files
-# granted, by a mechanism with less reach: there is no sudo rule left at
-# all, so nothing can be widened by editing one, and the only thing the
-# daemon can cause is whichever command these two units name. Anything
-# able to write into $GRAIN_DATA_DIR/control can trigger them -- which is
-# $GRAIN_USER and root, exactly who could invoke the old sudo rules.
+# What the first two grant is the same pair of actions the two sudoers
+# files granted, by a mechanism with less reach: there is no sudo rule
+# left at all, so nothing can be widened by editing one, and the only
+# thing the daemon can cause is whichever command those two units name.
+# Anything able to write into $GRAIN_DATA_DIR/control can trigger them --
+# which is $GRAIN_USER and root, exactly who could invoke the old sudo
+# rules.
+#
+# The root shell (write_root_shell_units, GRAIN_ROOT_SHELL) is the
+# deliberate exception to that sentence, and the only one: its unit runs
+# whatever command it is handed rather than one this file names. That is
+# what a debug hatch is, it is the last one left when a host stops
+# answering SSH, and it is off with GRAIN_ROOT_SHELL=0 for a deployment
+# that would rather do without.
 #
 # Each service removes the request file before acting, so a request is
 # consumed once. PathModified (rather than PathExists) is what watches
@@ -1279,6 +1327,127 @@ Description=Restart grain-daemon.service, at the grain daemon's request
 Type=oneshot
 ExecStart=/bin/rm -f ${CONTROL_DIR}/restart
 ExecStart=/usr/bin/systemctl restart grain-daemon.service
+UNIT
+
+  write_root_shell_units
+}
+
+# ROOT_SHELL_RESPONDER is the host-side half of the UI's root shell: the
+# script grain-shell.service runs, as root, every time the daemon writes
+# a command to $CONTROL_DIR/shell.
+ROOT_SHELL_RESPONDER=/usr/local/lib/grain/root-shell.sh
+
+# write_root_shell_units installs (or, with GRAIN_ROOT_SHELL=0, removes)
+# that responder and the .path unit that triggers it.
+#
+# Unlike the reboot and restart units above, this one runs a command
+# nothing here wrote -- see the section header for what that grants and
+# why it is on by default. The exchange itself is three files, and
+# pkg/rootshell's own doc comment is the specification both ends are
+# written against:
+#
+#   shell         the command, written by the daemon. PathModified fires
+#                 on the close of that write.
+#   shell.out     everything it printed, stdout and stderr interleaved.
+#   shell.status  its exit status, written LAST and renamed into place,
+#                 which is how the daemon knows shell.out is complete
+#                 without having to guess.
+#
+# Both answer files are chowned to whoever owns the control directory
+# ($GRAIN_USER) under a umask of 077, so the output of a root command --
+# which is as likely as not to hold something worth protecting -- is
+# readable by the daemon that asked for it and by root, and by nothing
+# else on this host.
+write_root_shell_units() {
+  if [ "$GRAIN_ROOT_SHELL" != "1" ]; then
+    # A re-run with GRAIN_ROOT_SHELL=0 takes back what an earlier run
+    # granted, the same way a re-run with GRAIN_DISABLE_SUSPEND=0 unmasks
+    # the sleep targets. Leaving the unit installed but unused would be
+    # exactly the standing grant nobody notices again that the sudoers
+    # drop-ins above were removed for.
+    if [ -e /etc/systemd/system/grain-shell.path ]; then
+      log "GRAIN_ROOT_SHELL=0: removing grain-shell.path/.service"
+      systemctl disable --now grain-shell.path >/dev/null 2>&1 || true
+      rm -f /etc/systemd/system/grain-shell.path /etc/systemd/system/grain-shell.service
+      rm -f "$ROOT_SHELL_RESPONDER"
+    fi
+    return 0
+  fi
+
+  log "Writing grain-shell.path/.service (the UI's root shell)"
+  install -d -m0755 /usr/local/lib/grain
+  cat > "$ROOT_SHELL_RESPONDER" <<'RESPONDER'
+#!/usr/bin/env bash
+# Written by scripts/setup.sh (write_root_shell_units). Runs one command
+# as root, on behalf of the grain daemon's System -> Root shell tab, and
+# writes back what it printed. Invoked by grain-shell.service with the
+# control directory as its only argument; see pkg/rootshell for the other
+# end of this exchange and for the protocol both ends implement.
+set -u
+dir="$1"
+req="$dir/shell"
+out="$dir/shell.out"
+status="$dir/shell.status"
+
+# Nothing to do: the .path unit can fire on a write the daemon has since
+# abandoned and removed (pkg/rootshell.Runner.Run's own cleanup).
+[ -f "$req" ] || exit 0
+command="$(cat "$req")"
+
+# Consume the request before running it, so a command that reboots this
+# host, or one that is killed by TimeoutStartSec below, cannot be run a
+# second time when the unit next starts. The stale answer files go with
+# it -- the daemon clears them too, and whichever of us gets there first
+# is fine.
+rm -f "$req" "$out" "$status"
+
+# 077, and chowned to whoever owns the control directory afterwards: what
+# a root command prints is readable by the daemon that asked for it and by
+# root, and by nobody else who happens to be on this host.
+umask 077
+owner="$(stat -c '%u:%g' "$dir")"
+
+# A login shell, because what an operator typed is what an operator would
+# have typed into one, PATH and profile and all. stdin is /dev/null: there
+# is no terminal on this end of the exchange, and a command that waits for
+# input would otherwise hang until the unit's own timeout.
+bash -lc "$command" >"$out" 2>&1 </dev/null
+code=$?
+chown "$owner" "$out" 2>/dev/null || true
+
+# The status file, last and atomically: its appearance is what tells the
+# daemon the output above is finished being written.
+printf '%s\n' "$code" >"$status.tmp"
+chown "$owner" "$status.tmp" 2>/dev/null || true
+mv "$status.tmp" "$status"
+RESPONDER
+  chmod 0755 "$ROOT_SHELL_RESPONDER"
+
+  cat > /etc/systemd/system/grain-shell.path <<UNIT
+[Unit]
+Description=Watch for grain's root shell requests (the UI's System pane)
+
+[Path]
+PathModified=${CONTROL_DIR}/shell
+Unit=grain-shell.service
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+  # TimeoutStartSec bounds a command that never returns -- a "tail -f", an
+  # apt waiting on a prompt that will never come. It is well past the two
+  # minutes pkg/rootshell waits before telling the operator nothing
+  # answered, because the two are different questions: this one is about
+  # not leaving a root process running on the host forever.
+  cat > /etc/systemd/system/grain-shell.service <<UNIT
+[Unit]
+Description=Run one command as root, at the grain daemon's request
+
+[Service]
+Type=oneshot
+ExecStart=${ROOT_SHELL_RESPONDER} ${CONTROL_DIR}
+TimeoutStartSec=600
 UNIT
 }
 
@@ -2337,6 +2506,18 @@ write_systemd_units() {
   # (`sudo systemctl reboot`, cmd/grain/daemon.go's defaultRebootCmd) is
   # the one thing that cannot work from inside a container.
   daemon_args+=(-reboot-cmd touch -reboot-cmd "$CONTROL_DIR/reboot")
+
+  # The System pane's Root shell tab, through that same channel: the
+  # daemon writes the command to $CONTROL_DIR/shell and grain-shell.path
+  # (write_root_shell_units) turns it into a root shell out here. Passed
+  # only when the responder was actually installed -- the daemon's own
+  # default is empty, which is what makes the route report itself
+  # unavailable and the tab say so, rather than every command waiting two
+  # minutes on a directory nothing watches.
+  if [ "$GRAIN_ROOT_SHELL" = "1" ]; then
+    daemon_args+=(-root-shell-control-dir "$CONTROL_DIR")
+  fi
+
   [ -n "$GRAIN_AGY_PATH" ] && daemon_args+=(-agy-path "$GRAIN_AGY_PATH")
   [ -n "$GRAIN_GEMINI_MODEL" ] && daemon_args+=(-gemini-model "$GRAIN_GEMINI_MODEL")
   [ -n "$GRAIN_GEMINI_EFFORT" ] && daemon_args+=(-gemini-effort "$GRAIN_GEMINI_EFFORT")
@@ -2698,6 +2879,13 @@ enable_services() {
   # .path unit holds no state worth restarting, and it has to be actively
   # watching before the first request lands in $CONTROL_DIR.
   systemctl enable --now grain-reboot.path grain-restart.path >/dev/null
+  # And the third one, when this deployment has it (GRAIN_ROOT_SHELL):
+  # same argument, and the same --now -- a Root shell tab whose responder
+  # is installed but not watching would answer every command with
+  # pkg/rootshell's "nothing answered" timeout.
+  if [ "$GRAIN_ROOT_SHELL" = "1" ]; then
+    systemctl enable --now grain-shell.path >/dev/null
+  fi
   # Started unconditionally, even with no agent credential anywhere. It
   # used to be held back until a Gemini key existed, because the daemon
   # built its one agent framework at startup and could not run without

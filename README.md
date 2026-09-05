@@ -6989,6 +6989,99 @@ of those is that guest's business. What shows up here is what happened
 to the machine the daemon and every sandbox share — which is the level
 the questions that reach this pane are asked at.
 
+## A root shell, from the UI
+
+Every panel of the System pane answers one fixed question. Logs says what the
+daemon, the proxy, config-sync and the kernel wrote down; Top says which
+process is spending the machine; Sandbox health says how loaded it is and
+what each slot is holding. The failure that reaches an operator anyway is
+the one none of those has a column for — a disk filled by something no
+panel counts, a unit that will not come back, a container the daemon
+cannot see past — and the answer to it has always been the same: get a
+shell on the host and look.
+
+That is the pane: System → Root shell, one command at a time, run as root
+on the machine the daemon runs on, with its output read back in the
+browser (`POST /api/host/shell`, `pkg/rootshell`, `ui.Config.RootShell`).
+A scrollback of everything run since the pane was opened, because the
+output of the third command means nothing without the two above it. A
+command that fails is an answer rather than an error: it comes back with
+its exit code beside its output, since "the unit is dead and here is why"
+is what the question was.
+
+**Why it is in here at all**, given that an operator with an SSH session
+needs none of it. Because the deployments worth opening this pane for are
+the ones where that session is exactly what is missing: a host that
+stopped accepting connections, a VM in a cloud project whose console is
+three support tickets away, a machine reachable only over the tailnet
+this same UI is served on (`GRAIN_TAILSCALE_ENABLE`). The UI is the one
+surface that is definitionally still up when grain itself is up — it is
+what stays serving when the reconcile loop has died
+(`Config.ReconcilerDown`) — so it is the right place for the hatch that
+gets used on the day nothing else works.
+
+**The daemon cannot run the command itself.** It is a container process
+running unprivileged as `$GRAIN_USER`, with no `sudo` in the image and no
+`systemctl` that reaches a systemd that matters (`scripts/setup.sh`'s
+`docker_run_args`); a `bash -c` from in there is neither root nor on the
+host, which is both of the things this pane is opened for. So it asks
+instead of acting, over the control channel the reboot button and the
+Upgrade button's restart already use: the daemon writes the command to
+`$GRAIN_DATA_DIR/control/shell`, a systemd `.path` unit out on the host
+notices, and `grain-shell.service` runs it as root and writes back what
+it printed.
+
+The exchange is three files, and the ordering is the whole protocol:
+`shell` (the command), `shell.out` (stdout and stderr interleaved, as a
+terminal would show them), and `shell.status` (the exit status, written
+*last* and renamed into place). A status file existing means the output
+beside it is finished, so the daemon side never reads a half-written
+answer and never has to guess. Both answer files are written under a
+`077` umask and chowned to the control directory's owner, so what a root
+command prints is readable by the daemon that asked for it and by root
+and by nobody else on the box. The responder consumes the request before
+running it, so a command that reboots the host is not run a second time
+on the way back up, and `TimeoutStartSec` bounds one that never returns
+at all.
+
+**What this grants, said plainly.** The two units beside this one each
+run one fixed command — `systemctl reboot`, `systemctl restart
+grain-daemon.service` — and that narrowness was the argument for
+replacing the `NOPASSWD` sudoers drop-ins they came from. This one runs
+whatever it is handed. It is unrestricted root on the host, held by
+whatever can reach the UI, and the UI carries no auth of its own: on a
+default deployment that is loopback, and on a tailnet deployment it is
+everyone the tailnet ACL lets in. There is no way to make a debug hatch
+narrower than the failures it is for, which is the honest reason it is
+this wide rather than a list of allowed commands.
+
+It is on by default anyway (`GRAIN_ROOT_SHELL=0` turns it off, and a
+re-run with `0` removes a responder an earlier run installed). A hatch
+that has to be installed in advance is one that is not installed on the
+day it is wanted — which is precisely the day the host stopped letting
+anyone in to install it — and this same UI could already reboot the
+machine out from under every running task. What the default buys is that
+the pane is there when the deployment is broken; what it costs is the
+paragraph above, which is why `scripts/setup.sh` says it too, at the
+variable.
+
+Two smaller decisions worth recording. Every command is logged to the
+daemon's journal before it runs, and that is the only record there is:
+the exchange leaves no file behind and the host-side unit's own journal
+names the unit rather than the command. And the warning above the prompt
+is standing, not a confirm per command — a confirm is clicked through by
+the second command, and this pane is used a dozen short commands at a
+time. Each of those is its own `bash -lc`, so a `cd` does not persist
+between them; the pane says so rather than leaving it to be discovered.
+
+A deployment with no responder behind the route says so on the tab, off
+`GET /api/config`'s own `rootShellEnabled`, rather than offering a prompt
+whose every command could only 404 — the same nil-means-unavailable
+contract every other optional panel here follows. A host deployed before
+any of this existed is in exactly that state until `sudo ./setup.sh` is
+re-run, and `pkg/rootshell`'s timeout message names the units to install
+rather than only reporting that nothing answered.
+
 ## Host mode is a choice now, and says so
 
 `scripts/setup.sh` used to install an unisolated deployment by default.

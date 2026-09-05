@@ -144,6 +144,50 @@ func TestTheContainerReachesTheHostThroughPathUnitsNotSudo(t *testing.T) {
 	contains(t, text, "rm -f /etc/sudoers.d/grain-daemon-reboot /etc/sudoers.d/grain-daemon-upgrade")
 }
 
+// The third unit on that same channel: the UI's root shell
+// (grain/task-13, pkg/rootshell). Unlike the two above it runs a command
+// nothing in this script names, which is the whole point of a debug
+// hatch and also why the gate that installs it, the flag that turns it
+// on in the daemon, and the responder's own protocol all have to agree
+// across three files nothing else checks together.
+func TestSetupInstallsTheRootShellResponder(t *testing.T) {
+	text := setupText(t)
+	code := setupCode(t)
+
+	for _, unit := range []string{"grain-shell.path", "grain-shell.service"} {
+		if !strings.Contains(text, "/etc/systemd/system/"+unit) {
+			t.Errorf("%s is not written", unit)
+		}
+	}
+	contains(t, text, "PathModified=${CONTROL_DIR}/shell")
+	// The daemon end and the host end have to name the same directory,
+	// and the flag is what makes the route exist at all: without it the
+	// UI reports the pane unavailable no matter what is installed here.
+	contains(t, text, `-root-shell-control-dir "$CONTROL_DIR"`)
+	// Watching, not merely installed -- a .path unit that is not running
+	// answers every command with pkg/rootshell's own timeout.
+	contains(t, code, "systemctl enable --now grain-shell.path")
+
+	// The completion protocol pkg/rootshell.Runner reads from the other
+	// side: the status file is written last and renamed into place, so
+	// that seeing one means the output beside it is finished.
+	before(t, text, `>"$out" 2>&1`, `>"$status.tmp"`,
+		"the responder must write the command's output before its exit status")
+	before(t, text, `>"$status.tmp"`, `mv "$status.tmp" "$status"`,
+		"the status file must be renamed into place rather than written in place")
+	// And the request is consumed before it is run, so a command that
+	// reboots this host is not run again on the way back up.
+	before(t, text, `rm -f "$req"`, `bash -lc "$command"`,
+		"the responder must consume the request before running it")
+
+	// GRAIN_ROOT_SHELL=0 is a deployment that wants none of this, and a
+	// re-run with it takes back what an earlier run granted rather than
+	// leaving a unit installed that nothing passes the flag for.
+	contains(t, text, `GRAIN_ROOT_SHELL="${GRAIN_ROOT_SHELL:-1}"`)
+	contains(t, code, "systemctl disable --now grain-shell.path")
+	contains(t, code, "rm -f /etc/systemd/system/grain-shell.path /etc/systemd/system/grain-shell.service")
+}
+
 // A deployed host does not suspend under the work it was given.
 //
 // The failure is silent and looks like nothing else: the daemon's clock
