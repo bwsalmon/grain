@@ -481,6 +481,12 @@ type configResponse struct {
 	// Config.Reboot is set, so the frontend can hide the reboot button
 	// entirely rather than show one that can only ever 404.
 	RebootEnabled bool `json:"rebootEnabled"`
+	// RootShellEnabled is the same flag for Config.RootShell: whether
+	// this deployment has a root shell responder behind POST
+	// /api/host/shell at all, so the Debug overlay's Root shell tab can
+	// say "not available here" instead of offering a prompt that could
+	// only ever 404 (grain/task-13).
+	RootShellEnabled bool `json:"rootShellEnabled"`
 	// TargetRepos mirrors Client.Config.TargetRepos -- the same list
 	// CreateTask enforces a task's repo against -- so the frontend can
 	// offer a dropdown of known repos on the task and schedule forms
@@ -691,12 +697,13 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resp := configResponse{
-		Actor:         s.tasks.Config.Actor.ID,
-		ActorKind:     string(s.tasks.Config.Actor.Kind),
-		Capabilities:  s.tasks.capabilitiesWithReadiness(cfg, repoConfigs),
-		RebootEnabled: s.tasks.Config.Reboot != nil,
-		TargetRepos:   s.tasks.targetRepos(),
-		Version:       versionResponseFrom(version.Get()),
+		Actor:            s.tasks.Config.Actor.ID,
+		ActorKind:        string(s.tasks.Config.Actor.Kind),
+		Capabilities:     s.tasks.capabilitiesWithReadiness(cfg, repoConfigs),
+		RebootEnabled:    s.tasks.Config.Reboot != nil,
+		RootShellEnabled: s.tasks.Config.RootShell != nil,
+		TargetRepos:      s.tasks.targetRepos(),
+		Version:          versionResponseFrom(version.Get()),
 	}
 	resp.AgentFramework = model.AgentFrameworkAntigravity
 	// Same reading of "no row yet" the AgentFramework line above takes:
