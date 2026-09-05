@@ -82,6 +82,16 @@
 #      this run with a working loopback-only daemon rather than no
 #      deployment at all
 #
+# Alongside those, and before the daemon is started, it takes this host
+# out of the business of suspending itself (disable_host_suspend): a
+# deployment runs unattended agent work for hours at a stretch, and a
+# machine that drops into S3 halfway through does not slow that work
+# down, it stops it -- mid-clone, mid-push, with the UI unreachable and
+# nothing in any log saying why. That is a real deployment shape here
+# (a desktop or laptop under someone's desk), not a hypothetical one, and
+# a cloud VM that never suspends anyway loses nothing by being told not
+# to. GRAIN_DISABLE_SUSPEND=0 opts out, and undoes it on a re-run.
+#
 # What this host has to have: docker and systemd. That is the whole
 # list. Everything else this script runs is either a shell builtin or
 # part of a base system install -- coreutils, and the `useradd` every
@@ -418,6 +428,13 @@ GRAIN_KONTUR_GIT_PROXY_HOST="${GRAIN_KONTUR_GIT_PROXY_HOST:-}"
 # (bwsalmon/agents#405).
 GRAIN_ENABLE_UI_UPGRADE="${GRAIN_ENABLE_UI_UPGRADE:-1}"
 
+# On by default: a deployment exists to run unattended work for hours,
+# and a host that suspends underneath it is not a slower deployment but a
+# stopped one (disable_host_suspend, below). Set to 0 on a machine whose
+# own power policy should win -- a re-run with it unset again puts the
+# suspend policy back the way this script found it.
+GRAIN_DISABLE_SUSPEND="${GRAIN_DISABLE_SUSPEND:-1}"
+
 # --- Tailscale (how anyone reaches the UI at all) -----------------------
 #
 # Off by default, because turning it on publishes this deployment's UI to
@@ -645,6 +662,14 @@ Recognized variables:
                              rollout mechanism (e.g. terraform/gcp's
                              config-sync.sh/deploy.sh), so the two cannot
                              race or drift out of sync with each other
+
+  GRAIN_DISABLE_SUSPEND     1 (default) to stop this host suspending,
+                             hibernating or idling itself to sleep while a
+                             task runs: masks the four sleep targets and
+                             tells logind to ignore the lid and the sleep
+                             keys. Set to 0 to leave this machine's own
+                             power policy alone -- a re-run with 0 also
+                             undoes what an earlier run masked
 
   GRAIN_TAILSCALE_ENABLE     1 to install tailscale on this host, join it to a
                              tailnet, and serve the UI on its tailnet address
@@ -2469,6 +2494,84 @@ docker_run_args() {
   return 0
 }
 
+# Every route into sleep, as systemd names them. Masked as a set rather
+# than one at a time: logind picks among these by hardware and by which
+# request arrived (a lid, a key, an idle timer, `systemctl suspend`), so
+# closing one and leaving the others is a host that still suspends,
+# just for a different reason than the one that was noticed.
+SLEEP_TARGETS=(sleep.target suspend.target hibernate.target hybrid-sleep.target)
+LOGIND_DROPIN=/etc/systemd/logind.conf.d/10-grain-no-suspend.conf
+
+# disable_host_suspend stops this machine putting itself to sleep under a
+# running task -- see this file's header for why that is a stopped
+# deployment rather than a slow one.
+#
+# Two halves, because there are two different things to stop:
+#
+#   * masking the sleep targets closes the *transition*. Every route into
+#     sleep ends in one of those units, and a masked unit cannot be
+#     started by anything -- not `systemctl suspend`, not a desktop's
+#     power menu, not logind's own idle action -- so this holds even for
+#     the routes this script has never heard of
+#   * the logind drop-in stops the *events* that would otherwise keep
+#     asking: a closed lid, a pressed sleep key, an idle session. Masking
+#     alone already makes those fail, but a host failing a suspend every
+#     time the lid shuts is a log full of noise and a machine one systemd
+#     upgrade away from suspending again
+#
+# Symmetric, so a deployment is never stuck with a policy it was given
+# once: GRAIN_DISABLE_SUSPEND=0 on a later run unmasks the same targets
+# and removes the same drop-in, rather than leaving an operator to work
+# out what a previous run masked. Neither direction is fatal -- a host
+# whose systemd will not mask a target is a host that suspends, which is
+# worth a warning and not worth abandoning a deploy over.
+disable_host_suspend() {
+  if [ "$GRAIN_DISABLE_SUSPEND" != "1" ]; then
+    log "GRAIN_DISABLE_SUSPEND=0: leaving this host's suspend policy alone"
+    rm -f "$LOGIND_DROPIN"
+    systemctl unmask "${SLEEP_TARGETS[@]}" >/dev/null 2>&1 || true
+    systemctl reload systemd-logind.service >/dev/null 2>&1 || true
+    return
+  fi
+
+  log "Disabling suspend on this host (mask ${SLEEP_TARGETS[*]})"
+  local masked=1
+  if ! systemctl mask "${SLEEP_TARGETS[@]}" >/dev/null 2>&1; then
+    masked=0
+    log "  warning: could not mask the sleep targets -- this host may suspend under a running task"
+  fi
+
+  install -d -m0755 "${LOGIND_DROPIN%/*}"
+  cat > "$LOGIND_DROPIN" <<'UNIT'
+# Written by grain's setup.sh (GRAIN_DISABLE_SUSPEND). A deployment runs
+# unattended work for hours; a lid, a sleep key or an idle timer must not
+# end it. Delete this file and unmask the sleep targets to undo, or
+# re-run setup.sh with GRAIN_DISABLE_SUSPEND=0, which does both.
+[Login]
+HandleSuspendKey=ignore
+HandleHibernateKey=ignore
+HandleLidSwitch=ignore
+HandleLidSwitchExternalPower=ignore
+HandleLidSwitchDocked=ignore
+IdleAction=ignore
+UNIT
+
+  # Reloaded rather than restarted: restarting logind on an older systemd
+  # takes live sessions down with it, which is a heavy price for settings
+  # that only matter the next time a lid closes. A reload this systemd is
+  # too old to support leaves the drop-in in place for the next boot, and
+  # the masked targets already stop the suspend itself in the meantime.
+  if ! systemctl reload systemd-logind.service >/dev/null 2>&1; then
+    log "  logind did not reload: the lid and sleep-key settings take effect on the next boot"
+    # Only where it is true: with the mask above having failed as well,
+    # nothing is stopping a suspend until this host reboots, and saying
+    # otherwise is the one way this warning could mislead.
+    if [ "$masked" = "1" ]; then
+      log "  (the masked targets above already prevent the suspend itself)"
+    fi
+  fi
+}
+
 enable_services() {
   # enable, then restart -- not "enable --now". An already-enabled unit
   # from a previous run of this script needs restarting to pick up a
@@ -2986,6 +3089,10 @@ main() {
   # be in place before write_systemd_units' unit reads it.
   write_image_ref
   write_systemd_units
+  # Before the daemon is started, not after: the window between "this
+  # host can dispatch work" and "this host will stay awake to finish it"
+  # should not exist at all.
+  disable_host_suspend
   enable_services
   # After enable_services: `tailscale serve` publishes the port the
   # daemon listens on, so pointing it at a service that is already up

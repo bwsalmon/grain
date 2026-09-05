@@ -144,6 +144,49 @@ func TestTheContainerReachesTheHostThroughPathUnitsNotSudo(t *testing.T) {
 	contains(t, text, "rm -f /etc/sudoers.d/grain-daemon-reboot /etc/sudoers.d/grain-daemon-upgrade")
 }
 
+// A deployed host does not suspend under the work it was given.
+//
+// The failure is silent and looks like nothing else: the daemon's clock
+// stops mid-task, the UI stops answering, and whatever the agent was
+// doing -- a clone, a push, a run of CI it was waiting on -- resumes
+// minutes or hours later against timed-out connections, with nothing in
+// any log saying the machine was asleep. Nothing else in this suite
+// reads the deploy's power policy.
+//
+// Every route in has to be closed, which is why this asserts the whole
+// set rather than "suspend is mentioned": masking sleep.target alone
+// still leaves a host that hibernates, and masked targets alone leave a
+// laptop failing a suspend every time its lid shuts.
+func TestTheDeployedHostDoesNotSuspendUnderARunningTask(t *testing.T) {
+	code := setupCode(t)
+
+	for _, target := range []string{
+		"sleep.target", "suspend.target", "hibernate.target", "hybrid-sleep.target",
+	} {
+		if !strings.Contains(code, target) {
+			t.Errorf("%s is neither masked nor unmasked, so a host can still reach it", target)
+		}
+	}
+	contains(t, code, `systemctl mask "${SLEEP_TARGETS[@]}"`)
+	// logind's own events, so a closed lid or a sleep key is not an
+	// endlessly retried, endlessly failing suspend.
+	contains(t, code, "HandleLidSwitch=ignore")
+	contains(t, code, "HandleSuspendKey=ignore")
+	contains(t, code, "IdleAction=ignore")
+
+	// Reversible from the same script that did it. A masked unit and a
+	// drop-in outlive the deployment that wrote them, so an operator who
+	// turns this off has to be able to turn it off by re-running the
+	// installer rather than by reverse-engineering what it masked.
+	suspend := body(t, code, "disable_host_suspend() {")
+	contains(t, suspend, `systemctl unmask "${SLEEP_TARGETS[@]}"`)
+	contains(t, suspend, `rm -f "$LOGIND_DROPIN"`)
+
+	// And the daemon is not started onto a host that might still sleep.
+	before(t, code, "disable_host_suspend\n", "enable_services\n",
+		"the daemon is started before this host is told not to suspend")
+}
+
 // On a host deployed before this change both names are symlinks into
 // $GRAIN_DATA_DIR/bin, and `cat >` follows one -- which would write the
 // wrapper over the binary at the far end and leave /usr/local/bin/grain
