@@ -809,3 +809,53 @@ ahead of each name (`state.js`'s `repoActivity`): running when an agent
 is working there this moment, an open ring when work is outstanding but
 none of it moving, grey when every task there is closed -- so a repo
 with something happening in it is visible without reading its counts.
+
+## Update: a schedule's time of day is read on the deployment's clock (grain/task-368)
+
+"No per-schedule timezone" (the `Recurrence` section above) was the right
+call and was taken one step too far: with no zone anywhere, a time of day
+was read against UTC, which is not a decision anybody made -- it is what
+a container with no `/etc/localtime` happens to be. A schedule saying
+"daily at 09:00" fired at two in the morning where this deployment's
+operator actually is, and the only way to ask for nine was to write 17:00
+and remember why.
+
+There is still no zone per schedule. There is one per *deployment*:
+`model.Config.TimeZone`, an IANA name in `grain_config`, defaulting to
+`America/Los_Angeles` and backfilled to it for a database that predates
+the column (`Store.ensureConfigTimeZoneColumn` -- the one config
+migration whose backfill is not a zero value, because the clock those
+schedules were already firing against was accidental rather than chosen).
+An operator who does want UTC now has a way to say so, which is the half
+nobody had.
+
+`Recurrence.Next` takes a `*time.Location` (nil is UTC, its old
+behaviour) and `orchestrator.reconcileSchedule` resolves one per cycle
+from the config row `RunCycle` already refreshes, so a changed zone
+retimes the next occurrence rather than waiting for a restart. Three
+details are load-bearing:
+
+- **Daily, weekly and monthly walk the calendar, not the clock.**
+  `nextDaily`/`nextWeekly` advance with `AddDate`, which keeps the
+  wall-clock time it started from, so "09:00" stays 09:00 across the two
+  days a year that are 23 and 25 hours long rather than sliding an hour
+  with the offset.
+- **`everyNHours` ignores the zone entirely.** A duration between
+  instants is the same duration everywhere, daylight saving included --
+  which is exactly the difference between "every 24 hours" and "daily at
+  09:00", and worth keeping distinct now that the two can disagree.
+- **An hour that does not exist that day still fires.** `time.Date`
+  resolves 02:30 on a spring-forward morning as 03:30, so such a schedule
+  runs once, an hour late, rather than being skipped.
+
+`pkg/model` imports `time/tzdata`: a zone has to resolve inside the
+deployment image, and "the base image was slimmed and every clock quietly
+fell back to UTC" is the failure this whole change exists to end.
+
+Frontend: `ScheduleOverlay`'s time field is labelled with the zone and
+its current abbreviation ("Time (America/Los_Angeles, PDT)") instead of
+"Time (UTC)", `SchedulesList` prints next/last run on that same clock,
+and the zone itself is chosen on Settings' General tab. The rest of the
+UI moved with it -- `ui/src/time.js` and `TimeZoneContext` -- so a
+schedule's next run and every other time on screen are read against one
+clock, which is the one the daemon fires against.

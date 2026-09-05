@@ -10,6 +10,8 @@ import {
 } from "@mui/material";
 import { STATE_LABELS, STATE_ORDER, repoRows } from "../state.js";
 import { SIDEBAR_WIDTH } from "../theme.js";
+import { useTimeZone } from "../TimeZoneContext.jsx";
+import { formatDateTime } from "../time.js";
 import GrainMark from "./GrainMark.jsx";
 import ItemGlyph from "./ItemGlyph.jsx";
 
@@ -65,7 +67,9 @@ function parseStampTime(iso) {
 // against `git log` is comparing against commit times, which are the
 // same everywhere -- and a stamp rendered in the reader's own zone would
 // say something different in every browser looking at the same
-// deployment. The tooltip gives the local reading for whoever wants it.
+// deployment. The tooltip gives the reading on the deployment's own
+// clock (grain/task-368) for whoever wants a time they can compare with
+// the rest of the UI.
 //
 // "-dirty" borrows git's own word for it (`git describe --dirty`): the
 // build ran against uncommitted changes, so the hash beside it does not
@@ -77,10 +81,10 @@ function buildStampLabel(version) {
   return `${short} · ${at.toISOString().slice(0, 16).replace("T", " ")}Z`;
 }
 
-function buildStampTitle(version) {
+function buildStampTitle(version, zone) {
   const parts = [`Running commit ${version.commit}`];
   const at = parseStampTime(version.committedAt);
-  if (at) parts.push(`committed ${at.toLocaleString()}`);
+  if (at) parts.push(`committed ${formatDateTime(at, zone)}`);
   if (version.modified)
     parts.push("built from a tree with uncommitted changes");
   return parts.join(", ");
@@ -104,6 +108,7 @@ export default function Sidebar({
   onOpenMetrics,
   onOpenNewTask,
 }) {
+  const zone = useTimeZone();
   const counts = {};
   let blocked = 0;
   for (const t of tasks) {
@@ -422,7 +427,7 @@ export default function Sidebar({
           component="p"
           color="text.secondary"
           noWrap
-          title={buildStampTitle(config.version)}
+          title={buildStampTitle(config.version, zone)}
           sx={{
             px: 0.9,
             m: 0,

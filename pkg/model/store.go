@@ -196,6 +196,9 @@ func (s *Store) Init(ctx context.Context) error {
 	if err := s.ensureConfigPromptExtensionColumn(ctx); err != nil {
 		return fmt.Errorf("migrating grain_config: %w", err)
 	}
+	if err := s.ensureConfigTimeZoneColumn(ctx); err != nil {
+		return fmt.Errorf("migrating grain_config: %w", err)
+	}
 	if err := s.ensureRepoConfigPromptExtensionColumn(ctx); err != nil {
 		return fmt.Errorf("migrating repo_config: %w", err)
 	}
@@ -994,6 +997,31 @@ func (s *Store) ensureConfigPromptExtensionColumn(ctx context.Context) error {
 	}
 	_, err = s.db.ExecContext(ctx,
 		"ALTER TABLE `grain_config` ADD COLUMN `prompt_extension` TEXT NOT NULL DEFAULT ''")
+	return err
+}
+
+// ensureConfigTimeZoneColumn adds grain_config.time_zone
+// (model.Config.TimeZone's own doc comment has the reasoning) to a
+// database created before grain/task-368, the same probe-then-ALTER
+// approach the two migrations above use.
+//
+// It is the one config column whose backfill is not a zero value:
+// existing rows get model.DefaultTimeZone, US Pacific, rather than the
+// empty string. That is a deliberate change of behaviour for a
+// deployment upgrading across it -- a schedule saying "daily at 09:00"
+// meant 09:00 UTC before and means 09:00 Pacific after, so it moves by
+// the offset between them the first time it fires -- and it is the whole
+// point of the setting: the clock those schedules were written against
+// was the container's accidental UTC, not a zone anybody chose. An
+// operator who genuinely wants UTC now has a way to say so, on the
+// settings pane, which is what nobody had before.
+func (s *Store) ensureConfigTimeZoneColumn(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, "SELECT `time_zone` FROM `grain_config` WHERE 1 = 0")
+	if err == nil {
+		return rows.Close()
+	}
+	_, err = s.db.ExecContext(ctx,
+		"ALTER TABLE `grain_config` ADD COLUMN `time_zone` TEXT NOT NULL DEFAULT '"+DefaultTimeZone+"'")
 	return err
 }
 
@@ -3375,7 +3403,7 @@ const configColumns = "`poll_interval_ms`,`max_workers`,`max_mergers`,`gemini_mo
 	"`github_host`,`github_insecure_http`,`gcp_project`,`gcp_service_account_email`,`target_repos`," +
 	"`newest_first`,`sandbox_cpus`,`sandbox_memory_mb`,`sandbox_disk_gb`,`show_closed_by_default`,`agent_framework`," +
 	"`approved_by_default`,`auto_merge_by_default`,`claude_model`,`codex_model`,`default_capabilities`," +
-	"`environment_name`,`prompt_extension`,`gemini_effort`"
+	"`environment_name`,`prompt_extension`,`gemini_effort`,`time_zone`"
 
 func scanConfig(scan func(...any) error) (Config, error) {
 	var c Config
@@ -3386,7 +3414,8 @@ func scanConfig(scan func(...any) error) (Config, error) {
 		&c.GitHubHost, &c.GitHubInsecureHTTP, &c.GCPProject, &c.GCPServiceAccountEmail,
 		&targetRepos, &c.NewestFirst, &c.SandboxCPUs, &c.SandboxMemoryMB, &c.SandboxDiskGB, &c.ShowClosedByDefault,
 		&c.AgentFramework, &c.ApprovedByDefault, &c.AutoMergeByDefault, &c.ClaudeModel, &c.CodexModel,
-		&defaultCapabilities, &c.EnvironmentName, &c.PromptExtension, &c.GeminiEffort); err != nil {
+		&defaultCapabilities, &c.EnvironmentName, &c.PromptExtension, &c.GeminiEffort,
+		&c.TimeZone); err != nil {
 		return Config{}, err
 	}
 	c.PollInterval = time.Duration(pollMS) * time.Millisecond
@@ -3407,12 +3436,13 @@ func scanConfig(scan func(...any) error) (Config, error) {
 func (s *Store) PutConfig(ctx context.Context, c Config) error {
 	return s.write(ctx, "update config", func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx,
-			"REPLACE INTO `grain_config` (`id`, "+configColumns+") VALUES (1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+			"REPLACE INTO `grain_config` (`id`, "+configColumns+") VALUES (1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
 			c.PollInterval.Milliseconds(), c.MaxWorkers, c.MaxMergers, c.GeminiModel, c.MaxAgentTurns,
 			c.GitHubHost, c.GitHubInsecureHTTP, c.GCPProject, c.GCPServiceAccountEmail,
 			joinCSV(c.TargetRepos), c.NewestFirst, c.SandboxCPUs, c.SandboxMemoryMB, c.SandboxDiskGB, c.ShowClosedByDefault,
 			c.AgentFramework, c.ApprovedByDefault, c.AutoMergeByDefault, c.ClaudeModel, c.CodexModel,
-			joinCSV(c.DefaultCapabilities), c.EnvironmentName, c.PromptExtension, c.GeminiEffort)
+			joinCSV(c.DefaultCapabilities), c.EnvironmentName, c.PromptExtension, c.GeminiEffort,
+			TimeZoneOrDefault(c.TimeZone))
 		return err
 	})
 }

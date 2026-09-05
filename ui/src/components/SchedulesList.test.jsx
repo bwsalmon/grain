@@ -3,6 +3,7 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import SchedulesList from "./SchedulesList.jsx";
+import { TimeZoneProvider } from "../TimeZoneContext.jsx";
 import api from "../api.js";
 
 vi.mock("../api.js", () => ({ default: vi.fn() }));
@@ -338,7 +339,7 @@ describe("SchedulesList", () => {
     await user.click(
       await screen.findByRole("option", { name: "Daily, at a time" }),
     );
-    const timeField = screen.getByLabelText(/Time \(UTC\)/);
+    const timeField = screen.getByLabelText(/^Time\b/);
     await user.clear(timeField);
     await user.type(timeField, "07:15");
     await user.click(screen.getByRole("button", { name: "Add schedule" }));
@@ -368,7 +369,7 @@ describe("SchedulesList", () => {
     );
     await user.click(screen.getByLabelText("Day of week"));
     await user.click(await screen.findByRole("option", { name: "Friday" }));
-    const timeField = screen.getByLabelText(/Time \(UTC\)/);
+    const timeField = screen.getByLabelText(/^Time\b/);
     await user.clear(timeField);
     await user.type(timeField, "16:00");
     await user.click(screen.getByRole("button", { name: "Add schedule" }));
@@ -411,6 +412,57 @@ describe("SchedulesList", () => {
       timeOfDay: "09:00",
       dayOfMonth: 31,
     });
+  });
+
+  // grain/task-368: the time typed into a wall-clock schedule is read on
+  // the deployment's own clock, so the field says which clock that is --
+  // it used to say UTC, which was true only because nobody had chosen.
+  it("labels the time field with the deployment's own time zone", async () => {
+    const user = userEvent.setup();
+    render(
+      <TimeZoneProvider zone="America/Los_Angeles">
+        <ControlledSchedulesList
+          schedules={[]}
+          tasks={[]}
+          onRefresh={noop}
+          showError={noop}
+        />
+      </TimeZoneProvider>,
+    );
+
+    await user.click(screen.getByRole("button", { name: "+ New schedule" }));
+    await user.click(screen.getByLabelText("Repeat"));
+    await user.click(
+      await screen.findByRole("option", { name: "Daily, at a time" }),
+    );
+
+    expect(
+      screen.getByLabelText(/Time \(America\/Los_Angeles/),
+    ).toBeInTheDocument();
+  });
+
+  // The row summaries are printed on that same clock: a "next run" read
+  // in the browser's zone and a time typed in the deployment's would be
+  // two different clocks with nothing on screen to say so.
+  it("prints a schedule's next run on the deployment's own clock", () => {
+    render(
+      <TimeZoneProvider zone="UTC">
+        <ControlledSchedulesList
+          schedules={[schedule]}
+          tasks={[]}
+          onRefresh={noop}
+          showError={noop}
+        />
+      </TimeZoneProvider>,
+    );
+
+    // 2026-08-29T00:00:00Z, read in UTC rather than wherever the machine
+    // running this test happens to be.
+    expect(screen.getByText(/Next run/).textContent).toContain(
+      new Date(schedule.nextRunAt).toLocaleString(undefined, {
+        timeZone: "UTC",
+      }),
+    );
   });
 
   // grain/task-241: the read-only repos box is a picker over the repos

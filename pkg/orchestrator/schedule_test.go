@@ -573,3 +573,74 @@ func TestReconcileScheduleFailsToFireWhenItsSuiteIsMissing(t *testing.T) {
 		t.Errorf("nextRunAt = %v, want it left untouched at %v after a failed firing", got.NextRunAt, sched.NextRunAt)
 	}
 }
+
+// grain/task-368: a daily, weekly or monthly schedule's time of day is
+// read against the deployment's own wall clock (model.Config.TimeZone),
+// which RunCycle refreshes out of grain_config every cycle -- so a
+// schedule saying "09:00" on a Pacific deployment comes due at 09:00
+// there, not at 09:00 UTC.
+//
+// baseTime is 2026-08-27 12:00 UTC, which is 05:00 that morning in
+// California, so the next 09:00 is later the same day: 16:00 UTC. Read
+// against UTC, as every wall-clock schedule was before this, the answer
+// would have been 09:00 the following morning instead.
+func TestReconcileScheduleAdvancesOnTheDeploymentsOwnClock(t *testing.T) {
+	store, ctx := openStore(t)
+	// MaxWorkers 0, so the task this firing files stays queued: these
+	// tests are about when the schedule comes due next, and this
+	// package's schedule tests deliberately give RunCycle nothing to
+	// dispatch with (the file's own header comment).
+	cfg := model.DefaultConfig()
+	cfg.MaxWorkers = 0
+	if err := store.PutConfig(ctx, cfg); err != nil {
+		t.Fatal(err)
+	}
+	sched := filedSchedule(t, store, "sched-1", baseTime.Add(-time.Minute))
+	sched.Recurrence = model.Recurrence{Kind: model.RecurrenceDaily, TimeOfDay: 9 * 60}
+	if err := store.PutSchedule(ctx, sched); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := runScheduleOnly(t, store, baseTime); err != nil {
+		t.Fatalf("RunCycle: %v", err)
+	}
+
+	got, err := store.GetSchedule(ctx, sched.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := time.Date(2026, 8, 27, 16, 0, 0, 0, time.UTC)
+	if !got.NextRunAt.Equal(want) {
+		t.Errorf("nextRunAt = %v, want %v (09:00 Pacific)", got.NextRunAt.UTC(), want)
+	}
+}
+
+// The same schedule on a deployment that has chosen UTC keeps the
+// behaviour every wall-clock schedule had before there was a setting at
+// all -- the zone is a choice, and one of the choices is the old one.
+func TestReconcileScheduleHonoursAUTCDeployment(t *testing.T) {
+	store, ctx := openStore(t)
+	cfg := model.DefaultConfig()
+	cfg.MaxWorkers, cfg.TimeZone = 0, "UTC"
+	if err := store.PutConfig(ctx, cfg); err != nil {
+		t.Fatal(err)
+	}
+	sched := filedSchedule(t, store, "sched-1", baseTime.Add(-time.Minute))
+	sched.Recurrence = model.Recurrence{Kind: model.RecurrenceDaily, TimeOfDay: 9 * 60}
+	if err := store.PutSchedule(ctx, sched); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := runScheduleOnly(t, store, baseTime); err != nil {
+		t.Fatalf("RunCycle: %v", err)
+	}
+
+	got, err := store.GetSchedule(ctx, sched.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := time.Date(2026, 8, 28, 9, 0, 0, 0, time.UTC)
+	if !got.NextRunAt.Equal(want) {
+		t.Errorf("nextRunAt = %v, want %v (09:00 UTC)", got.NextRunAt.UTC(), want)
+	}
+}

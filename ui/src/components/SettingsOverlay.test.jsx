@@ -495,6 +495,49 @@ describe("SettingsOverlay", () => {
     });
   });
 
+  // grain/task-368: the deployment's own clock. It is a deployment
+  // setting rather than a per-browser one because the daemon reads it
+  // too -- it decides the hour a wall-clock schedule fires -- so the
+  // selector is here beside the deployment's name.
+  it("sends the chosen time zone", async () => {
+    api
+      .mockResolvedValueOnce({ ...settings, timeZone: "America/Los_Angeles" })
+      .mockResolvedValueOnce({});
+    const user = userEvent.setup();
+    render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
+    await screen.findByDisplayValue("30s");
+
+    const field = screen.getByLabelText(/Time zone/);
+    expect(field).toHaveValue("America/Los_Angeles");
+    await user.selectOptions(field, "Europe/Berlin");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(api).toHaveBeenCalledWith("/api/settings", {
+      method: "PUT",
+      body: JSON.stringify({ timeZone: "Europe/Berlin" }),
+    });
+  });
+
+  // An unchanged zone stays out of the payload, the same as every other
+  // field on this form -- including the case that used to send one by
+  // accident: a native <select> whose value matches no option selects
+  // the first one, so a deployment reporting no zone at all must still
+  // have something for "" to land on.
+  it("leaves the time zone out of the payload when it is not touched", async () => {
+    api.mockResolvedValueOnce(settings).mockResolvedValueOnce({});
+    const user = userEvent.setup();
+    render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
+    await screen.findByDisplayValue("30s");
+
+    expect(screen.getByLabelText(/Time zone/)).toHaveValue("");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(api).toHaveBeenCalledWith("/api/settings", {
+      method: "PUT",
+      body: JSON.stringify({}),
+    });
+  });
+
   // bwsalmon/agents#537: the global "hide closed tasks by default" switch.
   it("toggles showClosedByDefault and includes it in the payload only when changed", async () => {
     api.mockResolvedValueOnce(settings).mockResolvedValueOnce({});

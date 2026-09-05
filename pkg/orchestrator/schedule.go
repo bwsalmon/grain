@@ -30,9 +30,15 @@ func reconcileSchedule(ctx context.Context, deps Deps, now time.Time) error {
 	if err != nil {
 		return fmt.Errorf("orchestrator: listing due schedules: %w", err)
 	}
+	// The deployment's own wall clock, resolved once per cycle and
+	// handed down to every firing: a daily, weekly or monthly cadence is
+	// a time of day on somebody's calendar, and which calendar that is
+	// is a deployment setting (model.Config.TimeZone), refreshed onto
+	// deps.Config by RunCycle every tick.
+	loc := model.LoadLocation(deps.Config.TimeZone)
 	var errs []error
 	for _, sched := range due {
-		if err := fireSchedule(ctx, deps.Store, sched, now); err != nil {
+		if err := fireSchedule(ctx, deps.Store, sched, now, loc); err != nil {
 			errs = append(errs, fmt.Errorf("orchestrator: firing schedule %s: %w", sched.ID, err))
 		}
 	}
@@ -44,11 +50,11 @@ func reconcileSchedule(ctx context.Context, deps Deps, now time.Time) error {
 // paths differ only in what a firing *is* -- both check that the
 // previous firing has finished first, and both advance the schedule's
 // own timing afterwards through advanceSchedule.
-func fireSchedule(ctx context.Context, store *model.Store, sched model.Schedule, now time.Time) error {
+func fireSchedule(ctx context.Context, store *model.Store, sched model.Schedule, now time.Time, loc *time.Location) error {
 	if sched.SuiteID != nil {
-		return fireSuiteSchedule(ctx, store, sched, now)
+		return fireSuiteSchedule(ctx, store, sched, now, loc)
 	}
-	return fireTaskSchedule(ctx, store, sched, now)
+	return fireTaskSchedule(ctx, store, sched, now, loc)
 }
 
 // firingTag is the idempotency marker every task a schedule files
@@ -93,7 +99,7 @@ func firingTag(scheduleID string) string { return "schedule:" + scheduleID }
 // ui.scheduleContentFromTemplate applies the same rule when a schedule
 // is created or repointed, so a schedule's own Target/Base are already
 // the bound ones long before this fires.
-func fireTaskSchedule(ctx context.Context, store *model.Store, sched model.Schedule, now time.Time) error {
+func fireTaskSchedule(ctx context.Context, store *model.Store, sched model.Schedule, now time.Time, loc *time.Location) error {
 	tag := firingTag(sched.ID)
 	open, err := store.HasOpenTaskWithTag(ctx, tag)
 	if err != nil {
@@ -145,7 +151,7 @@ func fireTaskSchedule(ctx context.Context, store *model.Store, sched model.Sched
 		return fmt.Errorf("filing task: %w", err)
 	}
 
-	return advanceSchedule(ctx, store, sched, now, func(s *model.Schedule) {
+	return advanceSchedule(ctx, store, sched, now, loc, func(s *model.Schedule) {
 		// Keeps the schedule's own display cache in sync with the
 		// template it fired from (Schedule.TemplateID's own doc comment)
 		// -- a no-op assignment when TemplateID is nil, since content is
@@ -182,7 +188,7 @@ func fireTaskSchedule(ctx context.Context, store *model.Store, sched model.Sched
 // to prevent this, the same way DeleteTemplate does for a template) fails
 // this one firing with a plain error, retried next cycle --
 // fireTaskSchedule's own missing-template path, unchanged in shape.
-func fireSuiteSchedule(ctx context.Context, store *model.Store, sched model.Schedule, now time.Time) error {
+func fireSuiteSchedule(ctx context.Context, store *model.Store, sched model.Schedule, now time.Time, loc *time.Location) error {
 	active, err := store.HasActiveRunForSchedule(ctx, sched.ID)
 	if err != nil {
 		return fmt.Errorf("checking for a previous unfinished firing: %w", err)
@@ -202,7 +208,7 @@ func fireSuiteSchedule(ctx context.Context, store *model.Store, sched model.Sche
 		return fmt.Errorf("starting a run of suite %s: %w", suite.ID, err)
 	}
 
-	return advanceSchedule(ctx, store, sched, now, func(s *model.Schedule) {
+	return advanceSchedule(ctx, store, sched, now, loc, func(s *model.Schedule) {
 		// The suite's own name, as this schedule's display cache -- the
 		// same one-firing-behind sync a template-backed schedule keeps
 		// (Schedule.SuiteID's own doc comment), so ui.scheduleFrom can
@@ -221,10 +227,10 @@ func fireSuiteSchedule(ctx context.Context, store *model.Store, sched model.Sche
 // missed occurrences exactly one firing on resume, resynced to its normal
 // cadence, rather than one firing per missed occurrence or drift against
 // wall-clock time (Recurrence.Next's own doc comment).
-func advanceSchedule(ctx context.Context, store *model.Store, sched model.Schedule, now time.Time, sync func(*model.Schedule)) error {
+func advanceSchedule(ctx context.Context, store *model.Store, sched model.Schedule, now time.Time, loc *time.Location, sync func(*model.Schedule)) error {
 	next := sched.NextRunAt
 	for !next.After(now) {
-		next = sched.Recurrence.Next(next)
+		next = sched.Recurrence.Next(next, loc)
 	}
 	if err := store.UpdateSchedule(ctx, sched.ID, func(s *model.Schedule) error {
 		s.LastRunAt = &now

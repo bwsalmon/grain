@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import api from "./api.js";
 import { buildPath, parsePath } from "./paths.js";
 import { NO_NARROWING } from "./taskFilters.js";
+import { TimeZoneProvider } from "./TimeZoneContext.jsx";
 import Sidebar from "./components/Sidebar.jsx";
 import TaskList from "./components/TaskList.jsx";
 import TaskBoard from "./components/TaskBoard.jsx";
@@ -686,177 +687,183 @@ export default function App() {
     </>
   );
 
+  // Every timestamp under here is printed in the deployment's own zone
+  // rather than the browser's (grain/task-368) -- config is loaded
+  // before the first paint, so nothing renders in one zone and corrects
+  // itself into another.
   return (
-    <div className="app-shell">
-      {config === null ? (
-        <LoadingScreen />
-      ) : (
-        <>
-          <Sidebar
-            config={config}
-            view={view}
-            onSetView={setViewAndCloseOpen}
-            tasks={tasks}
-            schedules={schedules}
-            templates={templates}
-            suites={suites}
-            stateFilter={stateFilter}
-            onSetFilter={setStateFilter}
-            showSettings={showSettings}
-            showDebug={showDebug}
-            showMetrics={showMetrics}
-            onOpenSettings={() => setShowSettings(true)}
-            onOpenDebug={() => setShowDebug(true)}
-            onOpenMetrics={() => setShowMetrics(true)}
-            onOpenNewTask={() => {
-              setNewTaskRepo(null);
-              setShowNewTask(true);
-            }}
-          />
-          {view === "repos" && openRepo !== null && releasesOpen ? (
-            <RepoReleases
-              repo={openRepo}
-              templates={templates}
-              onBack={() => setReleasesOpen(false)}
-              showError={showError}
-            />
-          ) : view === "repos" && openRepo !== null ? (
-            <RepoPage
-              repo={openRepo}
-              tasks={tasks}
+    <TimeZoneProvider zone={config?.timeZone}>
+      <div className="app-shell">
+        {config === null ? (
+          <LoadingScreen />
+        ) : (
+          <>
+            <Sidebar
               config={config}
-              onBack={closeRepoPage}
-              onNewTask={openNewTaskForRepo}
-              onOpenReleases={() => setReleasesOpen(true)}
-              onRefreshConfig={refreshConfig}
-              showError={showError}
-            >
-              {/* Both views over the same scoped tasks, and the page
-                  picks -- see RepoPage's own doc comment for why the
-                  choice lives there and the panes here. */}
-              {(repoView) =>
-                repoView === "board"
-                  ? taskBoardPane(tasks.filter((t) => t.repo === openRepo))
-                  : taskListPane(
-                      tasks.filter((t) => t.repo === openRepo),
-                      "all",
-                    )
-              }
-            </RepoPage>
-          ) : view === "repos" ? (
-            <RepoList
+              view={view}
+              onSetView={setViewAndCloseOpen}
               tasks={tasks}
-              config={config}
-              onOpenRepo={openRepoPage}
-              onRefreshConfig={refreshConfig}
-              showError={showError}
-            />
-          ) : view === "schedules" ? (
-            <SchedulesList
               schedules={schedules}
               templates={templates}
               suites={suites}
-              config={config}
-              tasks={tasks}
-              openScheduleId={openScheduleId}
-              onOpenSchedule={setOpenScheduleId}
-              onRefresh={refreshSchedules}
-              showError={showError}
+              stateFilter={stateFilter}
+              onSetFilter={setStateFilter}
+              showSettings={showSettings}
+              showDebug={showDebug}
+              showMetrics={showMetrics}
+              onOpenSettings={() => setShowSettings(true)}
+              onOpenDebug={() => setShowDebug(true)}
+              onOpenMetrics={() => setShowMetrics(true)}
+              onOpenNewTask={() => {
+                setNewTaskRepo(null);
+                setShowNewTask(true);
+              }}
             />
-          ) : view === "templates" ? (
-            <TemplatesList
-              templates={templates}
-              config={config}
-              tasks={tasks}
-              openTemplateId={openTemplateId}
-              onOpenTemplate={setOpenTemplateId}
-              onRefresh={refreshTemplates}
-              showError={showError}
-            />
-          ) : view === "suites" ? (
-            <SuitesList
-              suites={suites}
-              suiteRuns={suiteRuns}
-              templates={templates}
-              config={config}
-              tasks={tasks}
-              openSuiteId={openSuiteId}
-              onOpenSuite={setOpenSuiteId}
-              onRefresh={refreshSuites}
-              onRefreshRuns={refreshSuiteRuns}
-              onRefreshTemplates={refreshTemplates}
-              showError={showError}
-            />
-          ) : view === "board" ? (
-            /* Every task, rather than the sidebar's current state
+            {view === "repos" && openRepo !== null && releasesOpen ? (
+              <RepoReleases
+                repo={openRepo}
+                templates={templates}
+                onBack={() => setReleasesOpen(false)}
+                showError={showError}
+              />
+            ) : view === "repos" && openRepo !== null ? (
+              <RepoPage
+                repo={openRepo}
+                tasks={tasks}
+                config={config}
+                onBack={closeRepoPage}
+                onNewTask={openNewTaskForRepo}
+                onOpenReleases={() => setReleasesOpen(true)}
+                onRefreshConfig={refreshConfig}
+                showError={showError}
+              >
+                {/* Both views over the same scoped tasks, and the page
+                  picks -- see RepoPage's own doc comment for why the
+                  choice lives there and the panes here. */}
+                {(repoView) =>
+                  repoView === "board"
+                    ? taskBoardPane(tasks.filter((t) => t.repo === openRepo))
+                    : taskListPane(
+                        tasks.filter((t) => t.repo === openRepo),
+                        "all",
+                      )
+                }
+              </RepoPage>
+            ) : view === "repos" ? (
+              <RepoList
+                tasks={tasks}
+                config={config}
+                onOpenRepo={openRepoPage}
+                onRefreshConfig={refreshConfig}
+                showError={showError}
+              />
+            ) : view === "schedules" ? (
+              <SchedulesList
+                schedules={schedules}
+                templates={templates}
+                suites={suites}
+                config={config}
+                tasks={tasks}
+                openScheduleId={openScheduleId}
+                onOpenSchedule={setOpenScheduleId}
+                onRefresh={refreshSchedules}
+                showError={showError}
+              />
+            ) : view === "templates" ? (
+              <TemplatesList
+                templates={templates}
+                config={config}
+                tasks={tasks}
+                openTemplateId={openTemplateId}
+                onOpenTemplate={setOpenTemplateId}
+                onRefresh={refreshTemplates}
+                showError={showError}
+              />
+            ) : view === "suites" ? (
+              <SuitesList
+                suites={suites}
+                suiteRuns={suiteRuns}
+                templates={templates}
+                config={config}
+                tasks={tasks}
+                openSuiteId={openSuiteId}
+                onOpenSuite={setOpenSuiteId}
+                onRefresh={refreshSuites}
+                onRefreshRuns={refreshSuiteRuns}
+                onRefreshTemplates={refreshTemplates}
+                showError={showError}
+              />
+            ) : view === "board" ? (
+              /* Every task, rather than the sidebar's current state
                filter: see taskBoardPane above. */
-            <div className="main-column">{taskBoardPane(tasks)}</div>
-          ) : (
-            <div className="main-column">
-              {taskListPane(tasks, stateFilter)}
-            </div>
-          )}
-        </>
-      )}
-      {/* One banner at a time: both are pinned to the same strip at the
+              <div className="main-column">{taskBoardPane(tasks)}</div>
+            ) : (
+              <div className="main-column">
+                {taskListPane(tasks, stateFilter)}
+              </div>
+            )}
+          </>
+        )}
+        {/* One banner at a time: both are pinned to the same strip at the
           top of the page, and a dead reconcile loop is the larger fact
           -- a deployment that is not dispatching at all has no use for
           being told why it is also not dispatching. */}
-      {config?.reconcilerDown ? (
-        <ReconcilerDownBanner />
-      ) : config?.agentPause?.paused ? (
-        <AgentPauseBanner
-          pause={config.agentPause}
-          onLifted={refreshConfig}
-          showError={showError}
-        />
-      ) : null}
-      {error !== null && <ErrorBanner message={error} />}
-      {openTaskId !== null && detail !== null && (
-        <DetailOverlay
-          task={detail}
-          tasks={tasks}
-          config={config}
-          templates={templates}
-          onClose={closeDetail}
-          onOpenTask={openTask}
-          act={act}
-          showError={showError}
-        />
-      )}
-      {showNewTask && (
-        <NewTaskOverlay
-          tasks={tasks}
-          config={config}
-          templates={templates}
-          defaultRepo={newTaskRepo !== null ? newTaskRepo : openRepo}
-          onClose={() => setShowNewTask(false)}
-          onCreated={refreshAfterCreate}
-          onOpenTask={openTask}
-          showError={showError}
-        />
-      )}
-      {showSettings && (
-        <SettingsOverlay
-          onClose={() => setShowSettings(false)}
-          onSaved={refreshConfig}
-          showError={showError}
-        />
-      )}
-      {showDebug && (
-        <DebugOverlay
-          config={config}
-          onClose={() => setShowDebug(false)}
-          showError={showError}
-        />
-      )}
-      {showMetrics && (
-        <MetricsOverlay
-          onClose={() => setShowMetrics(false)}
-          onOpenTask={openTaskFromMetrics}
-          showError={showError}
-        />
-      )}
-    </div>
+        {config?.reconcilerDown ? (
+          <ReconcilerDownBanner />
+        ) : config?.agentPause?.paused ? (
+          <AgentPauseBanner
+            pause={config.agentPause}
+            onLifted={refreshConfig}
+            showError={showError}
+          />
+        ) : null}
+        {error !== null && <ErrorBanner message={error} />}
+        {openTaskId !== null && detail !== null && (
+          <DetailOverlay
+            task={detail}
+            tasks={tasks}
+            config={config}
+            templates={templates}
+            onClose={closeDetail}
+            onOpenTask={openTask}
+            act={act}
+            showError={showError}
+          />
+        )}
+        {showNewTask && (
+          <NewTaskOverlay
+            tasks={tasks}
+            config={config}
+            templates={templates}
+            defaultRepo={newTaskRepo !== null ? newTaskRepo : openRepo}
+            onClose={() => setShowNewTask(false)}
+            onCreated={refreshAfterCreate}
+            onOpenTask={openTask}
+            showError={showError}
+          />
+        )}
+        {showSettings && (
+          <SettingsOverlay
+            onClose={() => setShowSettings(false)}
+            onSaved={refreshConfig}
+            showError={showError}
+          />
+        )}
+        {showDebug && (
+          <DebugOverlay
+            config={config}
+            onClose={() => setShowDebug(false)}
+            showError={showError}
+          />
+        )}
+        {showMetrics && (
+          <MetricsOverlay
+            onClose={() => setShowMetrics(false)}
+            onOpenTask={openTaskFromMetrics}
+            showError={showError}
+          />
+        )}
+      </div>
+    </TimeZoneProvider>
   );
 }

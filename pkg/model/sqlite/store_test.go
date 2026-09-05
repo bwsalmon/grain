@@ -1915,6 +1915,11 @@ func testConfig() model.Config {
 		SandboxDiskGB:       40,
 		DefaultCapabilities: []string{"gcp-key", "github-sandbox"},
 		EnvironmentName:     "staging",
+		// Named explicitly for the same reason AgentFramework above is:
+		// PutConfig normalizes it on the way in
+		// (model.TimeZoneOrDefault), so a Config leaving it empty reads
+		// back as model.DefaultTimeZone rather than as what was written.
+		TimeZone: "Europe/Berlin",
 		// Multi-line on purpose: the deployment's standing instructions
 		// are the one Config field that is prose (grain/task-114), and a
 		// column that stored only its first line would still round-trip a
@@ -3363,6 +3368,72 @@ func TestInitMigratesAnExistingDatabaseMissingEnvironmentName(t *testing.T) {
 	}
 	if got.EnvironmentName != want.EnvironmentName {
 		t.Fatalf("EnvironmentName = %q, want %q", got.EnvironmentName, want.EnvironmentName)
+	}
+}
+
+// TestInitMigratesAnExistingDatabaseMissingTimeZone is that same pattern
+// once more, applied to grain_config.time_zone (grain/task-368) -- with
+// the one difference worth a test of its own: this column's backfill is
+// not the empty string. A deployment upgrading across it adopts
+// model.DefaultTimeZone, because the clock it was keeping until then was
+// the container's accidental UTC rather than a zone anybody chose, and a
+// wall-clock schedule on it was firing at an hour nobody asked for.
+func TestInitMigratesAnExistingDatabaseMissingTimeZone(t *testing.T) {
+	db, err := sqlite.Open(sqlite.DefaultConfig(t.TempDir()))
+	if err != nil {
+		t.Fatalf("opening embedded sqlite: %v", err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+
+	if _, err := db.ExecContext(ctx, `CREATE TABLE `+"`grain_config`"+` (
+  `+"`id`"+`                         INTEGER NOT NULL,
+  `+"`poll_interval_ms`"+`           INTEGER NOT NULL,
+  `+"`max_concurrent`"+`             INTEGER NOT NULL,
+  `+"`gemini_model`"+`                TEXT    NOT NULL,
+  `+"`max_agent_turns`"+`             INTEGER NOT NULL,
+  `+"`github_host`"+`                 TEXT    NOT NULL,
+  `+"`github_insecure_http`"+`        INTEGER NOT NULL,
+  `+"`gcp_project`"+`                 TEXT    NOT NULL,
+  `+"`gcp_service_account_email`"+`   TEXT    NOT NULL,
+  `+"`target_repos`"+`                TEXT    NOT NULL,
+  `+"`newest_first`"+`                INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (`+"`id`"+`)
+)`); err != nil {
+		t.Fatalf("creating the pre-task-368 grain_config table: %v", err)
+	}
+	if _, err := db.ExecContext(ctx,
+		"INSERT INTO `grain_config` (`id`,`poll_interval_ms`,`max_concurrent`,`gemini_model`,`max_agent_turns`,"+
+			"`github_host`,`github_insecure_http`,`gcp_project`,`gcp_service_account_email`,`target_repos`,`newest_first`) "+
+			"VALUES (1,30000,2,'gemini-2.5-pro',40,'github.com',0,'grain-prod','agent@grain-prod.iam.gserviceaccount.com','',0)"); err != nil {
+		t.Fatalf("seeding a pre-task-368 config row: %v", err)
+	}
+
+	store := model.New(db)
+	if err := store.Init(ctx); err != nil {
+		t.Fatalf("Init against an existing database missing grain_config.time_zone: %v", err)
+	}
+
+	got, err := store.GetConfig(ctx)
+	if err != nil || got == nil {
+		t.Fatalf("get: (%+v, %v)", got, err)
+	}
+	if got.TimeZone != model.DefaultTimeZone {
+		t.Fatalf("TimeZone after migrating = %q, want %q", got.TimeZone, model.DefaultTimeZone)
+	}
+
+	// And writable afterwards: an operator who does want UTC (or Berlin)
+	// can say so, which is the half of this nobody had before.
+	want := testConfig()
+	if err := store.PutConfig(ctx, want); err != nil {
+		t.Fatalf("put after migrating: %v", err)
+	}
+	got, err = store.GetConfig(ctx)
+	if err != nil || got == nil {
+		t.Fatalf("get: (%+v, %v)", got, err)
+	}
+	if got.TimeZone != want.TimeZone {
+		t.Fatalf("TimeZone = %q, want %q", got.TimeZone, want.TimeZone)
 	}
 }
 

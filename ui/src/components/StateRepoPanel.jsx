@@ -9,6 +9,8 @@ import {
   Typography,
 } from "@mui/material";
 import api from "../api.js";
+import { useTimeZone } from "../TimeZoneContext.jsx";
+import { formatDateTime } from "../time.js";
 
 // Where this installation's state lives.
 //
@@ -35,6 +37,7 @@ import api from "../api.js";
 // The last two are one form, because adopting cannot tell them apart up
 // front and does not need to: empty is seeded, populated is imported.
 export default function StateRepoPanel({ showError }) {
+  const zone = useTimeZone();
   const [status, setStatus] = useState(null);
   const [remote, setRemote] = useState("");
   const [branch, setBranch] = useState("main");
@@ -170,10 +173,7 @@ export default function StateRepoPanel({ showError }) {
           one of them, and this deployment&apos;s credential may not push files
           under <code>.github/workflows</code>, so the file was never committed
           {status.workflowRefusedAt && (
-            <>
-              {" "}
-              (last tried {new Date(status.workflowRefusedAt).toLocaleString()})
-            </>
+            <> (last tried {formatDateTime(status.workflowRefusedAt, zone)})</>
           )}
           . grain keeps syncing and tries again daily. To install it yourself,
           run <code>grain state ci</code> in a clone and commit{" "}

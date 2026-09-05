@@ -230,6 +230,19 @@ type Config struct {
 	// Settings reaches the next run dispatched rather than the next
 	// restart.
 	PromptExtension string
+	// TimeZone is the IANA zone this deployment keeps its wall clock in
+	// -- model.Config.TimeZone, and timezone.go for what an empty one
+	// means. The one thing this package reads it for is when a wall-clock
+	// schedule comes due (reconcileSchedule, over Recurrence.Next): a
+	// daily, weekly or monthly cadence names a time on somebody's
+	// calendar, and before this it named a time on the container's
+	// accidental UTC one.
+	//
+	// Refreshed from grain_config every cycle, like MaxAgentTurns and
+	// PromptExtension above, so moving a deployment's zone retimes the
+	// next occurrence of every schedule rather than waiting for a
+	// restart.
+	TimeZone string
 	// GitRemoteBase is the base URL of this deployment's git proxy
 	// (cmd/grain/daemon.go's startGitProxy), which RunDispatch turns into
 	// a task's own clone URL to prepare its sandbox's checkout with --

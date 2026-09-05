@@ -144,6 +144,14 @@ type Settings struct {
 	// to arrive as present-and-empty rather than as an absent key leaving
 	// the old one on screen.
 	EnvironmentName string `json:"environmentName"`
+	// TimeZone is model.Config's own field of the same name: the IANA
+	// zone this deployment keeps its wall clock in. Never reported empty
+	// -- a row that stores nothing reads back as model.DefaultTimeZone
+	// (model.TimeZoneOrDefault) -- so a pane can show the clock actually
+	// in effect rather than a blank field meaning "some default
+	// somewhere". Also mirrored onto GET /api/config, which is where the
+	// frontend reads it for formatting every timestamp it prints.
+	TimeZone string `json:"timeZone"`
 	// PromptExtension is model.Config's own field of the same name
 	// (grain/task-114): the standing instructions every run dispatched
 	// here is given on top of the prompt grain builds for it. Empty adds
@@ -392,6 +400,7 @@ func (c *Client) settingsFrom(cfg model.Config, repoConfigs []model.RepoConfig) 
 		SandboxDiskGBDefault:          kontur.DefaultDiskGB,
 		ShowClosedByDefault:           cfg.ShowClosedByDefault,
 		EnvironmentName:               cfg.EnvironmentName,
+		TimeZone:                      model.TimeZoneOrDefault(cfg.TimeZone),
 		PromptExtension:               cfg.PromptExtension,
 		Capabilities:                  c.capabilityStatuses(cfg, repoConfigs),
 		DefaultCapabilities:           cfg.DefaultCapabilities,
@@ -470,6 +479,10 @@ func (c *Client) GetSettings(ctx context.Context) (Settings, error) {
 			OpenAIAPIKeySet:        openaiKeySet,
 			ApprovedByDefault:      def.ApprovedByDefault,
 			AutoMergeByDefault:     def.AutoMergeByDefault,
+			// Same reading as the two above: what a pane showing an
+			// unconfigured deployment should say the clock is, is the
+			// clock a firing would actually be timed against.
+			TimeZone: def.TimeZone,
 			// Reported before anything has been saved for the same
 			// reason it is reported at all: the annotation belongs on
 			// the field from the first time it is looked at. Nothing can
@@ -517,9 +530,17 @@ type UpdateSettingsRequest struct {
 	SandboxDiskGB          *int      `json:"sandboxDiskGb"`
 	ShowClosedByDefault    *bool     `json:"showClosedByDefault"`
 	EnvironmentName        *string   `json:"environmentName"`
-	ApprovedByDefault      *bool     `json:"approvedByDefault"`
-	AutoMergeByDefault     *bool     `json:"autoMergeByDefault"`
-	AgentFramework         *string   `json:"agentFramework"`
+	// TimeZone is an IANA zone name ("America/Los_Angeles"), validated
+	// against the zone database this build carries (model.ValidTimeZone)
+	// rather than merely stored: a name nothing resolves would leave the
+	// deployment quietly running on some fallback clock while the pane
+	// showed the typo. Empty is accepted and means model.DefaultTimeZone
+	// -- "put it back to the default" is a thing a cleared field should
+	// be able to say, unlike geminiModel's own empty.
+	TimeZone           *string `json:"timeZone"`
+	ApprovedByDefault  *bool   `json:"approvedByDefault"`
+	AutoMergeByDefault *bool   `json:"autoMergeByDefault"`
+	AgentFramework     *string `json:"agentFramework"`
 	// PromptExtension replaces this deployment's standing instructions
 	// wholesale -- there is one block of text, so a present value is
 	// exactly what every run will be told from now on, and an empty one
@@ -725,6 +746,16 @@ func (c *Client) UpdateSettings(ctx context.Context, req UpdateSettingsRequest) 
 			return Settings{}, validationErrorf("environmentName cannot contain line breaks or tabs")
 		}
 		cfg.EnvironmentName = name
+	}
+	if req.TimeZone != nil {
+		// Trimmed for the same reason environmentName above is: a name
+		// pasted with a stray space is the zone whoever pasted it meant,
+		// and " " is a cleared field rather than a zone.
+		zone := strings.TrimSpace(*req.TimeZone)
+		if !model.ValidTimeZone(zone) {
+			return Settings{}, validationErrorf("timeZone must be an IANA time zone name, e.g. %s", model.DefaultTimeZone)
+		}
+		cfg.TimeZone = model.TimeZoneOrDefault(zone)
 	}
 	if req.PromptExtension != nil {
 		// Trimmed and nothing else: this is prose handed to an agent,

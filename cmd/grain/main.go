@@ -798,6 +798,14 @@ func cmdSettings(ctx context.Context, c *ui.HTTPClient, out *printer, args []str
 	// Empty clears it, the same as every other whole-value flag here.
 	promptExtension := fs.String("prompt-extension", "",
 		"standing instructions appended to every run's prompt on this deployment -- empty adds nothing")
+	// Settable from a shell for the same provisioning reason as the two
+	// above: which clock a deployment keeps is part of standing it up,
+	// and it decides when every wall-clock schedule on it fires. Empty
+	// puts it back to model.DefaultTimeZone rather than clearing it to
+	// nothing, since there is no such thing as a deployment with no
+	// clock.
+	timeZone := fs.String("time-zone", "",
+		"IANA time zone this deployment keeps its clock in, e.g. America/Los_Angeles -- empty restores the default")
 	// Not a setting: the one flag here that changes nothing and asks a
 	// question instead. It belongs on this command anyway, because the
 	// answer it gives is about the same capability listing this command
@@ -869,6 +877,9 @@ func cmdSettings(ctx context.Context, c *ui.HTTPClient, out *printer, args []str
 		case "prompt-extension":
 			v := *promptExtension
 			req.PromptExtension = &v
+		case "time-zone":
+			v := *timeZone
+			req.TimeZone = &v
 		case "target-repos":
 			v := splitRepoList(*targetRepos)
 			req.TargetRepos = &v
@@ -1012,6 +1023,11 @@ func (p *printer) settings(s ui.Settings) {
 	} else {
 		fmt.Println("environment:    unnamed")
 	}
+	// Under the deployment's name and above everything operational: it
+	// is the clock every other time on screen -- a schedule's next run,
+	// a run's start -- is read against, so it belongs where it is read
+	// before them rather than after.
+	fmt.Printf("time zone:      %s\n", s.TimeZone)
 	fmt.Printf("poll interval:  %s\n", s.PollInterval)
 	fmt.Printf("max workers:    %d\n", s.MaxWorkers)
 	fmt.Printf("max mergers:    %d\n", s.MaxMergers)

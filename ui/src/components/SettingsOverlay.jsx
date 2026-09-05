@@ -30,6 +30,7 @@ import Overlay from "./Overlay.jsx";
 import SecretsPanel from "./SecretsPanel.jsx";
 import UpgradePanel from "./UpgradePanel.jsx";
 import { useThemeMode } from "../ThemeModeContext.jsx";
+import { browserTimeZone, formatDateTime, timeZoneOptions } from "../time.js";
 import { capabilityRows } from "../state.js";
 
 // bwsalmon/agents#456: Secrets and Upgrade used to be their own top-level
@@ -110,6 +111,10 @@ export default function SettingsOverlay({ onClose, onSaved, showError }) {
   // carries the field back, so saving another tab does not strand it.
   const [defaultCapabilities, setDefaultCapabilities] = useState([]);
   const { mode: themeMode, setMode: setThemeMode } = useThemeMode();
+  // Read once rather than per option: the time zone selector below is
+  // several hundred of them, and this asks Intl the same question every
+  // time.
+  const browserZone = browserTimeZone();
 
   useEffect(() => {
     (async () => {
@@ -216,6 +221,13 @@ export default function SettingsOverlay({ onClose, onSaved, showError }) {
     const environmentName = form.elements.environmentName.value.trim();
     if (environmentName !== (settings.environmentName || ""))
       payload.environmentName = environmentName;
+
+    // Sent whenever it differs from what is stored, empty included:
+    // clearing the selector back to "" is how an operator asks for
+    // grain's own default zone again (model.TimeZoneOrDefault), the
+    // same shape environmentName's own empty has.
+    const timeZone = form.elements.timeZone.value.trim();
+    if (timeZone !== (settings.timeZone || "")) payload.timeZone = timeZone;
 
     const pollInterval = form.elements.pollInterval.value.trim();
     if (pollInterval !== (settings.pollInterval || ""))
@@ -519,6 +531,43 @@ export default function SettingsOverlay({ onClose, onSaved, showError }) {
                 fullWidth
                 margin="normal"
               />
+              {/* The deployment's own clock (grain/task-368). It is a
+                  deployment setting rather than a per-browser one
+                  because it is not only a display choice: the hour a
+                  daily, weekly or monthly schedule fires is read on this
+                  clock by the daemon (model.Recurrence.Next), so a zone
+                  each reader picked for themselves would put the times
+                  on screen and the times things actually happen back out
+                  of step -- which is the confusion this replaces.
+
+                  A native select rather than MUI's own menu: this is
+                  several hundred zones, and a browser's own list gives
+                  type-to-find and does not build a menu that long in the
+                  DOM. */}
+              <TextField
+                select
+                SelectProps={{ native: true }}
+                name="timeZone"
+                label="Time zone"
+                helperText={timeZoneHelp(settings.timeZone)}
+                defaultValue={settings.timeZone || ""}
+                fullWidth
+                margin="normal"
+              >
+                {/* An explicit empty option, first: a native <select>
+                    with no option matching its value silently selects
+                    the first one, so a deployment whose settings predate
+                    this field would otherwise open on a zone nobody
+                    chose and offer to save it. It is also the way to ask
+                    for grain's own default back. */}
+                <option value="">grain&apos;s default</option>
+                {timeZoneOptions(settings.timeZone).map((zone) => (
+                  <option key={zone} value={zone}>
+                    {zone}
+                    {zone === browserZone ? " (this browser)" : ""}
+                  </option>
+                ))}
+              </TextField>
               <TextField
                 name="pollInterval"
                 label="Poll interval"
@@ -971,5 +1020,17 @@ export default function SettingsOverlay({ onClose, onSaved, showError }) {
         {tab === "upgrade" && <UpgradePanel showError={showError} />}
       </div>
     </Overlay>
+  );
+}
+
+// timeZoneHelp is the Time zone field's own helper line: what the
+// setting decides, and -- so the choice can be checked rather than
+// merely trusted -- what time it currently is on the clock it names.
+function timeZoneHelp(zone) {
+  const now = formatDateTime(new Date(), zone);
+  const reads = now ? ` It reads ${now} there right now.` : "";
+  return (
+    "Every time grain shows, and the hour a daily, weekly or monthly schedule fires, is read on this clock." +
+    reads
   );
 }

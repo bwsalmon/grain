@@ -455,6 +455,48 @@ describe("App", () => {
     await waitFor(() => expect(document.title).toBe("staging — grain"));
   });
 
+  // grain/task-368: every absolute time under App is printed on the
+  // deployment's own clock, which /api/config carries -- not on the
+  // browser's, which is a different clock from the one the daemon fires
+  // schedules against.
+  it("prints times on the deployment's own clock, not the browser's", async () => {
+    const schedule = {
+      id: "sched-1",
+      title: "Nightly dependency bump",
+      description: "",
+      repo: "acme/widgets",
+      base: "",
+      autoMerge: false,
+      recurrence: { kind: "daily", timeOfDay: "09:00" },
+      enabled: true,
+      nextRunAt: "2026-08-29T16:00:00Z",
+    };
+    setupApi(initialTasks, [schedule]);
+    const realImpl = api.getMockImplementation();
+    api.mockImplementation((path, opts) =>
+      path === "/api/config"
+        ? Promise.resolve({ ...config, timeZone: "America/Los_Angeles" })
+        : realImpl(path, opts),
+    );
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByText("Fix bug");
+
+    await user.click(screen.getByRole("button", { name: /^Schedules/ }));
+    await screen.findByText("Nightly dependency bump");
+
+    const expected = new Date(schedule.nextRunAt).toLocaleString(undefined, {
+      timeZone: "America/Los_Angeles",
+    });
+    expect(screen.getByText(/Next run/).textContent).toContain(expected);
+    // And the schedule form labels its time field with that same zone,
+    // since what is typed there is read on it.
+    await user.click(screen.getByText("Nightly dependency bump"));
+    expect(
+      await screen.findByLabelText(/Time \(America\/Los_Angeles/),
+    ).toBeInTheDocument();
+  });
+
   it("leaves the tab titled just grain on an unnamed deployment", async () => {
     setupApi();
     render(<App />);
