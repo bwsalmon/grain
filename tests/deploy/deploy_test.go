@@ -1173,6 +1173,66 @@ func TestNoDeployScriptShellsOutToAnInterpreter(t *testing.T) {
 // that wrong is silent in a way worth guarding: no error anywhere, just a
 // deployment that came up on HostSandboxes with kontur configured, because
 // the string never matched and GRAIN_KONTUR_ENABLE was always 0.
+// grain/task-15: host mode -- every dispatched agent on the daemon's own
+// machine, with no isolation from it -- used to be what an install did
+// when nobody said otherwise, both as the default and as the fallback
+// every unmet kontur prerequisite took. These pin the three files that
+// have to agree on it now: the installer refuses that shape unless
+// something asked for it by name, and both callers that want it ask.
+
+func TestTheInstallerRefusesHostModeNobodyAskedFor(t *testing.T) {
+	code := setupCode(t)
+
+	// The default is a sandboxed deployment. An installer whose kontur
+	// toggle went back to defaulting off would satisfy every other
+	// assertion here and reinstate exactly what this closed.
+	absent(t, code, `GRAIN_KONTUR_ENABLE:-0}`)
+	contains(t, code, `GRAIN_HOST_SANDBOXES="${GRAIN_HOST_SANDBOXES:-0}"`)
+
+	// The guard itself, and the fact that it stops the run: this is what
+	// makes "kontur off" mean "host mode, deliberately" rather than
+	// "host mode, by omission".
+	guard := from(t, code, `if [ "$GRAIN_KONTUR_ENABLE" != "1" ] && [ "$GRAIN_HOST_SANDBOXES" != "1" ]; then`)
+	contains(t, upTo(t, guard, "\nfi\n"), "exit 2")
+
+	// And no step may quietly undo it. Every kontur prerequisite that
+	// turns out not to be ready goes through kontur_unavailable, which
+	// falls back only where host mode was asked for; a bare assignment
+	// anywhere else is the old silent fallback growing back.
+	for _, line := range strings.Split(code, "\n") {
+		if strings.Contains(line, "GRAIN_KONTUR_ENABLE=0") && !strings.Contains(line, `GRAIN_HOST_SANDBOXES" = "1"`) {
+			body := from(t, code, "kontur_unavailable() {")
+			if !strings.Contains(upTo(t, body, "\n}\n"), line) {
+				t.Errorf("GRAIN_KONTUR_ENABLE=0 outside kontur_unavailable: %s", strings.TrimSpace(line))
+			}
+		}
+	}
+}
+
+// terraform/gcp has no new variable for this: enable_kontur_sandboxes =
+// false is the asking, and deploy.sh is what turns it into the asking
+// setup.sh recognizes. Without this line that deployment shape stops
+// being installable at all.
+func TestTheGCPDeployAsksForHostModeWhenItTurnsKonturOff(t *testing.T) {
+	code := stripComments(read(t, "terraform", "gcp", "files", "deploy.sh"))
+
+	contains(t, code, `GRAIN_KONTUR_ENABLE="$([ "$ENABLE_KONTUR_SANDBOXES" = "true" ] && echo 1 || echo 0)"`)
+	contains(t, code, `GRAIN_HOST_SANDBOXES="$([ "$ENABLE_KONTUR_SANDBOXES" = "true" ] && echo 0 || echo 1)"`)
+}
+
+// The other caller: the installer suite deploys without kontur, because
+// nested virtualisation and a multi-minute guest build are not where its
+// failures live. That is a real ask for host mode and has to say so --
+// and it is a suite that only runs where there is a built image, so a
+// missing variable would be found in build-artifacts.yml rather than
+// here.
+func TestTheInstallerSuiteAsksForTheHostModeItDeploys(t *testing.T) {
+	code := read(t, "tests", "installer", "installer_test.go")
+
+	contains(t, code, `{"GRAIN_KONTUR_ENABLE", "0"}`)
+	contains(t, code, `{"GRAIN_HOST_SANDBOXES", "1"}`)
+}
+
 func TestTheKonturToggleComparesAgainstTheSpellingCfgEmits(t *testing.T) {
 	code := stripComments(read(t, "terraform", "gcp", "files", "deploy.sh"))
 	contains(t, code, `[ "$ENABLE_KONTUR_SANDBOXES" = "true" ]`)

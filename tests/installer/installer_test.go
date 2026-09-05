@@ -176,8 +176,14 @@ func install() (*deployment, error) {
 		{"GRAIN_IMAGE_TAG", tag},
 		{"GRAIN_UI_ADDR", fmt.Sprintf("127.0.0.1:%d", d.port)},
 		// Off: the only part of a deploy needing nested virtualisation and
-		// a debootstrap, and not where this file's failures live.
+		// a debootstrap, and not where this file's failures live. Turning
+		// it off means asking for host mode by name -- setup.sh refuses to
+		// install an unisolated deployment that nobody asked for
+		// (grain/task-15) -- which is exactly what this suite wants: a
+		// throwaway runner, dispatching nothing, checking the path every
+		// deployment takes.
 		{"GRAIN_KONTUR_ENABLE", "0"},
+		{"GRAIN_HOST_SANDBOXES", "1"},
 		// On: it is the default, and it is what mounts the docker socket
 		// and wires the control units.
 		{"GRAIN_ENABLE_UI_UPGRADE", "1"},

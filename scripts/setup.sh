@@ -4,16 +4,20 @@
 #
 # v1's shape (../docs/design.md) was a controller VM plus a pool of
 # sandbox VMs, all built by a Python host adapter driving libvirt -- code
-# this repository no longer carries. grain has no host adapter
-# yet (README.md, "What this does not have yet") and does not need
-# one to be useful: its daemon already defaults to running dispatched
-# work as plain host directories (orchestrator.HostSandboxes), no VM
-# involved. So this script does the simpler thing the issue actually
-# asks for -- run the one `grain` binary directly on this machine, as a
-# single systemd service, with no controller VM anywhere in the picture.
-# Real sandbox isolation (a VM or container per task) is still open and
-# out of scope here; see README.md's own "neither sandbox stand-in
-# carries any real isolation."
+# this repository no longer carries. This script does the simpler thing
+# the issue actually asks for: run the one `grain` binary directly on
+# this machine, as a single systemd service, with no controller VM
+# anywhere in the picture.
+#
+# What each dispatched task runs in is a separate question, and one this
+# script makes an operator answer (grain/task-15). By default it installs
+# kontur sandboxing: one bwsalmon/kontur-managed VM per run, created and
+# destroyed with it, which is the only shape here that puts a boundary
+# between an agent and this host. GRAIN_HOST_SANDBOXES=1 installs the
+# other one -- orchestrator.HostSandboxes, plain directories on this
+# machine, no isolation at all -- and nothing else does: this script used
+# to install it by default and say nothing, so a deployment could be
+# unisolated without anyone having decided that it should be.
 #
 # What this script does, every time it runs (safe to re-run -- this is
 # the installer AND the updater):
@@ -359,13 +363,33 @@ GRAIN_TARGET_REPO="${GRAIN_TARGET_REPO:-}"
 GRAIN_TARGET_BRANCH="${GRAIN_TARGET_BRANCH:-main}"
 GRAIN_TARGET_REPOS="${GRAIN_TARGET_REPOS:-}"
 
+# GRAIN_HOST_SANDBOXES=1 installs a deployment that dispatches into plain
+# directories on this machine (orchestrator.HostSandboxes) instead of into
+# a VM per run -- "host mode". It is off by default, and this script will
+# not install that shape without it (require_sandbox_choice, below).
+#
+# Host mode is not a weaker sandbox, it is no sandbox: a dispatched agent
+# runs as $GRAIN_USER on this host, with this host's filesystem, this
+# host's network and whatever credentials either can reach, and anything
+# it changes outlives the run. That is a reasonable trade on a machine
+# one operator owns and watches, and the wrong one anywhere a task
+# somebody else filed can be dispatched -- so it is a decision this
+# script asks for rather than one an operator can arrive at by leaving a
+# variable unset. It used to be exactly that: kontur sandboxing was off
+# by default here, so the plain `sudo ./setup.sh` this file's own header
+# recommends produced an unisolated deployment and said nothing about it
+# (grain/task-15). The daemon it installs says so too, in its journal on
+# every start and on a standing banner in its UI.
+GRAIN_HOST_SANDBOXES="${GRAIN_HOST_SANDBOXES:-0}"
 # See "Kontur sandboxing" below (ensure_kontur_images/
 # ensure_kontur_kvm_access) and terraform/gcp/README.md's
-# own section of the same name. GRAIN_KONTUR_ENABLE=1 (off by default here
-# -- terraform/gcp's own enable_kontur_sandboxes variable is what
-# actually turns this on for that deployment shape) needs no manual
-# build-and-publish step first (bwsalmon/agents#531), and needs nothing
-# configured for its sandbox container either (bwsalmon/agents#645).
+# own section of the same name. GRAIN_KONTUR_ENABLE=1 -- on by default,
+# and the only way to install that isn't host mode above -- needs no
+# manual build-and-publish step first (bwsalmon/agents#531), and needs
+# nothing configured for its sandbox container either
+# (bwsalmon/agents#645). What it does need is nested virtualisation:
+# /dev/kvm has to exist on this host (terraform/gcp's own
+# enable_nested_virtualization, and a machine_type that supports it).
 #
 # A kontur deployment runs one artifact and builds none. The sandbox
 # image is always pulled: GRAIN_KONTUR_OCI_IMAGE overrides which one, and
@@ -373,7 +397,7 @@ GRAIN_TARGET_REPOS="${GRAIN_TARGET_REPOS:-}"
 # the reference stamped into the grain image this host runs at the time it
 # was built, so the two are always from one commit. The guest boots from
 # inside that image; there is no separate disk to fetch or build.
-GRAIN_KONTUR_ENABLE="${GRAIN_KONTUR_ENABLE:-0}"
+GRAIN_KONTUR_ENABLE="${GRAIN_KONTUR_ENABLE:-$([ "$GRAIN_HOST_SANDBOXES" = "1" ] && echo 0 || echo 1)}"
 # Remembers what was actually asked for, since ensure_kontur_images/
 # ensure_kontur_kvm_access overwrite GRAIN_KONTUR_ENABLE
 # itself back to 0 on a failure partway through -- report_readiness uses
@@ -700,15 +724,28 @@ Recognized variables:
   GRAIN_TAILSCALE_UP_ARGS    extra arguments for `tailscale up`, word-split as
                              written -- e.g. "--advertise-tags=tag:grain --ssh"
 
+  GRAIN_HOST_SANDBOXES       1 to install "host mode": every dispatched agent
+                             runs directly on this machine, as GRAIN_USER, with
+                             its filesystem, its network and its credentials
+                             and no isolation of any kind
+                             (orchestrator.HostSandboxes). Default 0, and this
+                             script will not install that shape without it --
+                             right for a machine you own and watch, wrong for
+                             anything that dispatches a task somebody else
+                             filed. Also what makes a kontur prerequisite this
+                             host cannot meet a fallback rather than a failed
+                             run.
   GRAIN_KONTUR_ENABLE        1 to dispatch onto real bwsalmon/kontur-managed
-                             VMs over SSH (orchestrator.KonturSandboxes)
-                             instead of host directories (default: 0). Pulls
+                             VMs over SSH (orchestrator.KonturSandboxes) --
+                             one VM per run, thrown away with it. On by
+                             default, and the only alternative to
+                             GRAIN_HOST_SANDBOXES above. Pulls
                              the sandbox image this build of grain expects and
                              builds nothing (ensure_kontur_images, below).
                              Needs /dev/kvm on this host (nested
-                             virtualization). Left off (with a
-                             logged reason) if any prerequisite below is
-                             missing, rather than failing the whole run.
+                             virtualization); a host without it, or without
+                             any other prerequisite below, fails this run
+                             rather than quietly installing host mode.
   GRAIN_KONTUR_OCI_IMAGE     the sandbox image each task's VM runs -- both the
                              container and the guest inside it.
                              Empty (the default) is the one stamped into this
@@ -770,6 +807,35 @@ log() { echo "==> $*"; }
 if [ "$(id -u)" -ne 0 ]; then
   echo "setup.sh: must run as root (it creates a system user, systemd units, and /usr/local/bin/grain) -- try sudo" >&2
   exit 1
+fi
+
+# Which sandbox backend this install is for, decided before anything on
+# this host is touched -- no package installed, no user created, no image
+# pulled (grain/task-15).
+#
+# There are two answers and this script will not guess between them.
+# GRAIN_KONTUR_ENABLE=1, the default, gives every run a kontur-managed VM
+# of its own; GRAIN_HOST_SANDBOXES=1 runs every agent directly on this
+# machine with no isolation at all (see that variable's own comment
+# above). Turning kontur off is only meaningful as a way of asking for
+# the second, so asking for it and then not saying so is a
+# misunderstanding worth stopping on rather than an instruction worth
+# obeying: it used to install the unisolated deployment silently.
+if [ "$GRAIN_KONTUR_ENABLE" != "1" ] && [ "$GRAIN_HOST_SANDBOXES" != "1" ]; then
+  cat >&2 <<'EOF'
+setup.sh: refusing to install without a sandbox backend.
+
+GRAIN_KONTUR_ENABLE is not 1, which leaves only host mode: every
+dispatched agent would run directly on this machine, as the grain
+account, with this host's filesystem, network and credentials, and
+nothing it does would be thrown away with the run.
+
+  * to sandbox each run in its own VM (the default), leave
+    GRAIN_KONTUR_ENABLE unset -- this host needs /dev/kvm for it
+  * to install host mode deliberately -- a machine you own, that runs
+    nobody else's tasks -- re-run with GRAIN_HOST_SANDBOXES=1
+EOF
+  exit 2
 fi
 
 # The base-system commands every step below assumes: systemd's own
@@ -1238,12 +1304,46 @@ grant_docker_group() {
 # leaves whatever it already did in place (a fetched guest image, a
 # pulled OCI image, group memberships); it just stops write_systemd_units
 # from wiring up the -kontur-* flags that would use them. A failure in
-# any step below also flips GRAIN_KONTUR_ENABLE back to 0 for the rest of
-# this run, the same "converge with what's ready, don't fail the whole
-# install" choice mint_gemini_operating_key already makes for a missing
-# Gemini key: a deployment whose kontur image is not ready yet still gets
-# a working host-directory-backed daemon out of this run rather than
-# nothing at all.
+# any step below goes through kontur_unavailable, immediately here.
+
+# kontur_unavailable is what every step below calls when a prerequisite
+# for kontur sandboxing turns out not to be ready on this host: no
+# /dev/kvm, a sandbox image that cannot be resolved or pulled, no address
+# a guest could reach this host's git proxy through.
+#
+# It used to be a bare `GRAIN_KONTUR_ENABLE=0` at each of those sites:
+# carry on and install a host-directory deployment instead -- the same
+# "converge with what's ready, don't fail the whole install" choice
+# mint_gemini_operating_key still makes for a missing Gemini key, so that
+# a deployment whose sandbox image was not ready yet got a working daemon
+# out of the run rather than nothing at all.
+#
+# The trouble is what "what's ready" meant here. A missing Gemini key
+# leaves a deployment that cannot dispatch until somebody sets one; a
+# missing sandbox image left one that dispatched every agent onto this
+# host with no isolation, which is not a lesser version of what was asked
+# for -- it is the configuration this script now declines to install
+# unless it was asked for by name (grain/task-15). So it stays a fallback
+# exactly where host mode is acceptable to the operator, and is a failed
+# run everywhere else: nothing is left running in a shape nobody chose,
+# and re-running once the prerequisite is there picks up where this left
+# off, every step here being get-or-create.
+kontur_unavailable() {
+  local reason="$1"
+  if [ "$GRAIN_HOST_SANDBOXES" = "1" ]; then
+    log "$reason -- dispatching into host directories instead, as GRAIN_HOST_SANDBOXES=1 allows"
+    GRAIN_KONTUR_ENABLE=0
+    return 0
+  fi
+  echo "setup.sh: $reason" >&2
+  echo "setup.sh: not falling back to host mode -- that would run every agent directly on this" >&2
+  echo "          machine with no isolation, which nothing about this run asked for. Fix the" >&2
+  echo "          prerequisite above and re-run, or re-run with GRAIN_HOST_SANDBOXES=1 to accept" >&2
+  echo "          an unsandboxed deployment deliberately." >&2
+  echo "setup.sh: whatever was already installed here is untouched -- grain-daemon.service, if this" >&2
+  echo "          host had one, is still running the configuration it had before this run." >&2
+  exit 1
+}
 
 # kontur_gcp_access_token fetches a short-lived OAuth2 access token for
 # this host's own attached service account from the metadata server --
@@ -1313,20 +1413,18 @@ ensure_kontur_images() {
 # rollback, where an older grain names its own older sandbox rather than
 # whatever is newest.
 #
-# A pull that fails is not fatal to the whole install, the same trade
-# every other kontur step here makes: kontur sandboxing goes off for this
-# run, with a reason logged, and the deployment comes up dispatching into
-# host directories instead of failing to deploy at all.
+# A pull that fails takes the same route every other kontur step here
+# takes when its prerequisite isn't ready: kontur_unavailable, which
+# falls back to host directories where the operator has said that is
+# acceptable and fails the run where they have not.
 ensure_kontur_oci_image() {
   if [ -z "$GRAIN_KONTUR_OCI_IMAGE" ]; then
     # `|| true` so the guard below is the thing that reports a CLI that
     # could not answer -- without it `set -e` aborts the whole deploy on
-    # the assignment, and this deployment never learns it could have
-    # carried on with kontur simply switched off.
+    # the assignment, with nothing said about which step failed or why.
     GRAIN_KONTUR_OCI_IMAGE="$(/usr/local/bin/grain sandbox-image 2>/dev/null | tr -d '\r' | head -n1 || true)"
     if [ -z "$GRAIN_KONTUR_OCI_IMAGE" ]; then
-      log "could not ask $GRAIN_IMAGE_REF which sandbox image it expects, and GRAIN_KONTUR_OCI_IMAGE names none -- leaving kontur sandboxing off this run"
-      GRAIN_KONTUR_ENABLE=0
+      kontur_unavailable "could not ask $GRAIN_IMAGE_REF which sandbox image it expects, and GRAIN_KONTUR_OCI_IMAGE names none"
       return
     fi
     log "sandbox container: $GRAIN_KONTUR_OCI_IMAGE (stamped into $GRAIN_IMAGE_REF at build time)"
@@ -1355,8 +1453,7 @@ ensure_kontur_oci_image() {
     if docker image inspect "$GRAIN_KONTUR_OCI_IMAGE" >/dev/null 2>&1; then
       log "  pull failed, but this host already has it locally -- using that"
     else
-      log "  could not pull $GRAIN_KONTUR_OCI_IMAGE and this host has no local copy -- leaving kontur sandboxing off this run"
-      GRAIN_KONTUR_ENABLE=0
+      kontur_unavailable "could not pull $GRAIN_KONTUR_OCI_IMAGE and this host has no local copy"
       return
     fi
   fi
@@ -1391,8 +1488,7 @@ ensure_kontur_kvm_access() {
     return
   fi
   if [ ! -e /dev/kvm ]; then
-    log "GRAIN_KONTUR_ENABLE=1 but /dev/kvm does not exist on this host -- terraform/gcp's enable_nested_virtualization must be on and machine_type must support it (see that variable's own doc); leaving kontur sandboxing off this run"
-    GRAIN_KONTUR_ENABLE=0
+    kontur_unavailable "kontur sandboxing needs /dev/kvm and this host has none -- terraform/gcp's enable_nested_virtualization must be on and machine_type must support it (see that variable's own doc)"
     return
   fi
   if getent group kvm >/dev/null 2>&1; then
@@ -1421,8 +1517,8 @@ ensure_kontur_kvm_access() {
 # via the VM container's docker-assigned interface) routes through to reach
 # this host, the same way any other container on that network would.
 #
-# Like ensure_kontur_kvm_access, resets GRAIN_KONTUR_ENABLE to 0 (with a
-# log line explaining why) rather than installing a daemon whose every
+# Like ensure_kontur_kvm_access, hands a gateway it cannot find to
+# kontur_unavailable rather than installing a daemon whose every
 # dispatched task would fail its very first git clone.
 #
 # `docker network inspect bridge`'s own .IPAM.Config only carries a
@@ -1470,8 +1566,7 @@ ensure_kontur_git_proxy_host() {
     gw="$(bridge_gateway)"
   fi
   if [ -z "$gw" ]; then
-    log "GRAIN_KONTUR_ENABLE=1 but GRAIN_KONTUR_GIT_PROXY_HOST is unset and docker's own \"bridge\" network has no gateway address to default it to -- set GRAIN_KONTUR_GIT_PROXY_HOST explicitly (see this script's own -h); leaving kontur sandboxing off this run"
-    GRAIN_KONTUR_ENABLE=0
+    kontur_unavailable "GRAIN_KONTUR_GIT_PROXY_HOST is unset and docker's own \"bridge\" network has no gateway address to default it to -- set GRAIN_KONTUR_GIT_PROXY_HOST explicitly (see this script's own -h)"
     return
   fi
   GRAIN_KONTUR_GIT_PROXY_HOST="$gw"
@@ -2318,6 +2413,15 @@ write_systemd_units() {
         -kontur-create-arg -guest-port -kontur-create-arg 22
       )
     fi
+  else
+    # -host-sandboxes selects nothing the daemon would not do anyway with
+    # neither flag passed: it is how the unit records that this
+    # deployment's unisolated backend was asked for rather than defaulted
+    # into, and it is the difference between a startup line that names
+    # host sandboxing as a choice and one that names it as an accident
+    # (cmd/grain/daemon.go's -host-sandboxes). It can only be reached
+    # with GRAIN_HOST_SANDBOXES=1, which is the asking.
+    daemon_args+=(-host-sandboxes)
   fi
 
   docker_run_args
@@ -3048,9 +3152,21 @@ report_readiness() {
   fi
   if [ "$GRAIN_KONTUR_REQUESTED" = "1" ] && [ "$GRAIN_KONTUR_ENABLE" != "1" ]; then
     ready=0
-    echo "    !! GRAIN_KONTUR_ENABLE=1 was requested but a prerequisite wasn't ready this run"
+    echo "    !! kontur sandboxing was asked for but a prerequisite wasn't ready this run"
     echo "       (see the earlier log line naming which one) -- dispatching into host"
-    echo "       directories instead. Re-run once it is; nothing else needs to change."
+    echo "       directories instead, which GRAIN_HOST_SANDBOXES=1 allowed. Re-run once it"
+    echo "       is; nothing else needs to change."
+  fi
+  # Not a readiness failure either -- it is what GRAIN_HOST_SANDBOXES=1
+  # asked for -- but it is the property of this deployment most worth
+  # being reminded of at the end of an install, and the summary above is
+  # the last thing an operator reads before walking away from it.
+  if [ "$GRAIN_KONTUR_ENABLE" != "1" ]; then
+    echo "    -- host mode: every dispatched agent runs directly on this machine, with its"
+    echo "       filesystem, its network and its credentials, and nothing it changes is"
+    echo "       thrown away with the run. Do not point a deployment in this shape at work"
+    echo "       filed by anyone you would not hand a shell on this host. Re-run without"
+    echo "       GRAIN_HOST_SANDBOXES to give every run a VM of its own (needs /dev/kvm)."
   fi
   [ "$ready" -eq 1 ] && echo "    all runtime prerequisites are in place"
   return 0

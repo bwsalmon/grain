@@ -82,6 +82,8 @@ grain_ref = "main" # pin a tag or SHA for a reproducible staging build
 # image, so there is no second artifact -- see this directory's README,
 # "Kontur sandboxing". The override below runs a sandbox image of your
 # own choosing. Or set enable_kontur_sandboxes = false to keep this
-# deployment on host-directory sandboxing (bwsalmon/agents#504) instead.
+# deployment on host-directory sandboxing (bwsalmon/agents#504) instead --
+# which means every dispatched agent runs on the host itself with no
+# isolation, so set it deliberately or not at all (grain/task-15).
 # kontur_oci_image    = "us-central1-docker.pkg.dev/CHANGE-ME-gcp-project/CHANGE-ME-repo/kontur:latest"
 # enable_kontur_sandboxes = false
