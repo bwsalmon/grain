@@ -22,14 +22,24 @@ export default function BatchActionsBar({ count, config, onRun, onClear }) {
     <Paper
       elevation={4}
       square
-      sx={{ position: "fixed", left: 0, right: 0, bottom: 0, zIndex: 4 }}
+      sx={{
+        position: "fixed",
+        left: 0,
+        right: 0,
+        bottom: 0,
+        zIndex: 4,
+        // Clear of the home indicator on a phone: index.html asks for
+        // viewport-fit=cover, so a bar pinned to the bottom edge is
+        // partly under it without this. Zero everywhere else.
+        pb: "env(safe-area-inset-bottom, 0px)",
+      }}
     >
       <Stack
         direction="row"
         alignItems="center"
         spacing={1.2}
         flexWrap="wrap"
-        sx={{ px: 3, py: 1.3 }}
+        sx={{ px: { xs: 1.5, sm: 3 }, py: 1.3 }}
       >
         <Typography fontWeight={500}>{count} selected</Typography>
         <Button variant="outlined" size="small" onClick={() => run("/approve")}>

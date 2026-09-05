@@ -2950,6 +2950,31 @@ are unchanged. `style.css` still owns what MUI has no primitive for: the
 state dot/badge, the sidebar's brand mark, and layout for the task list
 and detail panel.
 
+**A phone gets a shell that fits it; a tablet gets the one above
+(grain/task-19).** Every view here is built around a permanent 232px nav
+rail standing beside a pane, which a tablet has the width for and a
+phone does not: on a 390px screen the rail is more than half the window,
+a task row truncates everything after its title, and a board column is a
+third of a screen wide. `ui/src/phone.js` asks the one question — under
+600px wide, or short and landscape, which is a phone turned sideways and
+never a tablet — and both the layout and the stylesheet answer it the
+same way, because `App.jsx` publishes the answer as `data-phone` on
+`<html>` exactly as `AppThemeProvider` publishes the resolved light/dark
+mode. That is what keeps `style.css` from carrying a second copy of the
+media query, and it reaches the overlay panes, which MUI renders into a
+portal outside the shell. What a phone gets is not a second UI: the same
+`Sidebar` element moves, whole, into `PhoneNav`'s drawer behind a top bar
+(and the drawer closes on any tap inside it, since every control in the
+rail is a navigation), panes take the full width, centered dialogs go
+full screen, and `style.css`'s phone block brings the page gutters in,
+wraps a task row's chips onto lines of their own, widens a board column
+to the screen and stacks the task detail's two columns.
+`ui/e2e/phone.spec.js` is where that is checked, because it is the only
+suite with a layout engine in it — jsdom can say which elements rendered
+and nothing about how wide they came out — and it asserts the tablet half
+of the bargain too: at 820px the rail is still beside the page and a pane
+still starts exactly where the rail ends.
+
 **Agent prose is rendered as the markdown it is written in
 (grain/task-93).** Every framework grain dispatches answers in markdown
 by default, so a relayed question or a `comment_on_issue` note arrives
@@ -3587,6 +3612,18 @@ Three answers, offered in the UI's Settings pane (its State tab) and by
 contents replace this installation's database, or an empty repository
 grain seeds from what it has. The last two are one operation, because
 adopting cannot tell them apart up front and does not need to.
+
+Local only is a real answer and the one a fresh install already has, but
+it is also the only one with no copy of anything anywhere else, so the
+pane warns rather than merely reporting it: every commit in the
+repository -- tasks, settings, capabilities, repo configuration -- is on
+one disk, and so is the secrets key beside it that nothing can
+regenerate. The warning names both moves out, because they cover
+different halves: adopt a remote, and keep a copy of the key file off
+this host (`GRAIN_SECRETS_KEY` on a later deploy, or the import field in
+the pane). `grain state status` has said this at a terminal for as long
+as it has existed, and an operator who runs a deployment through the UI
+never sees a terminal.
 
 An empty repository is worth formatting before it is adopted:
 `grain state format`, in a clone of it, writes the README, the
@@ -7189,3 +7226,49 @@ a host where something turned nesting off, writes the modprobe drop-in
 that turns it back on, reloading the module only if nothing is using it
 — never pulling KVM out from under a running sandbox, since that script
 is the updater as well as the installer.
+
+## A sandbox shape the backend ignores says so
+
+`grain settings` and the Settings pane's Sandbox tab print three numbers
+on every deployment — `sandbox cpus`, `sandbox memory mb`, `sandbox disk
+gb` — because they are stored on every deployment. Only one kind of
+deployment builds anything to them. Without `-kontur-sandboxes` a run
+gets an `orchestrator.HostSandboxes` directory on the daemon's own
+machine: `liveConfig.refresh` offers a changed shape to whatever
+implements `defaultShaper`, that backend deliberately does not, and the
+three settings size nothing. Read from inside such a sandbox, `cpu.max`
+and `memory.max` are both `max` and `nproc` reports every core the host
+has.
+
+Shown unannotated, that is worse than showing nothing. "2 vCPUs, 2048
+MiB" is a sentence about a cap, and it was describing a deployment whose
+runs have no cap at all — an operator reading the pane would have
+concluded the opposite of the truth, and would have gone looking for the
+throttle when a run ate the machine. The per-task half of the same
+setting was already honest about it: `HostSandboxes.Acquire` *refuses* a
+non-zero shape rather than ignoring it, naming both what was asked for
+and why a host directory has none of its own. The deployment-wide
+default was the one number still being dropped in silence.
+
+`ui.Config.SandboxShapeIgnored`, reported onward as
+`ui.Settings.SandboxShapeIgnored`, is that fact where the numbers are
+shown: the Sandbox tab carries a warning above the three fields, and
+`grain settings` ends each of the three lines with `-- not in effect:
+host-directory sandboxes have no shape`. Per line rather than once
+underneath them, since whoever is misled here reads one line and stops.
+
+The daemon works it out from the backend it built rather than from the
+flag that chose it — `sandboxShapeIgnored` asks whether `sandboxes` is a
+`defaultShaper`, which is exactly the test `refresh` applies before
+handing a changed shape on — so what the pane calls "not in effect"
+cannot drift from what is really applied. A backend that grew a
+`SetDefaultShape` would stop being annotated on the same commit that
+made the annotation false.
+
+The fields stay editable and the values stay stored. They are what this
+deployment would build VMs at the day it is pointed at kontur, and
+configuring a shape ahead of that switch is a reasonable thing to do:
+what was wrong was the silence, not the numbers. `false` is the quiet
+answer, so a UI with no backend to speak for (`grain demo`'s throwaway
+one) and an older daemon that predates the field both render the pane
+exactly as it was.
