@@ -253,6 +253,23 @@ type Config struct {
 	// nil-means-unavailable contract Secrets, Reboot and Credentials
 	// above already give.
 	CapabilityChecks CapabilityChecker
+	// AgentKeyChecks, when set, is what POST /api/agent-keys/{framework}/
+	// check calls to test one agent framework's own credential against
+	// the vendor that issued it -- cmd/grain/daemon.go's own adapter over
+	// the same secrets store and key files a dispatch reads a credential
+	// from. It is to the "set"/"not set" chip on Settings' Agents tab
+	// what CapabilityChecks above is to **Ready**: presence is the whole
+	// of what a pane reading grain's own store can see, and a key revoked
+	// at the far end leaves every stored fact unchanged (see
+	// Client.CheckAgentKey).
+	//
+	// nil means this UI was not handed one (`grain demo`'s throwaway UI,
+	// or any UI not colocated with a daemon holding the credentials), and
+	// the route answers 404 while Settings.AgentKeyChecksEnabled reports
+	// false so the pane offers no button that could not work -- the same
+	// nil-means-unavailable contract every other optional field here
+	// gives.
+	AgentKeyChecks AgentKeyChecker
 	// AgentModels, when set, is what GET /api/agent-models calls to ask
 	// the installed agent CLI which models it can actually run --
 	// cmd/grain/daemon.go's agyModelLister over antigravity.Catalog,
@@ -286,12 +303,12 @@ type Config struct {
 	// report themselves unavailable rather than erroring on every call,
 	// the same as a nil Secrets above.
 	Upgrader Upgrader
-	// Logs is the set of named log sources a debugging page in the UI can
+	// Logs is the set of named log sources the System pane in the UI can
 	// tail -- "daemon" for grain daemon's own journal, and, on a
 	// deployment colocated with one, the git proxy's audit log
 	// (bwsalmon/agents#444). Keyed by the name a caller passes to
 	// GET /api/logs/{source}. nil or empty means no sources are
-	// configured, and the debugging page reports itself unavailable
+	// configured, and that pane reports itself unavailable
 	// rather than a page with nothing on it, the same nil-means-
 	// unavailable contract Secrets, Reboot and Upgrader above already
 	// give their own panes.
@@ -315,7 +332,7 @@ type Config struct {
 	// colocated with the orchestrator that owns a real sandbox pool), and
 	// the sandbox health pane reports itself unavailable rather than
 	// erroring on every call, the same nil-means-unavailable contract
-	// Logs above already gives the debug section it now sits alongside
+	// Logs above already gives the System pane it now sits alongside
 	// (bwsalmon/agents#536).
 	Sandboxes SandboxHealth
 	// HostStats, when set, is what GET /api/sandboxes' own host section

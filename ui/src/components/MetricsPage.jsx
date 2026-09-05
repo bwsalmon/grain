@@ -47,7 +47,7 @@ const DEFAULT_WINDOW = "7d";
 // mostly zeroes.
 const BUCKETS = 24;
 
-// Unlike the Logs and Sandbox health panels on the Debug pane, there is
+// Unlike the Logs and Sandbox health panels on the System pane, there is
 // no poll here: a report costs a full scan of `task` and `task_run` every
 // time it is asked for (README, "Measuring throughput and latency"), and
 // nothing it shows moves fast enough to be worth that every few seconds.
@@ -209,8 +209,9 @@ function Cell({ stage, percentile, seconds }) {
 // `grain metrics` prints the same report at a terminal). It is a
 // destination of its own on the sidebar rather than a Settings tab
 // because it is a read-only view of how the deployment is behaving, not
-// a knob on it -- and its own entry rather than a Debug tab because it
-// is the question asked when nothing is wrong (grain/task-173).
+// a knob on it -- and its own entry rather than a tab of that pane
+// because it is the question asked when nothing is wrong
+// (grain/task-173).
 //
 // The pane's header is what carries the "Metrics" title; this panel
 // starts straight in on the window picker and Refresh.

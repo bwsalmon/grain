@@ -16,7 +16,7 @@ import ErrorBanner from "./components/ErrorBanner.jsx";
 import DetailOverlay from "./components/DetailOverlay.jsx";
 import NewTaskOverlay from "./components/NewTaskOverlay.jsx";
 import SettingsOverlay from "./components/SettingsOverlay.jsx";
-import DebugOverlay from "./components/DebugOverlay.jsx";
+import SystemOverlay from "./components/SystemOverlay.jsx";
 import MetricsOverlay from "./components/MetricsOverlay.jsx";
 import RepoReleases from "./components/RepoReleases.jsx";
 import LoadingScreen from "./components/LoadingScreen.jsx";
@@ -131,8 +131,8 @@ export default function App() {
   const [showSettings, setShowSettings] = useState(
     () => parsePath(window.location.pathname).showSettings === true,
   );
-  const [showDebug, setShowDebug] = useState(
-    () => parsePath(window.location.pathname).showDebug === true,
+  const [showSystem, setShowSystem] = useState(
+    () => parsePath(window.location.pathname).showSystem === true,
   );
   const [showMetrics, setShowMetrics] = useState(
     () => parsePath(window.location.pathname).showMetrics === true,
@@ -544,7 +544,7 @@ export default function App() {
       templateId: openTemplateId,
       suiteId: openSuiteId,
       showSettings,
-      showDebug,
+      showSystem,
       showMetrics,
       narrowing,
     });
@@ -578,7 +578,7 @@ export default function App() {
     openTemplateId,
     openSuiteId,
     showSettings,
-    showDebug,
+    showSystem,
     showMetrics,
     narrowing,
   ]);
@@ -596,7 +596,7 @@ export default function App() {
       // the narrowing, so it cannot be the one thing that survives.
       setNarrowing(parsed.narrowing || NO_NARROWING);
       setShowSettings(parsed.showSettings === true);
-      setShowDebug(parsed.showDebug === true);
+      setShowSystem(parsed.showSystem === true);
       setShowMetrics(parsed.showMetrics === true);
       setView(parsed.view);
       setOpenRepo(parsed.repo || null);
@@ -709,10 +709,10 @@ export default function App() {
               stateFilter={stateFilter}
               onSetFilter={setStateFilter}
               showSettings={showSettings}
-              showDebug={showDebug}
+              showSystem={showSystem}
               showMetrics={showMetrics}
               onOpenSettings={() => setShowSettings(true)}
-              onOpenDebug={() => setShowDebug(true)}
+              onOpenSystem={() => setShowSystem(true)}
               onOpenMetrics={() => setShowMetrics(true)}
               onOpenNewTask={() => {
                 setNewTaskRepo(null);
@@ -849,10 +849,10 @@ export default function App() {
             showError={showError}
           />
         )}
-        {showDebug && (
-          <DebugOverlay
+        {showSystem && (
+          <SystemOverlay
             config={config}
-            onClose={() => setShowDebug(false)}
+            onClose={() => setShowSystem(false)}
             showError={showError}
           />
         )}

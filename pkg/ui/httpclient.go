@@ -301,6 +301,23 @@ func (c *HTTPClient) CheckCapability(ctx context.Context, id string) (Capability
 	return check, nil
 }
 
+// CheckAgentKey is Client.CheckAgentKey over the wire: authenticate as
+// one framework's stored credential, list what it can see, and report
+// what the vendor said.
+//
+// Its caller is `grain settings -check-agent-key` (cmd/grain/main.go),
+// for the same reason -check-capability exists beside it: "why did every
+// run today fail to authenticate" is asked from a shell on the host at
+// least as often as from a browser, and a host shell is where whoever is
+// reading the failed run's error is already standing.
+func (c *HTTPClient) CheckAgentKey(ctx context.Context, framework string) (AgentKeyCheck, error) {
+	var check AgentKeyCheck
+	if err := c.do(ctx, http.MethodPost, "/api/agent-keys/"+url.PathEscape(framework)+"/check", nil, &check); err != nil {
+		return AgentKeyCheck{}, err
+	}
+	return check, nil
+}
+
 // The repo family (grain/task-36): what a repo defaults on its own, and
 // whether the deployment's allowlist names it. Four of the five mirror
 // the Client method of the same name -- the ones the repos pane already

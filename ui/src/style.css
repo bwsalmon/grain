@@ -1174,7 +1174,7 @@ fieldset legend {
 }
 
 /* The fixed chrome a pane can pin above that scrolling body (Overlay's
-   own `header`): Settings' and Debugging's title and tab strip, which
+   own `header`): Settings' and System's title and tab strip, which
    would otherwise scroll away the moment a tab's own content ran past
    the bottom of a full-height pane (grain/task-115). Sized to its
    content, so .overlay-pane above still takes the rest of the paper.

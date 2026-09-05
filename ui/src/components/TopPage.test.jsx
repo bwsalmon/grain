@@ -7,7 +7,7 @@ import api from "../api.js";
 vi.mock("../api.js", () => ({ default: vi.fn() }));
 
 // grain/task-120: `top` on the daemon's own machine, as a tab of the
-// Debug overlay -- the per-process answer to the "what is loading this
+// System overlay -- the per-process answer to the "what is loading this
 // machine" that Sandbox health's own host section can only ask.
 describe("TopPage", () => {
   const snapshot = {
