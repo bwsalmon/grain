@@ -385,7 +385,7 @@ jobs:
   # tick names what it is about: "workflows" is the wrong thing to read
   # over a finding in scripts/setup.sh.
   shellcheck:
-    name: scripts
+    name: shell scripts
     runs-on: ubuntu-latest
 
     steps:
@@ -410,9 +410,9 @@ jobs:
         run: |
           set -euo pipefail
           shellcheck --version
-          mapfile -t scripts < <(git ls-files -- 'scripts/*.sh')
+          mapfile -t scripts < <(git ls-files -- 'scripts/*.sh' 'terraform/*.sh')
           if [ "${#scripts[@]}" -eq 0 ]; then
-            echo "::error::no shell scripts matched under scripts/; this job is checking nothing" >&2
+            echo "::error::no shell scripts matched; this job is checking nothing" >&2
             exit 1
           fi
           printf 'checking %s\n' "${scripts[@]}"
