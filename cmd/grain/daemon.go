@@ -2903,6 +2903,7 @@ func (a sandboxHealthAdapter) Health(ctx context.Context) []ui.SandboxSnapshot {
 			MemoryTotalMB: s.MemoryTotalMB,
 			DiskUsedMB:    s.DiskUsedMB,
 			DiskTotalMB:   s.DiskTotalMB,
+			NestedVirt:    s.NestedVirt,
 		}
 	}
 	return out
@@ -3268,13 +3269,21 @@ func hostStats(disks []hostDisk) (ui.HostPressure, error) {
 	if err != nil {
 		return ui.HostPressure{}, err
 	}
+	// Read on every poll rather than once at startup, unlike docker's
+	// data root above: this one genuinely changes while the daemon runs
+	// -- reloading kvm_intel with a different "nested" is the documented
+	// way to turn nesting on, and an operator who has just done it wants
+	// the pane to say so without restarting grain.
+	nestedVirt, nestedVirtDetail := sysstat.NestedVirtualization()
 	return ui.HostPressure{
-		LoadAverage1:  snap.LoadAverage1,
-		LoadAverage5:  snap.LoadAverage5,
-		LoadAverage15: snap.LoadAverage15,
-		MemoryUsedMB:  snap.MemUsedMB,
-		MemoryTotalMB: snap.MemTotalMB,
-		Disks:         diskUsage(disks),
+		LoadAverage1:     snap.LoadAverage1,
+		LoadAverage5:     snap.LoadAverage5,
+		LoadAverage15:    snap.LoadAverage15,
+		MemoryUsedMB:     snap.MemUsedMB,
+		MemoryTotalMB:    snap.MemTotalMB,
+		Disks:            diskUsage(disks),
+		NestedVirt:       nestedVirt,
+		NestedVirtDetail: nestedVirtDetail,
 	}, nil
 }
 

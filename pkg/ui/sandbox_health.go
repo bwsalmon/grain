@@ -25,6 +25,13 @@ type SandboxSnapshot struct {
 	MemoryTotalMB int    `json:"memoryTotalMB,omitempty"`
 	DiskUsedMB    int    `json:"diskUsedMB,omitempty"`
 	DiskTotalMB   int    `json:"diskTotalMB,omitempty"`
+	// NestedVirt is whether this sandbox can run virtual machines of its
+	// own -- orchestrator.SandboxHealth.NestedVirt's own four states
+	// ("ready", "denied", "no-device", "unsupported"), carried through
+	// as the string it is rather than reduced to a boolean, since the
+	// three ways of not being ready each want a different fix. Empty
+	// when the backend gave no reading, which the pane shows as a dash.
+	NestedVirt string `json:"nestedVirt,omitempty"`
 }
 
 // SandboxHealth is implemented by whatever can report every live
@@ -100,6 +107,18 @@ type HostPressure struct {
 	// non-Linux host reads: the pane shows the load and memory beside it
 	// rather than going down over a number it could not get.
 	Disks []DiskUsage `json:"disks,omitempty"`
+	// NestedVirt and NestedVirtDetail are whether this machine's own KVM
+	// will let the VMs it boots run VMs in turn -- sysstat's own
+	// "enabled"/"disabled"/"unavailable" and the sysfs reading behind it
+	// ("kvm_intel nested=Y").
+	//
+	// The host half of the same question SandboxSnapshot.NestedVirt
+	// answers per sandbox, and shown beside it because neither is much
+	// use alone: a sandbox reporting no CPU virtualization flag is
+	// either a host with nesting off or a guest configured without it,
+	// and this is what tells those apart.
+	NestedVirt       string `json:"nestedVirt,omitempty"`
+	NestedVirtDetail string `json:"nestedVirtDetail,omitempty"`
 }
 
 // sandboxHealthResponse is GET /api/sandboxes' whole body. Enabled is
