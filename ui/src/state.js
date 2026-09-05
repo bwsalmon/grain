@@ -475,9 +475,13 @@ export function repoRows(config, tasks) {
 //   - open: work outstanding, none of it moving -- queued, waiting on a
 //     human, failed, or sitting on the merge queue. A hollow ring, the
 //     queued badge's own figure.
-//   - idle: nothing but closed tasks, or no tasks at all. A grey dot.
+//   - idle: nothing but closed and deferred tasks, or no tasks at all.
+//     A grey dot.
 //
-// "Closed" is the only state counted as finished. "Queued for merge"
+// "Closed" and "Deferred" are the states counted as not-open, and they
+// are the same two a task list hides by default (HIDDEN_BY_DEFAULT): one
+// is over with, the other is work nobody is waiting on this month, and
+// neither is something to go and look at. "Queued for merge"
 // (STATE_LABELS.completed) reads like an ending and is not one -- the
 // task is waiting on the merge queue and can still come back needing a
 // human -- so a repo whose last task sits there is still open work.
@@ -491,7 +495,11 @@ export function repoActivity(row) {
       title: `Active -- ${running} task${running === 1 ? "" : "s"} running now`,
     };
   }
-  const open = row.total - (row.counts?.closed || 0);
+  // The states that are not open work, named in the order STATE_ORDER
+  // puts them so the idle title below reads "deferred or closed".
+  const setAside = HIDDEN_BY_DEFAULT.filter((h) => row.counts?.[h.state]);
+  const open =
+    row.total - setAside.reduce((n, h) => n + row.counts[h.state], 0);
   if (open > 0) {
     return {
       key: "open",
@@ -506,7 +514,9 @@ export function repoActivity(row) {
     label: "Idle",
     title:
       row.total > 0
-        ? "Idle -- every task here is closed"
+        ? `Idle -- every task here is ${setAside
+            .map((h) => h.state)
+            .join(" or ")}`
         : "Idle -- no tasks here yet",
   };
 }

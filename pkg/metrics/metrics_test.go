@@ -213,11 +213,16 @@ func TestBacklogReportsQueueDepthAndTheOldestWait(t *testing.T) {
 		{TaskID: "1", CreatedAt: at(0), ApprovedAt: at(0)},
 		{TaskID: "2", CreatedAt: at(time.Hour), ApprovedAt: at(2 * time.Hour)},
 		{TaskID: "3", CreatedAt: at(time.Hour)},
+		// Put aside, and so not part of the backlog at all: it is asking
+		// for no capacity, and counting it would make a deployment that
+		// parks ideas look backed up (Backlog.ByState).
+		{TaskID: "4", CreatedAt: at(time.Hour), ApprovedAt: at(time.Hour)},
 	}
 	states := map[string]model.State{
 		"1": model.StateQueued,
 		"2": model.StateQueued,
 		"3": model.StateProposed,
+		"4": model.StateDeferred,
 	}
 	rep := metrics.Compute(metrics.Input{Window: win, Tasks: tasks, States: states})
 
@@ -226,6 +231,9 @@ func TestBacklogReportsQueueDepthAndTheOldestWait(t *testing.T) {
 	}
 	if got, want := rep.Backlog.ByState[model.StateProposed], 1; got != want {
 		t.Errorf("ByState[proposed] = %d, want %d", got, want)
+	}
+	if got, want := rep.Backlog.ByState[model.StateDeferred], 0; got != want {
+		t.Errorf("ByState[deferred] = %d, want %d -- a deferred task is not backlog", got, want)
 	}
 	if got, want := rep.Backlog.OldestQueuedTaskID, "1"; got != want {
 		t.Errorf("OldestQueuedTaskID = %q, want %q", got, want)

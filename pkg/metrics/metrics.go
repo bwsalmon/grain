@@ -331,6 +331,13 @@ type Backlog struct {
 	// -- but not the one Utilization is read against, and counting it
 	// here would make a deployment that simply does not use auto-merge
 	// look permanently backed up.
+	//
+	// StateDeferred is left out for the same last reason, from the other
+	// end of a task's life: work somebody has explicitly put aside is not
+	// asking for capacity, so counting it would make a deployment that
+	// parks ideas rather than closing them look permanently backed up.
+	// It comes back into this count the moment it is picked back up,
+	// which is exactly when it starts wanting a dispatch again.
 	ByState map[model.State]int
 	// Queued is ByState[StateQueued] -- the depth of the dispatch queue
 	// itself, lifted out because it is the one this report's own
@@ -688,7 +695,8 @@ func backlogOf(tasks []model.TaskTiming, states map[string]model.State, until ti
 	b := Backlog{ByState: map[model.State]int{}}
 	for _, t := range tasks {
 		state, ok := states[t.TaskID]
-		if !ok || state == model.StateCompleted || state == model.StateAwaitingSubmit || state == model.StateClosed {
+		if !ok || state == model.StateCompleted || state == model.StateAwaitingSubmit ||
+			state == model.StateDeferred || state == model.StateClosed {
 			continue
 		}
 		b.ByState[state]++

@@ -94,14 +94,33 @@ describe("TaskBoard", () => {
       expect(cardsIn("Needs you")).toEqual(["Answer me"]);
     });
 
-    // Deferred is named alongside Closed because the default board has
-    // no column for either (board.js): both are states a task is in when
-    // it is not part of "where is everything right now".
     it("leaves closed tasks off the board, and says how many it is not showing", () => {
       renderBoard();
       expect(screen.queryByText("Long done")).not.toBeInTheDocument();
       expect(
-        screen.getByText(/1 task in no column \(Deferred, Closed\)/),
+        screen.getByText(/1 task in no column \(Closed\)/),
+      ).toBeInTheDocument();
+    });
+
+    // The default board has no column for "Deferred" either (board.js),
+    // and the note names it only when there is a deferred task to be
+    // hiding -- the board above has none, and says "Closed" alone.
+    it("leaves deferred tasks off the board too, and names that state as well", () => {
+      renderBoard({
+        tasks: [
+          ...tasks,
+          {
+            id: 9,
+            title: "Not this month",
+            state: "deferred",
+            capabilities: [],
+            blocked: false,
+          },
+        ],
+      });
+      expect(screen.queryByText("Not this month")).not.toBeInTheDocument();
+      expect(
+        screen.getByText(/2 tasks in no column \(Deferred, Closed\)/),
       ).toBeInTheDocument();
     });
 

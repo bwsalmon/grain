@@ -4,7 +4,8 @@ import { test, expect } from "@playwright/test";
 // real browser -- see tasks.spec.js's own doc comment for what this
 // suite is and what `grain demo` has already seeded by the time it runs
 // (one task in every state, "Spike: websocket transport" being the
-// closed one).
+// closed one, "Replace the settings pane with a form library" the
+// deferred one).
 //
 // Two things here are worth a real browser rather than another jsdom
 // test beside the component's own: /board as a route somebody can load
@@ -25,10 +26,15 @@ test("lays the seeded tasks out in the board's columns", async ({ page }) => {
       hasText: "Bump the Go toolchain to 1.24",
     }),
   ).toBeVisible();
-  // Closed tasks are off the default board, and it says so rather than
-  // quietly showing fewer tasks than the deployment has.
+  // Closed and deferred tasks are off the default board, and it says so
+  // rather than quietly showing fewer tasks than the deployment has.
   await expect(page.getByText("Spike: websocket transport")).toHaveCount(0);
-  await expect(page.getByText(/in no column \(Closed\)/)).toBeVisible();
+  await expect(
+    page.getByText("Replace the settings pane with a form library"),
+  ).toHaveCount(0);
+  await expect(
+    page.getByText(/in no column \(Deferred, Closed\)/),
+  ).toBeVisible();
 });
 
 test("loads /board cold", async ({ page }) => {
@@ -41,7 +47,8 @@ test("loads /board cold", async ({ page }) => {
 // The toolbar's own "Columns" button, named exactly. Not a stylistic
 // preference: the board grows a *second* button whose accessible name
 // contains "Columns" the moment it has anything to hide -- the "Edit
-// columns" link in the "N tasks in no column (Closed)" note (TaskBoard.jsx)
+// columns" link in the "N tasks in no column (Deferred, Closed)" note
+// (TaskBoard.jsx)
 // -- and getByRole's name option is a case-insensitive substring match
 // unless it is told otherwise, so a plain { name: "Columns" } matches both
 // and fails Playwright's strict mode. Which of the two the page had when

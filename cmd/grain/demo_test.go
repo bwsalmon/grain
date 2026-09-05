@@ -45,7 +45,7 @@ func TestSeedDemoCoversEveryState(t *testing.T) {
 	want := []model.State{
 		model.StateProposed, model.StateQueued, model.StateRunning,
 		model.StateAwaitingReply, model.StateAwaitingSubmit, model.StateCompleted,
-		model.StateClosed,
+		model.StateDeferred, model.StateClosed,
 	}
 	got := map[model.State]int{}
 	for _, task := range tasks {

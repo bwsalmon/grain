@@ -319,6 +319,23 @@ func seedDemo(ctx context.Context, store *model.Store, cfg ui.Config) error {
 		return fmt.Errorf("seeding a task under repair: %w", err)
 	}
 
+	// A task somebody put aside (model.StateDeferred): approved once, so
+	// that picking it back up would put it straight onto the queue, and
+	// hidden from the list and the board until the reader asks for it --
+	// which is the whole of what the state does and worth seeing here.
+	deferred, err := create(ago(150*time.Hour), ui.CreateTaskRequest{
+		Title:       "Replace the settings pane with a form library",
+		Description: "Worth doing, not worth doing this quarter.",
+		Approved:    true,
+	})
+	if err != nil {
+		return err
+	}
+	deferredAt := ago(140 * time.Hour)
+	if err := store.SetDeferred(ctx, deferred.ID, &deferredAt); err != nil {
+		return fmt.Errorf("seeding a deferred task: %w", err)
+	}
+
 	closed, err := create(ago(200*time.Hour), ui.CreateTaskRequest{
 		Title:       "Spike: websocket transport",
 		Description: "Explored replacing polling with a websocket; decided against it for now.",
