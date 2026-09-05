@@ -77,6 +77,18 @@ func StateOf(task Task, obs *Observation, activeRun bool, failureStreak int) Sta
 	if failureStreak >= MaxConsecutiveFailures {
 		return StateFailed
 	}
+	// Above both of the branches below, and below every branch above:
+	// deferring is a declaration about what should happen next, so it
+	// outranks the other two declaration-shaped states (a deferred task
+	// neither queues nor waits to be approved) and never overrides
+	// grain's own account of what already happened. A task cannot be
+	// deferred into any of those states in the first place --
+	// ui.Client.Defer refuses anything but proposed and queued -- so the
+	// order only decides what a row with both facts on it reads as, and
+	// "it ran" is the more honest answer there.
+	if task.DeferredAt != nil {
+		return StateDeferred
+	}
 	if task.Approval == nil {
 		return StateProposed
 	}
@@ -201,6 +213,14 @@ func Transitions(task Task, obs *Observation, runs []Run, streak *FailureStreak,
 			add(StateFailed, &lastFinishedAt)
 		}
 	}
+	// Only while it is still deferred, the same way askedAt above is only
+	// the question still outstanding: Task.DeferredAt is cleared when
+	// somebody picks the task back up (Store.SetDeferred), so a period a
+	// task has already come back from leaves no timestamp behind to
+	// reconstruct. The one it is in now is worth an entry, because "set
+	// aside three months ago" is the whole of what a reader wants to know
+	// about a task sitting there.
+	add(StateDeferred, task.DeferredAt)
 	if obs != nil {
 		// One moment, one entry, under whichever of the two names StateOf
 		// would give it right now. The record holds no separate "and then

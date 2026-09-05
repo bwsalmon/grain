@@ -103,6 +103,15 @@ func (s *Store) Init(ctx context.Context) error {
 	if err := s.ensureTaskApprovedAtColumn(ctx); err != nil {
 		return fmt.Errorf("migrating task: %w", err)
 	}
+	// After the DDL above rather than before it, like every other
+	// ensure*Column here, even though task_state now names this column:
+	// SQLite resolves a view's own column references when the view is
+	// queried and not when it is created (nothing reads task_state
+	// between here and there), while an ALTER TABLE run first would have
+	// no table to alter on a database being created from scratch.
+	if err := s.ensureTaskDeferredAtColumn(ctx); err != nil {
+		return fmt.Errorf("migrating task: %w", err)
+	}
 	if err := s.ensureTaskRunTranscriptColumn(ctx); err != nil {
 		return fmt.Errorf("migrating task_run: %w", err)
 	}
@@ -374,6 +383,29 @@ func (s *Store) ensureTaskApprovedAtColumn(ctx context.Context) error {
 		return rows.Close()
 	}
 	_, err = s.db.ExecContext(ctx, "ALTER TABLE `task` ADD COLUMN `approved_at` DATETIME NULL")
+	return err
+}
+
+// ensureTaskDeferredAtColumn adds task.deferred_at (Task.DeferredAt's own
+// doc comment has the reasoning) to a database created before this column
+// existed, the same probe-then-ALTER approach ensureTaskApprovedAtColumn
+// above uses for the same reason.
+//
+// NULL is Task.DeferredAt's own "nobody has put this aside" zero value,
+// so every task already in such a database keeps the state it had --
+// which matters more here than for most of these, since task_state reads
+// this column: a default that was not NULL would defer the whole backlog
+// on the first start after an upgrade.
+//
+// No SchemaVersion bump goes with it: an existing database migrates into
+// the new shape here rather than being one this build cannot re-create
+// into (ErrSchemaTooOld's own doc comment on which changes are which).
+func (s *Store) ensureTaskDeferredAtColumn(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, "SELECT `deferred_at` FROM `task` WHERE 1 = 0")
+	if err == nil {
+		return rows.Close()
+	}
+	_, err = s.db.ExecContext(ctx, "ALTER TABLE `task` ADD COLUMN `deferred_at` DATETIME NULL")
 	return err
 }
 
@@ -1454,13 +1486,13 @@ func putTask(ctx context.Context, tx *sql.Tx, t Task) error {
 	if _, err := tx.ExecContext(ctx, `REPLACE INTO `+"`task`"+` (
   `+"`id`, `intent`, `title`, `body`"+`,
   `+"`origin_actor_kind`, `origin_actor_id`, `origin_behalf_kind`, `origin_behalf_id`, `origin_reason`"+`,
-  `+"`approval_actor_kind`, `approval_actor_id`, `approval_behalf_kind`, `approval_behalf_id`, `approved_at`"+`,
+  `+"`approval_actor_kind`, `approval_actor_id`, `approval_behalf_kind`, `approval_behalf_id`, `approved_at`, `deferred_at`"+`,
   `+"`target_owner`, `target_name`, `binding`, `base`, `folder`"+`,
   `+"`auto_merge`, `created_at`, `order_key`, `sandbox_cpus`, `sandbox_memory_mb`, `sandbox_disk_gb`, `interactive`, `agent_framework`, `prompt_extension`, `review_template_id`"+`
-) VALUES (?,?,?,?, ?,?,?,?,?, ?,?,?,?,?, ?,?,?,?,?, ?,?,?,?,?,?,?,?,?,?)`,
+) VALUES (?,?,?,?, ?,?,?,?,?, ?,?,?,?,?,?, ?,?,?,?,?, ?,?,?,?,?,?,?,?,?,?)`,
 		t.ID, string(t.Intent), t.Title, t.Body,
 		string(oActor.Kind), oActor.ID, kindOf(oBehalf), idOf(oBehalf), string(t.Origin.Reason),
-		aActorKind, aActorID, aBehalfKind, aBehalfID, timeOf(t.ApprovedAt),
+		aActorKind, aActorID, aBehalfKind, aBehalfID, timeOf(t.ApprovedAt), timeOf(t.DeferredAt),
 		targetOwner, targetName, string(t.Binding), nullable(t.Base), folderOf(t.Folder),
 		t.AutoMerge, timeOf(t.CreatedAt), t.OrderKey, t.SandboxCPUs, t.SandboxMemoryMB, t.SandboxDiskGB, t.Interactive,
 		t.AgentFramework, t.PromptExtension, t.ReviewTemplateID,
@@ -1736,7 +1768,7 @@ func getTask(ctx context.Context, q querier, id string) (*Task, error) {
 // distance, if it fails at all.
 const taskColumns = "`id`,`intent`,`title`,`body`," +
 	"`origin_actor_kind`,`origin_actor_id`,`origin_behalf_kind`,`origin_behalf_id`,`origin_reason`," +
-	"`approval_actor_kind`,`approval_actor_id`,`approval_behalf_kind`,`approval_behalf_id`,`approved_at`," +
+	"`approval_actor_kind`,`approval_actor_id`,`approval_behalf_kind`,`approval_behalf_id`,`approved_at`,`deferred_at`," +
 	"`target_owner`,`target_name`,`binding`,`base`,`folder`," +
 	"`auto_merge`,`created_at`,`order_key`,`sandbox_cpus`,`sandbox_memory_mb`,`sandbox_disk_gb`,`interactive`," +
 	"`agent_framework`,`prompt_extension`,`review_template_id`"
@@ -1750,10 +1782,10 @@ func scanTask(scan func(...any) error) (Task, error) {
 	var oaKind, oaID, oReason string
 	var obKind, obID, aaKind, aaID, abKind, abID sql.NullString
 	var tOwner, tName, base, folder sql.NullString
-	var createdAt, approvedAt sql.NullTime
+	var createdAt, approvedAt, deferredAt sql.NullTime
 	if err := scan(&t.ID, &intent, &t.Title, &t.Body,
 		&oaKind, &oaID, &obKind, &obID, &oReason,
-		&aaKind, &aaID, &abKind, &abID, &approvedAt,
+		&aaKind, &aaID, &abKind, &abID, &approvedAt, &deferredAt,
 		&tOwner, &tName, &binding, &base, &folder,
 		&t.AutoMerge, &createdAt, &t.OrderKey, &t.SandboxCPUs, &t.SandboxMemoryMB, &t.SandboxDiskGB, &t.Interactive,
 		&t.AgentFramework, &t.PromptExtension, &t.ReviewTemplateID); err != nil {
@@ -1775,6 +1807,7 @@ func scanTask(scan func(...any) error) (Task, error) {
 		}
 	}
 	t.ApprovedAt = timePtr(approvedAt)
+	t.DeferredAt = timePtr(deferredAt)
 	if tOwner.Valid {
 		t.Target = &RepoRef{Owner: tOwner.String, Name: tName.String}
 	}
@@ -2045,6 +2078,28 @@ func (s *Store) WithdrawApproval(ctx context.Context, taskID string) error {
 			"UPDATE `task` SET `approval_actor_kind` = NULL, `approval_actor_id` = NULL, "+
 				"`approval_behalf_kind` = NULL, `approval_behalf_id` = NULL, `approved_at` = NULL "+
 				"WHERE `id` = ?", taskID)
+		return err
+	})
+}
+
+// SetDeferred puts a task aside, or picks it back up: it writes
+// task.deferred_at, which is the whole of StateDeferred (Task.DeferredAt
+// has the reasoning). deferredAt is the caller's own clock for Approve's
+// reason above, and nil is undeferring -- one method rather than two,
+// because the pair is one column with two values and nothing else
+// distinguishes them.
+//
+// Approval is left exactly as it was, in both directions. That is the
+// point of a column of its own: a task deferred while queued comes back
+// queued, and one deferred while proposed comes back proposed, without
+// anybody re-deciding a question they already answered. Deferring a task
+// that is already deferred rewrites the timestamp, and undeferring one
+// that is not writes the NULL that is already there -- neither is worth a
+// read to avoid.
+func (s *Store) SetDeferred(ctx context.Context, taskID string, deferredAt *time.Time) error {
+	return s.write(ctx, "defer task "+taskID, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx,
+			"UPDATE `task` SET `deferred_at` = ? WHERE `id` = ?", timeOf(deferredAt), taskID)
 		return err
 	})
 }

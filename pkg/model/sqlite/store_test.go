@@ -83,6 +83,13 @@ func TestTaskRoundTripsWithEveryCollection(t *testing.T) {
 	want.Tags = []string{"nightly"}
 	want.AutoMerge = true
 	want.Interactive = true
+	// Deferred as well as approved, which is a real combination (a task
+	// put aside while it was queued) and, more to the point, the one that
+	// says PutTask carries the field at all: every edit to a task rewrites
+	// the whole row (Store.UpdateTask), so a deferral this path dropped
+	// would come undone the next time somebody fixed a typo in the title.
+	deferredAt := now.Add(time.Hour)
+	want.DeferredAt = &deferredAt
 
 	if err := store.PutTask(ctx, want); err != nil {
 		t.Fatalf("put: %v", err)
@@ -117,6 +124,9 @@ func TestTaskRoundTripsWithEveryCollection(t *testing.T) {
 	}
 	if got.CreatedAt == nil || !got.CreatedAt.Equal(now) {
 		t.Errorf("created_at did not survive: %+v, want %v", got.CreatedAt, now)
+	}
+	if got.DeferredAt == nil || !got.DeferredAt.Equal(deferredAt) {
+		t.Errorf("deferred_at did not survive: %+v, want %v", got.DeferredAt, deferredAt)
 	}
 }
 
@@ -414,6 +424,83 @@ func TestWithdrawingApprovalReturnsATaskToTheProposalsAndOutOfReady(t *testing.T
 	}
 	if ready, _ := store.Ready(ctx); len(ready) != 1 || ready[0] != "a1b2" {
 		t.Fatalf("ready after re-approval = %v, want [a1b2]", ready)
+	}
+}
+
+// TestDeferringTakesATaskOutOfReadyAndGivesItBackApproved is the store's
+// own half of what model.TestDeferringLeavesApprovalAlone pins in Go: the
+// view has to read a deferred task the same way StateOf does, dispatch
+// has to stop offering it, and picking it back up has to return it to the
+// queue without a second approval -- which is the whole reason
+// task.deferred_at is a column beside the approval rather than a way of
+// clearing it.
+func TestDeferringTakesATaskOutOfReadyAndGivesItBackApproved(t *testing.T) {
+	store, _, ctx := openStore(t)
+	if err := store.PutTask(ctx, task("a1b2", true)); err != nil {
+		t.Fatal(err)
+	}
+	if ready, _ := store.Ready(ctx); len(ready) != 1 || ready[0] != "a1b2" {
+		t.Fatalf("ready before deferring = %v, want [a1b2]", ready)
+	}
+
+	if err := store.SetDeferred(ctx, "a1b2", &now); err != nil {
+		t.Fatalf("deferring: %v", err)
+	}
+	if state, err := store.State(ctx, "a1b2"); err != nil || state != model.StateDeferred {
+		t.Fatalf("state = %q (err %v), want deferred", state, err)
+	}
+	if ready, _ := store.Ready(ctx); len(ready) != 0 {
+		t.Fatalf("ready while deferred = %v, want nothing dispatchable", ready)
+	}
+	got, err := store.GetTask(ctx, "a1b2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.DeferredAt == nil || !got.DeferredAt.Equal(now) {
+		t.Fatalf("deferredAt = %v, want %v", got.DeferredAt, now)
+	}
+	if got.Approval == nil {
+		t.Fatal("deferring must leave the approval alone")
+	}
+
+	if err := store.SetDeferred(ctx, "a1b2", nil); err != nil {
+		t.Fatalf("undeferring: %v", err)
+	}
+	if state, err := store.State(ctx, "a1b2"); err != nil || state != model.StateQueued {
+		t.Fatalf("state after undeferring = %q (err %v), want queued", state, err)
+	}
+	if ready, _ := store.Ready(ctx); len(ready) != 1 || ready[0] != "a1b2" {
+		t.Fatalf("ready after undeferring = %v, want [a1b2] with no second approval", ready)
+	}
+	got, err = store.GetTask(ctx, "a1b2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.DeferredAt != nil {
+		t.Fatalf("deferredAt after undeferring = %v, want nil", got.DeferredAt)
+	}
+}
+
+// TestADeferredProposalComesBackAProposal is the same round trip from the
+// other end of the approval: deferring is orthogonal to it, so a task
+// nobody had approved is a proposal again when it is picked back up
+// rather than something that has quietly acquired an approval.
+func TestADeferredProposalComesBackAProposal(t *testing.T) {
+	store, _, ctx := openStore(t)
+	if err := store.PutTask(ctx, task("a1b2", false)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetDeferred(ctx, "a1b2", &now); err != nil {
+		t.Fatal(err)
+	}
+	if state, err := store.State(ctx, "a1b2"); err != nil || state != model.StateDeferred {
+		t.Fatalf("state = %q (err %v), want deferred", state, err)
+	}
+	if err := store.SetDeferred(ctx, "a1b2", nil); err != nil {
+		t.Fatal(err)
+	}
+	if state, err := store.State(ctx, "a1b2"); err != nil || state != model.StateProposed {
+		t.Fatalf("state after undeferring = %q (err %v), want proposed", state, err)
 	}
 }
 
@@ -3785,6 +3872,90 @@ func TestInitMigratesAnExistingDatabaseMissingTaskReviewTemplate(t *testing.T) {
 	}
 	if reread.ReviewTemplateID != got.ReviewTemplateID {
 		t.Fatalf("ReviewTemplateID = %q, want %q", reread.ReviewTemplateID, got.ReviewTemplateID)
+	}
+}
+
+// task.deferred_at (grain/task-21) is the same again, with one thing
+// none of the others has: task_state names this column, so a database
+// that reached the view before the ALTER did would fail every state read
+// rather than only every task read. Init applies the DDL and then the
+// migrations, which works because SQLite resolves a view's columns when
+// it is queried rather than when it is created -- and this test is what
+// says so, since nothing else here ever reads the view against a
+// just-migrated database.
+func TestInitMigratesAnExistingDatabaseMissingTaskDeferredAt(t *testing.T) {
+	db, err := sqlite.Open(sqlite.DefaultConfig(t.TempDir()))
+	if err != nil {
+		t.Fatalf("opening embedded sqlite: %v", err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+
+	if _, err := db.ExecContext(ctx, `CREATE TABLE `+"`task`"+` (
+  `+"`id`"+`                    TEXT    NOT NULL,
+  `+"`intent`"+`                TEXT    NOT NULL,
+  `+"`title`"+`                 TEXT    NOT NULL,
+  `+"`body`"+`                  TEXT    NOT NULL,
+  `+"`origin_actor_kind`"+`     TEXT    NOT NULL,
+  `+"`origin_actor_id`"+`       TEXT    NOT NULL,
+  `+"`origin_behalf_kind`"+`    TEXT    NULL,
+  `+"`origin_behalf_id`"+`      TEXT    NULL,
+  `+"`origin_reason`"+`         TEXT    NOT NULL,
+  `+"`approval_actor_kind`"+`   TEXT    NULL,
+  `+"`approval_actor_id`"+`     TEXT    NULL,
+  `+"`approval_behalf_kind`"+`  TEXT    NULL,
+  `+"`approval_behalf_id`"+`    TEXT    NULL,
+  `+"`approved_at`"+`           DATETIME NULL,
+  `+"`target_owner`"+`          TEXT    NULL,
+  `+"`target_name`"+`           TEXT    NULL,
+  `+"`binding`"+`               TEXT    NOT NULL,
+  `+"`base`"+`                  TEXT    NULL,
+  `+"`folder`"+`                TEXT    NULL,
+  `+"`auto_merge`"+`            INTEGER  NOT NULL,
+  `+"`created_at`"+`            DATETIME NULL,
+  `+"`order_key`"+`             REAL     NOT NULL DEFAULT 0,
+  `+"`sandbox_cpus`"+`          INTEGER  NOT NULL DEFAULT 0,
+  `+"`sandbox_memory_mb`"+`     INTEGER  NOT NULL DEFAULT 0,
+  `+"`sandbox_disk_gb`"+`       INTEGER  NOT NULL DEFAULT 0,
+  `+"`interactive`"+`           INTEGER  NOT NULL DEFAULT 0,
+  `+"`agent_framework`"+`       TEXT     NOT NULL DEFAULT '',
+  `+"`prompt_extension`"+`      TEXT     NOT NULL DEFAULT '',
+  `+"`review_template_id`"+`    TEXT     NOT NULL DEFAULT '',
+  PRIMARY KEY (`+"`id`"+`)
+)`); err != nil {
+		t.Fatalf("creating the pre-task-21 task table: %v", err)
+	}
+	if _, err := db.ExecContext(ctx,
+		"INSERT INTO `task` (`id`,`intent`,`title`,`body`,`origin_actor_kind`,`origin_actor_id`,"+
+			"`origin_reason`,`binding`,`auto_merge`,`created_at`,`approval_actor_kind`,`approval_actor_id`) "+
+			"VALUES ('a1b2','implement','Rename the endpoint','','human','bwsalmon','direct','directive',0,?,'human','bwsalmon')",
+		now); err != nil {
+		t.Fatalf("seeding a pre-task-21 task row: %v", err)
+	}
+
+	store := model.New(db)
+	if err := store.Init(ctx); err != nil {
+		t.Fatalf("Init against an existing database missing task.deferred_at: %v", err)
+	}
+
+	got, err := store.GetTask(ctx, "a1b2")
+	if err != nil || got == nil {
+		t.Fatalf("get after migrating: (%+v, %v)", got, err)
+	}
+	// NULL is Task.DeferredAt's own "nobody has put this aside": an
+	// upgrade must not quietly defer a backlog that was queued.
+	if got.DeferredAt != nil {
+		t.Fatalf("DeferredAt after migrating = %v, want nil", got.DeferredAt)
+	}
+	if state, err := store.State(ctx, "a1b2"); err != nil || state != model.StateQueued {
+		t.Fatalf("state after migrating = %q (err %v), want queued", state, err)
+	}
+
+	if err := store.SetDeferred(ctx, "a1b2", &now); err != nil {
+		t.Fatalf("deferring after migrating: %v", err)
+	}
+	if state, err := store.State(ctx, "a1b2"); err != nil || state != model.StateDeferred {
+		t.Fatalf("state after deferring = %q (err %v), want deferred", state, err)
 	}
 }
 
