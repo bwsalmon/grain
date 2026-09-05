@@ -256,7 +256,7 @@ func runLive(t *testing.T, dir, name string, args ...string) {
 //     a wait this short cannot see even a fast run through, so a test
 //     given less says so up front instead of failing on the clock later.
 const (
-	liveRunBudget       = 8 * time.Minute
+	liveRunBudget       = 4 * time.Minute
 	minLiveRunWait      = 1 * time.Minute
 	liveFinishWindow    = 1 * time.Minute
 	liveGitOps          = 1 * time.Minute
