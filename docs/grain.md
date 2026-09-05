@@ -973,8 +973,17 @@ path and the agent's location, not of the task model.
 4. **Split the binary.** Today's `cmd/grain` is server and client in one.
    The server half becomes `graind`; the client half keeps `grain` and its
    verbs, so the only operator-visible change is `grain daemon` → `graind`,
-   which errors rather than misfiring. `granule` is new.
-   `mcpserver.go` is deleted rather than moved.
+   which errors rather than misfiring. `mcpserver.go` is deleted rather
+   than moved.
+
+   **`granule` is done, less its agent** — `cmd/granule`, `pkg/granule`
+   and `Dockerfile.granule`. It boots the VMM as its child, waits for the
+   guest, unpacks placements and the client at their guest paths, runs
+   setup, narrates itself as records on stdout, enforces `MaxRuntime`,
+   and writes one ending to the stream and the termination log. `Deps.Agent`
+   is the seam the agent CLI plugs into, and it is nil today, which is
+   what lets the provisioning half be run and tested with no VM. Running
+   the agent, and the six sandbox tools it calls, is the next step.
 5. `grain`'s server verbs and the `graind`-side listener they call: the scope check
    (item 7 above), then the verbs that today are MCP tools reaching the
    daemon. Shares `gitproxy`'s token store and `startGitProxy`'s

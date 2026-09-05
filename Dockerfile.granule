@@ -1,0 +1,108 @@
+# The sandbox image: the container a grain actually runs in.
+#
+# It is the third artifact in docs/grain.md's "Three binaries, one per
+# trust zone" -- graind serves, grain calls, granule is one run -- and
+# this builds the container half of the one that is a run. Its entrypoint
+# is `granule`, invoked with no arguments at all; everything it needs
+# arrives as environment and as the tree mounted at /grain.
+#
+# What it is built *on* is the existing sandbox image
+# (scripts/kontur/build-guest.sh), which carries kontur, cloud-hypervisor
+# and a provisioned guest disk in one artifact -- "the container and the
+# guest are the same thing, with one tag to stamp and one to pull". This
+# does not replace that; it re-bases it.
+#
+# Re-basing is the point, and it is open item 2 in docs/grain.md. kontur's
+# own final stage is `FROM scratch` with ENTRYPOINT kontur, which is
+# right for a container that is only a VMM wrapper and wrong for one that
+# also runs a node-based agent CLI: there is no shell, no libc, no
+# package manager. So the kontur half is copied onto a real base rather
+# than added to, and kontur keeps its scratch image untouched.
+#
+# Build it from the repository root:
+#
+#     docker build -f Dockerfile.granule \
+#       --build-arg SANDBOX_IMAGE=ghcr.io/bwsalmon/grain/guest:dev \
+#       -t grain-sandbox .
+#
+# or `make granule-image`, which passes the same arguments.
+
+ARG GO_VERSION=1.26.2
+ARG GO_IMAGE=golang
+ARG RUNTIME_IMAGE=debian:bookworm-slim
+# The image carrying kontur, cloud-hypervisor and the provisioned guest
+# disk. Defaults to what build-guest.sh produces locally, so a developer
+# who has just run that script can build this with no arguments.
+ARG SANDBOX_IMAGE=grain-guest:dev
+
+FROM ${SANDBOX_IMAGE} AS kontur
+
+FROM ${GO_IMAGE}:${GO_VERSION}-bookworm AS build
+# A go.mod toolchain line newer than the pinned image would otherwise
+# fetch a different Go at build time and undo the pin.
+ENV GOTOOLCHAIN=local
+WORKDIR /src
+COPY . .
+ARG BUILDVCS=auto
+# CGO_ENABLED=0 because this binary is PID 1 in a container whose base
+# may not be the one it was built on, and a libc coupling would make that
+# a runtime failure rather than a build-time one.
+RUN CGO_ENABLED=0 go build -buildvcs=${BUILDVCS} -o /out/granule ./cmd/granule
+
+FROM ${RUNTIME_IMAGE}
+
+LABEL org.opencontainers.image.source="https://github.com/bwsalmon/grain" \
+      org.opencontainers.image.title="grain-sandbox" \
+      org.opencontainers.image.description="The container a grain runs in: granule as PID 1, kontur and a guest disk beside it."
+
+# What a controller reads with `docker inspect` *before* creating a
+# grain, which is why these are labels rather than a `granule version`
+# subcommand: refusing a task whose framework this image lacks, or whose
+# wire version it does not speak, has to happen while there is still no
+# grain (pkg/grain/record.go, LabelWireVersions).
+#
+# FRAMEWORKS is empty by default and set by the build that installs the
+# CLIs, so the label cannot claim a framework the image does not carry.
+ARG WIRE_VERSIONS=v1
+ARG FRAMEWORKS=
+LABEL grain.wire-versions="${WIRE_VERSIONS}" \
+      grain.frameworks="${FRAMEWORKS}"
+
+# bash and ca-certificates are the floor: the setup script granule runs
+# in the guest is composed by the controller and may be a bash script,
+# and every agent CLI makes HTTPS calls. git is here because a grain's
+# setup clones, and curl because the agent CLIs reach for it.
+#
+# No tini, unlike Dockerfile next door. granule *is* PID 1 here and does
+# the job itself: it forwards SIGTERM to the VMM it started (see
+# pkg/granule's konturVMM.Shutdown) and is the reaper for everything the
+# agent forks. A tini in front would take the signal granule needs.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+		bash \
+		ca-certificates \
+		curl \
+		git \
+	&& rm -rf /var/lib/apt/lists/*
+
+# The kontur half, onto the real base. cloud-hypervisor is the VMM
+# itself; kontur is what granule forks for `run`, `ready`, `exec` and
+# `cp`; and /var/lib/kontur/guest is the disk, kernel and initramfs its
+# internal/config finds by default, so a VM boots with nothing supplied
+# from outside the image.
+COPY --from=kontur /usr/local/bin/cloud-hypervisor /usr/local/bin/cloud-hypervisor
+COPY --from=kontur /usr/local/bin/kontur /usr/local/bin/kontur
+COPY --from=kontur /var/lib/kontur/guest/ /var/lib/kontur/guest/
+
+COPY --from=build /out/granule /usr/local/bin/granule
+
+# Where the controller's tree is mounted. Created here so that a granule
+# started with nothing mounted finds an empty directory and provisions a
+# grain with no placements -- which is ordinary -- rather than failing on
+# a missing path.
+RUN mkdir -p /grain/placements
+
+# No arguments, and that is the contract rather than an economy: nothing
+# calls into a grain, so there is no subcommand for anything to call, and
+# adding one later would be adding a way to call in. See docs/grain.md,
+# "The wire".
+ENTRYPOINT ["/usr/local/bin/granule"]
