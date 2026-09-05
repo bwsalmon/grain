@@ -1925,6 +1925,13 @@ func testConfig() model.Config {
 		// column that stored only its first line would still round-trip a
 		// one-line value.
 		PromptExtension: "Run `make lint` before you push.\nSay what you tried.",
+		// The git identity this deployment's agents commit under
+		// (grain/task-14). Both halves are named, since a column that
+		// round-tripped one and dropped the other would still look right
+		// on every commit made under a deployment that had only renamed
+		// the committer.
+		AgentGitName:  "acme bot",
+		AgentGitEmail: "bot@acme.example",
 	}
 }
 
@@ -3434,6 +3441,72 @@ func TestInitMigratesAnExistingDatabaseMissingTimeZone(t *testing.T) {
 	}
 	if got.TimeZone != want.TimeZone {
 		t.Fatalf("TimeZone = %q, want %q", got.TimeZone, want.TimeZone)
+	}
+}
+
+// TestInitMigratesAnExistingDatabaseMissingAgentGitIdentity is the same
+// pattern again, applied to grain_config.agent_git_name/agent_git_email
+// (grain/task-14). Both backfill to the empty string, which is not an
+// unusable identity but grain's own -- so a deployment upgrading across
+// these columns goes on committing under exactly the name it always did,
+// and only starts committing under another once somebody chooses one.
+func TestInitMigratesAnExistingDatabaseMissingAgentGitIdentity(t *testing.T) {
+	db, err := sqlite.Open(sqlite.DefaultConfig(t.TempDir()))
+	if err != nil {
+		t.Fatalf("opening embedded sqlite: %v", err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+
+	if _, err := db.ExecContext(ctx, `CREATE TABLE `+"`grain_config`"+` (
+  `+"`id`"+`                         INTEGER NOT NULL,
+  `+"`poll_interval_ms`"+`           INTEGER NOT NULL,
+  `+"`max_concurrent`"+`             INTEGER NOT NULL,
+  `+"`gemini_model`"+`                TEXT    NOT NULL,
+  `+"`max_agent_turns`"+`             INTEGER NOT NULL,
+  `+"`github_host`"+`                 TEXT    NOT NULL,
+  `+"`github_insecure_http`"+`        INTEGER NOT NULL,
+  `+"`gcp_project`"+`                 TEXT    NOT NULL,
+  `+"`gcp_service_account_email`"+`   TEXT    NOT NULL,
+  `+"`target_repos`"+`                TEXT    NOT NULL,
+  `+"`newest_first`"+`                INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (`+"`id`"+`)
+)`); err != nil {
+		t.Fatalf("creating the pre-task-14 grain_config table: %v", err)
+	}
+	if _, err := db.ExecContext(ctx,
+		"INSERT INTO `grain_config` (`id`,`poll_interval_ms`,`max_concurrent`,`gemini_model`,`max_agent_turns`,"+
+			"`github_host`,`github_insecure_http`,`gcp_project`,`gcp_service_account_email`,`target_repos`,`newest_first`) "+
+			"VALUES (1,30000,2,'gemini-2.5-pro',40,'github.com',0,'grain-prod','agent@grain-prod.iam.gserviceaccount.com','',0)"); err != nil {
+		t.Fatalf("seeding a pre-task-14 config row: %v", err)
+	}
+
+	store := model.New(db)
+	if err := store.Init(ctx); err != nil {
+		t.Fatalf("Init against an existing database missing the agent git identity columns: %v", err)
+	}
+
+	got, err := store.GetConfig(ctx)
+	if err != nil || got == nil {
+		t.Fatalf("get: (%+v, %v)", got, err)
+	}
+	if got.AgentGitName != "" || got.AgentGitEmail != "" {
+		t.Fatalf("agent git identity after migrating = %q/%q, want both empty (grain's own)",
+			got.AgentGitName, got.AgentGitEmail)
+	}
+
+	// And writable afterwards, which is the whole point of the migration.
+	want := testConfig()
+	if err := store.PutConfig(ctx, want); err != nil {
+		t.Fatalf("put after migrating: %v", err)
+	}
+	got, err = store.GetConfig(ctx)
+	if err != nil || got == nil {
+		t.Fatalf("get: (%+v, %v)", got, err)
+	}
+	if got.AgentGitName != want.AgentGitName || got.AgentGitEmail != want.AgentGitEmail {
+		t.Fatalf("agent git identity = %q/%q, want %q/%q",
+			got.AgentGitName, got.AgentGitEmail, want.AgentGitName, want.AgentGitEmail)
 	}
 }
 

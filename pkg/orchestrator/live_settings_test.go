@@ -9,11 +9,13 @@ package orchestrator_test
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/bwsalmon/grain/pkg/agent"
+	"github.com/bwsalmon/grain/pkg/mcp"
 	"github.com/bwsalmon/grain/pkg/model"
 	"github.com/bwsalmon/grain/pkg/orchestrator"
 )
@@ -129,5 +131,104 @@ func TestACycleAdoptsAPromptExtensionChangeFromTheStoreWithoutRestart(t *testing
 		}
 	case <-time.After(30 * time.Second):
 		t.Fatal("no agent ran")
+	}
+}
+
+// identitySandboxes reports the git identity each dispatch configured its
+// sandbox with -- the last step of the setting's journey, where a
+// deployment's chosen committer either reaches the .gitconfig every
+// commit is authored against or does not.
+//
+// Root is forwarded explicitly: an embedded interface value carries no
+// methods outside its own method set, and a sandbox that stopped
+// answering "which directory are you" would be a different dispatch than
+// the one being measured (SandboxPlacer's own doc comment on the same
+// trap).
+type identitySandboxes struct {
+	inner orchestrator.Sandboxes
+	seen  chan mcp.GitIdentity
+}
+
+func (s identitySandboxes) Acquire(ctx context.Context, name string, shape orchestrator.Shape) (orchestrator.Sandbox, error) {
+	sb, err := s.inner.Acquire(ctx, name, shape)
+	if err != nil {
+		return nil, err
+	}
+	return identitySandbox{Sandbox: sb, seen: s.seen}, nil
+}
+
+type identitySandbox struct {
+	orchestrator.Sandbox
+	seen chan mcp.GitIdentity
+}
+
+func (s identitySandbox) ConfigureGitCredentials(ctx context.Context, remoteURL, token string, identity mcp.GitIdentity) error {
+	s.seen <- identity
+	return s.Sandbox.ConfigureGitCredentials(ctx, remoteURL, token, identity)
+}
+
+func (s identitySandbox) Root() (string, error) {
+	rooted, ok := s.Sandbox.(interface{ Root() (string, error) })
+	if !ok {
+		return "", errors.New("not a rooted sandbox")
+	}
+	return rooted.Root()
+}
+
+// The same "no restart" property for the git identity every agent commits
+// under (grain/task-14): an operator who points a deployment's commits at
+// their own bot account is changing the next run, not the next process.
+// Worth its own test for the reason the prompt extension's is -- a Config
+// field read straight from whatever the daemon started with would pass
+// every other test here.
+func TestACycleAdoptsAnAgentGitIdentityChangeFromTheStoreWithoutRestart(t *testing.T) {
+	store, ctx := openStore(t)
+	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
+	filedTask(t, ctx, store, "t1", repo)
+	_, client := newSim(t, "acme", "widgets", "main")
+
+	fw := &promptFramework{prompts: make(chan string, 4)}
+	seen := make(chan mcp.GitIdentity, 4)
+	deps := orchestrator.Deps{
+		Store:     store,
+		Client:    client,
+		Sandboxes: identitySandboxes{inner: orchestrator.NewHostSandboxes(t.TempDir()), seen: seen},
+		Framework: orchestrator.StaticFramework(fw),
+		// Configuring git credentials at all is what a minted token gates
+		// (RunDispatch), so a deployment with no proxy never reaches the
+		// step this test measures.
+		MintSandboxToken: func(string) (string, error) { return "tok", nil },
+		// An absolute base for the same reason
+		// TestRunCycleRevokesASandboxToken's is: runOne points the
+		// sandbox's git at GitRemoteBase+"/placeholder/placeholder.git"
+		// as soon as a token is minted, and a credential-store line needs
+		// a real URL. Nothing here says what identity to use -- that is
+		// the point, and it comes from the row below.
+		Config:     orchestrator.Config{GitRemoteBase: "http://proxy.example"},
+		MaxWorkers: 1,
+	}
+
+	want := mcp.GitIdentity{Name: "acme bot", Email: "bot@acme.example"}
+	if err := store.PutConfig(ctx, model.Config{
+		MaxWorkers: 1, AgentGitName: want.Name, AgentGitEmail: want.Email,
+	}); err != nil {
+		t.Fatalf("PutConfig: %v", err)
+	}
+
+	// The run itself fails, and that is beside the point: proxy.example
+	// does not resolve, so the checkout that follows cannot succeed. The
+	// identity is written before it, which is the step being measured --
+	// the same shape TestRunCycleRevokesASandboxToken uses for the token.
+	if err := orchestrator.RunCycle(ctx, deps, baseTime); err == nil {
+		t.Fatal("expected the unreachable git remote to fail this run")
+	}
+
+	select {
+	case got := <-seen:
+		if got != want {
+			t.Fatalf("the sandbox was given identity %+v, want the stored %+v", got, want)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("no sandbox had its git credentials configured")
 	}
 }

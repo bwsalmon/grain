@@ -305,6 +305,17 @@ export default function SettingsOverlay({ onClose, onSaved, showError }) {
     if (promptExtension !== (settings.promptExtension || ""))
       payload.promptExtension = promptExtension;
 
+    // Empty is sent, like environmentName's own: clearing either box is
+    // how an operator asks for grain's default identity back, not a box
+    // that happens to look unchanged.
+    const agentGitName = form.elements.agentGitName.value.trim();
+    if (agentGitName !== (settings.agentGitName || ""))
+      payload.agentGitName = agentGitName;
+
+    const agentGitEmail = form.elements.agentGitEmail.value.trim();
+    if (agentGitEmail !== (settings.agentGitEmail || ""))
+      payload.agentGitEmail = agentGitEmail;
+
     return save(payload);
   };
 
@@ -784,6 +795,41 @@ export default function SettingsOverlay({ onClose, onSaved, showError }) {
               defaultValue={settings.promptExtension || ""}
               multiline
               minRows={4}
+              autoComplete="off"
+              fullWidth
+              margin="normal"
+            />
+
+            {/* The identity every agent's commits are authored under. On
+                this tab, beside the prompt extension, for the same
+                reason: it is about what the agents do, and it reaches
+                the next run dispatched rather than needing a restart.
+                Both boxes are blank-means-default, which is why the
+                placeholder shows grain's own rather than the field
+                pre-filling with it -- a pre-filled value would be saved
+                back as a deliberate choice the first time anything else
+                on this tab was saved. */}
+            <Typography variant="subtitle2" sx={{ mt: 3 }}>
+              Commit identity
+            </Typography>
+            <TextField
+              name="agentGitName"
+              label="Author name"
+              helperText={`Name on every commit an agent pushes from this deployment. Leave empty for grain's own, ${settings.agentGitNameDefault || "grain agent"}.`}
+              placeholder={settings.agentGitNameDefault || ""}
+              defaultValue={settings.agentGitName || ""}
+              inputProps={{ maxLength: 128 }}
+              autoComplete="off"
+              fullWidth
+              margin="normal"
+            />
+            <TextField
+              name="agentGitEmail"
+              label="Author email"
+              helperText={`Address those commits are authored from -- what GitHub matches them to an account by. Leave empty for grain's own, ${settings.agentGitEmailDefault || "grain-agent@localhost"}.`}
+              placeholder={settings.agentGitEmailDefault || ""}
+              defaultValue={settings.agentGitEmail || ""}
+              inputProps={{ maxLength: 128 }}
               autoComplete="off"
               fullWidth
               margin="normal"
