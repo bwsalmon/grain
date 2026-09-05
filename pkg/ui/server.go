@@ -61,6 +61,8 @@ func (s *Server) routes() {
 	s.route("POST /api/tasks/{id}/depends-on", s.handleSetDependency)
 	s.route("POST /api/tasks/{id}/approve", s.handleApprove)
 	s.route("POST /api/tasks/{id}/withdraw-approval", s.handleWithdrawApproval)
+	s.route("POST /api/tasks/{id}/defer", s.handleDefer)
+	s.route("POST /api/tasks/{id}/undefer", s.handleUndefer)
 	s.route("POST /api/tasks/{id}/submit", s.handleSubmit)
 	s.route("POST /api/tasks/{id}/comments", s.handleAddComment)
 	// PUT, not POST: setting the one secret a parked run asked for is an

@@ -1666,6 +1666,90 @@ func (c *Client) WithdrawApproval(ctx context.Context, id string) error {
 	return c.Store.WithdrawApproval(ctx, id)
 }
 
+// Defer puts a task aside: it stamps model.Task.DeferredAt, which is the
+// whole of model.StateDeferred (that constant's own doc comment for what
+// the state means, and Task.DeferredAt's for why the field is a
+// declaration). A deferred task drops out of task_ready, out of every
+// task list that has not asked to see it, and off the board -- it is the
+// answer to "not this month, but don't lose it" that closing a task,
+// which means "this is over", could never be.
+//
+// Approval is untouched in both directions, which is what makes Undefer
+// the exact inverse of this and nothing more: a task put aside while it
+// was queued comes back queued.
+//
+// Only from the two states a task can be in before it has ever run.
+// Everything else is refused rather than quietly done, for the reasons
+// WithdrawApproval refuses the same ground:
+//
+//   - running -- deferring would not stop the run, and Close is the one
+//     thing that does. "Put this aside" about work happening right now
+//     is a request grain cannot honestly answer with a flag.
+//   - awaiting_reply -- the task is parked on a question with a run
+//     half-finished behind it. Answering it, or closing it, is what
+//     moves it; hiding it would leave the run's own agent waiting on
+//     somebody who has been told the task is put away.
+//   - failed, completed, awaiting_submit, closed -- each is a task whose
+//     work has already happened, and none of them is waiting on a
+//     dispatch that deferring could call off. What such a task needs is
+//     Retry, Submit or Close.
+//
+// Deferring an already-deferred task restamps it rather than being a
+// no-op: the state is unchanged either way, and the timestamp is the one
+// thing a second deferral could sensibly mean.
+func (c *Client) Defer(ctx context.Context, id string) error {
+	state, err := c.taskState(ctx, id)
+	if err != nil {
+		return err
+	}
+	switch state {
+	case model.StateProposed, model.StateQueued, model.StateDeferred:
+	case model.StateRunning:
+		return validationErrorf("task %s is running: close it to cancel the run, or wait for it to finish", id)
+	default:
+		return validationErrorf("task %s is %s: only a task that has not run can be deferred", id, state)
+	}
+	now := c.now()
+	return c.Store.SetDeferred(ctx, id, &now)
+}
+
+// Undefer picks a deferred task back up, clearing what Defer stamped. The
+// task returns to whichever of 'proposed' and 'queued' its own approval
+// implies -- nothing else is stored about where it came from, and nothing
+// needs to be, since the approval never went anywhere.
+//
+// A task that is not deferred is left alone, mirroring Approve's no-op on
+// an already-approved task: this is the undo of a flag, so there is
+// nothing to refuse when the flag is already off.
+func (c *Client) Undefer(ctx context.Context, id string) error {
+	task, err := c.Store.GetTask(ctx, id)
+	if err != nil {
+		return err
+	}
+	if task == nil {
+		return &NotFoundError{ID: id}
+	}
+	if task.DeferredAt == nil {
+		return nil
+	}
+	return c.Store.SetDeferred(ctx, id, nil)
+}
+
+// taskState is "what state is this task in", with a missing task reported
+// as the NotFoundError every other method here answers with rather than
+// as an empty state -- the pair of reads Defer above needs before it
+// decides anything.
+func (c *Client) taskState(ctx context.Context, id string) (model.State, error) {
+	task, err := c.Store.GetTask(ctx, id)
+	if err != nil {
+		return "", err
+	}
+	if task == nil {
+		return "", &NotFoundError{ID: id}
+	}
+	return c.Store.State(ctx, id)
+}
+
 // Submit is the UI's own "submit" button: once a task has a pull request
 // open, this is what puts it on its target repo's merge queue for
 // automatic conflict resolution and merging -- see

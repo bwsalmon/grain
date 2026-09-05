@@ -134,6 +134,38 @@ func TestListSortsByTitle(t *testing.T) {
 	}
 }
 
+// `grain defer` and `grain undefer` over the same wiring: the pair has
+// to reach the daemon, move the task, and leave the approval alone --
+// which is what makes `-state deferred` a listing anybody can ask for,
+// and the undeferred task queued rather than proposed again.
+func TestDeferAndUndeferMoveATaskAndBack(t *testing.T) {
+	server := listTestServer(t)
+	// "1" is the queued task listTestServer files first.
+	if err := runCLI([]string{"-server", server, "defer", "1"}); err != nil {
+		t.Fatalf("grain defer 1: %v", err)
+	}
+	out := captureStdout(t, func() {
+		if err := runCLI([]string{"-server", server, "list", "-state", "deferred"}); err != nil {
+			t.Fatalf("grain list -state deferred: %v", err)
+		}
+	})
+	if !strings.Contains(out, "Widget work") || strings.Contains(out, "Gadget work") {
+		t.Errorf("grain list -state deferred printed %q, want the deferred task and nothing else", out)
+	}
+
+	if err := runCLI([]string{"-server", server, "undefer", "1"}); err != nil {
+		t.Fatalf("grain undefer 1: %v", err)
+	}
+	out = captureStdout(t, func() {
+		if err := runCLI([]string{"-server", server, "list", "-state", "queued"}); err != nil {
+			t.Fatalf("grain list -state queued: %v", err)
+		}
+	})
+	if !strings.Contains(out, "Widget work") {
+		t.Errorf("grain list -state queued printed %q, want the undeferred task back on the queue", out)
+	}
+}
+
 func TestListRejectsAValueNobodyCanActOn(t *testing.T) {
 	server := listTestServer(t)
 	for _, args := range [][]string{

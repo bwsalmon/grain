@@ -413,6 +413,7 @@ var RepoStateOrder = []model.State{
 	model.StateFailed,
 	model.StateAwaitingSubmit,
 	model.StateCompleted,
+	model.StateDeferred,
 	model.StateClosed,
 }
 
