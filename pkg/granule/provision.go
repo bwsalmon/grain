@@ -25,10 +25,31 @@ const (
 	// place the layout is written down.
 	GuestClientPath = "/usr/local/bin/grain"
 	// GuestSetupPath is where the controller's setup script lands.
-	// Under /run rather than a home directory: it is granule's, not the
-	// work's, and a repo that lists its own directory should not find
-	// it.
-	GuestSetupPath = "/run/grain/setup"
+	// Not a home directory: it is granule's, not the work's, and a repo
+	// that lists its own directory should not find it.
+	//
+	// Not /run either, which this was first and which CI caught: /run is
+	// a tmpfs the init system mounts, commonly nosuid,noexec, and a
+	// script there fails to execute with "Permission denied" no matter
+	// what its mode says. /var/lib is the ordinary place for a program's
+	// own state, on the root filesystem with no such option.
+	GuestSetupPath = "/var/lib/grain/setup"
+
+	// ModeGuestSetup is the setup script's mode in the guest.
+	//
+	// 0755 rather than 0700, and the reason is ownership rather than
+	// secrecy: the tar is unpacked by whatever account the guest session
+	// runs as, and the account that later *executes* the script is the
+	// same one only by default (kontur's KONTUR_EXEC_USER is "root"
+	// unless a deployment sets it). A 0700 file owned by one and run by
+	// another is the failure CI found, arriving as a permission error
+	// with nothing to say which of the two was wrong.
+	//
+	// Readable is not a leak here. The rule that a setup script must
+	// never embed a credential predates this (docs/grain.md), the guest
+	// is the sandbox, and the script's whole content is a description of
+	// the checkout the work is about to be handed.
+	ModeGuestSetup = 0o755
 )
 
 // ProvisionSource is one file granule pushes into the guest, and where
@@ -78,7 +99,7 @@ func PlanProvision(root, clientBinary string) (ProvisionPlan, error) {
 	setup := path.Join(root, path.Base(FileSetup))
 	if _, err := os.Stat(setup); err == nil {
 		plan.Files = append(plan.Files, ProvisionSource{
-			GuestPath: GuestSetupPath, LocalPath: setup, Mode: 0o700,
+			GuestPath: GuestSetupPath, LocalPath: setup, Mode: ModeGuestSetup,
 		})
 		plan.Setup = true
 	}
@@ -110,6 +131,17 @@ func PlanProvision(root, clientBinary string) (ProvisionPlan, error) {
 		if !info.Mode().IsRegular() {
 			return ProvisionPlan{}, fmt.Errorf("granule: placement %s is not a regular file (%s)", guest, info.Mode())
 		}
+		// The controller's mode, carried verbatim: it chose it, and for a
+		// credential it chose it deliberately.
+		//
+		// Untested against a non-root guest account, and worth naming
+		// because it is the same shape as the bug CI found in the setup
+		// script: a 0600 placement unpacked as one account and read by
+		// another is unreadable, so a deployment setting
+		// KONTUR_EXEC_USER would find git unable to read its own token.
+		// Widening the mode would be the wrong fix -- these are
+		// credentials -- so the answer is ownership, and settling it
+		// needs a guest that actually runs as somebody else.
 		plan.Files = append(plan.Files, ProvisionSource{
 			GuestPath: guest, LocalPath: local, Mode: info.Mode().Perm(),
 		})

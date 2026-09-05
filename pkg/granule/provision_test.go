@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/bwsalmon/grain/pkg/granule"
@@ -168,5 +169,51 @@ func TestAnEmptyTreeProvisionsNothing(t *testing.T) {
 	}
 	if len(plan.Files) != 0 || plan.Setup {
 		t.Fatalf("plan = %+v, want empty", plan)
+	}
+}
+
+// The setup script has to be *executable by the account that runs it*,
+// which is not necessarily the one the tar was unpacked by: kontur's
+// KONTUR_EXEC_USER defaults to root and a deployment may set it to
+// something else. A mode that only the owner can execute makes that
+// difference a permission error with nothing to say which half was
+// wrong -- which is exactly how CI first found this.
+func TestTheSetupScriptIsExecutableByAnyGuestAccount(t *testing.T) {
+	root := mountedTree(t, map[string]string{"setup": "#!/bin/sh\ntrue\n"},
+		map[string]os.FileMode{"setup": 0o600})
+
+	plan, err := granule.PlanProvision(root, "")
+	if err != nil {
+		t.Fatalf("PlanProvision: %v", err)
+	}
+	blob, err := plan.Tar()
+	if err != nil {
+		t.Fatalf("Tar: %v", err)
+	}
+	modes, _ := entries(t, blob)
+	got, ok := modes[granule.GuestSetupPath]
+	if !ok {
+		t.Fatalf("no setup script at %s", granule.GuestSetupPath)
+	}
+	// Group and other execute, not just owner.
+	if got&0o111 != 0o111 {
+		t.Errorf("setup mode = %o, want every execute bit set", got)
+	}
+	// The mode the controller happened to give the mounted file does not
+	// carry: granule chooses this one, because it is the one that has to
+	// work in the guest.
+	if got != int64(granule.ModeGuestSetup) {
+		t.Errorf("setup mode = %o, want %o", got, granule.ModeGuestSetup)
+	}
+}
+
+// /run is a tmpfs the guest's init system mounts, commonly noexec, so a
+// script there fails to execute whatever its mode says. Nothing granule
+// installs may live under it.
+func TestNothingGranuleInstallsLivesUnderRun(t *testing.T) {
+	for _, p := range []string{granule.GuestSetupPath, granule.GuestClientPath} {
+		if strings.HasPrefix(p, "/run/") {
+			t.Errorf("%s is under /run, which the guest may mount noexec", p)
+		}
 	}
 }

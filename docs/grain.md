@@ -946,6 +946,17 @@ could not boot anything.
    a guest over vsock at every boot; if the operator verbs make it heavy,
    a build tag is the answer, not a second name.
 
+10. **Placement ownership under a non-root guest account is unsettled.**
+    A placement is unpacked into the guest by whatever account the kontur
+    session runs as, and read by that same account only by default —
+    `KONTUR_EXEC_USER` is `root` unless a deployment sets it. A 0600
+    credential unpacked as one and read by another is unreadable, so git
+    would fail to read its own token. Widening the mode is the wrong fix,
+    since these are credentials; the answer is ownership, and settling it
+    needs a guest that actually runs as somebody else. This is the same
+    shape as the setup-script permission failure CI found, which is why
+    it is written down before it bites.
+
 ### Asks of kontur
 
 - **Restore NAT as a selectable mode, beside flat rather than instead of
