@@ -174,8 +174,16 @@ func TestCmdSettingsPrintsTheSandboxShape(t *testing.T) {
 			t.Errorf("`grain settings` printed %q, which does not contain %q", out, want)
 		}
 	}
-	if strings.Contains(out, "grain default") {
-		t.Errorf("`grain settings` printed %q, which still calls a set shape a default", out)
+	// Scoped to the three shape lines rather than the whole output: other
+	// settings are annotated the same way when *they* are unset (the agent
+	// git identity, grain/task-14), and this is a claim about the shape.
+	for _, line := range strings.Split(out, "\n") {
+		if !strings.HasPrefix(line, "sandbox ") {
+			continue
+		}
+		if strings.Contains(line, "grain default") {
+			t.Errorf("`grain settings` printed %q, which still calls a set shape a default", line)
+		}
 	}
 }
 
