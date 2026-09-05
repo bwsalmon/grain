@@ -7,9 +7,12 @@ import {
   groupIntoColumns,
   hiddenStates,
   loadColumns,
+  loadRepoView,
   newColumn,
   normalizeColumns,
+  REPO_VIEW_STORAGE_KEY,
   saveColumns,
+  saveRepoView,
 } from "./board.js";
 
 describe("board columns", () => {
@@ -143,6 +146,48 @@ describe("board columns", () => {
       expect(() =>
         saveColumns([{ id: "a", title: "A", states: ["queued"] }]),
       ).not.toThrow();
+      get.mockRestore();
+      set.mockRestore();
+    });
+  });
+
+  // Which view a repo's own page opens on (RepoPage.jsx), kept beside
+  // the columns and treated the same way.
+  describe("a repo page's view", () => {
+    it("opens on the list with nothing stored", () => {
+      expect(loadRepoView()).toBe("list");
+    });
+
+    it("remembers the board once it has been chosen", () => {
+      saveRepoView("board");
+      expect(loadRepoView()).toBe("board");
+    });
+
+    it("stores nothing for the list, the view it defaults to anyway", () => {
+      saveRepoView("board");
+      saveRepoView("list");
+      expect(localStorage.getItem(REPO_VIEW_STORAGE_KEY)).toBeNull();
+      expect(loadRepoView()).toBe("list");
+    });
+
+    it("reads a stored value it does not recognize as the list", () => {
+      localStorage.setItem(REPO_VIEW_STORAGE_KEY, "kanban");
+      expect(loadRepoView()).toBe("list");
+    });
+
+    it("survives a localStorage that throws", () => {
+      const get = vi
+        .spyOn(Storage.prototype, "getItem")
+        .mockImplementation(() => {
+          throw new Error("denied");
+        });
+      const set = vi
+        .spyOn(Storage.prototype, "setItem")
+        .mockImplementation(() => {
+          throw new Error("denied");
+        });
+      expect(loadRepoView()).toBe("list");
+      expect(() => saveRepoView("board")).not.toThrow();
       get.mockRestore();
       set.mockRestore();
     });

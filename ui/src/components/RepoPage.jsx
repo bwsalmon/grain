@@ -13,9 +13,12 @@ import {
   Select,
   Stack,
   TextField,
+  ToggleButton,
+  ToggleButtonGroup,
   Typography,
 } from "@mui/material";
 import api from "../api.js";
+import { loadRepoView, saveRepoView } from "../board.js";
 import {
   STATE_LABELS,
   STATE_ORDER,
@@ -43,12 +46,25 @@ import {
 // it lands here; a repo's controls have a page with room for them, and
 // each one is a URL somebody can link to.
 //
-// The repo's task list is not rendered here: it is TaskList itself,
-// scoped to this repo and passed in as children by App.jsx, so this page
-// gets the search/sort/select/drag-reorder behavior the flat task list
-// already has instead of a second, poorer list of its own. App keeps the
-// selection and reorder wiring it already owns for that list rather than
-// threading it through here.
+// The repo's tasks are not rendered here: they are TaskList and
+// TaskBoard themselves, scoped to this repo and passed in by App.jsx, so
+// this page gets the search/sort/select/drag-reorder behavior the flat
+// views already have instead of a second, poorer list of its own. App
+// keeps the selection and reorder wiring it already owns for them rather
+// than threading it through here.
+//
+// What this page does own is *which* of the two is showing (grain/
+// task-321): "where is everything right now" gets asked of one repo as
+// readily as of the whole deployment, so the same board the rail opens
+// is offered here over this repo's tasks alone. children is therefore a
+// function of the chosen view rather than a fixed node -- this page
+// knows which view somebody picked, App knows how to build either one,
+// and neither has to learn the other's half.
+//
+// The choice is this browser's, kept beside the board's own column
+// layout (board.js) rather than in the URL or in the deployment's
+// settings, and it is one choice for every repo: somebody who reads
+// repos as boards reads all of them that way.
 export default function RepoPage({
   repo,
   tasks,
@@ -62,6 +78,9 @@ export default function RepoPage({
 }) {
   const [owner, name] = repo.split("/");
   const [branches, setBranches] = useState([]);
+  // Which view this repo's tasks are showing, seeded from whatever this
+  // browser last chose (board.js).
+  const [taskView, setTaskView] = useState(() => loadRepoView());
   // caps is what GET /api/repos/{owner}/{name}/capabilities last said --
   // all three sets: the repo's own, the deployment's, and the union a
   // task filed here would actually start with -- and capsSelection the
@@ -293,6 +312,16 @@ export default function RepoPage({
     } catch (err) {
       showError(err);
     }
+  };
+
+  // chooseTaskView takes the button that was pressed, which is null when
+  // it was the one already chosen -- a ToggleButtonGroup lets you
+  // deselect what is selected, and "neither list nor board" is not a
+  // view this page can show, so that press is ignored.
+  const chooseTaskView = (next) => {
+    if (next === null) return;
+    setTaskView(next);
+    saveRepoView(next);
   };
 
   return (
@@ -612,7 +641,31 @@ export default function RepoPage({
           )}
         </Box>
       </div>
-      {children}
+      {/* The switch sits between the repo and its tasks because that is
+          what it is about: everything above is this repo, everything
+          below is this repo's tasks, in whichever shape. */}
+      <div className="repo-tasks-switch">
+        <ToggleButtonGroup
+          size="small"
+          exclusive
+          value={taskView}
+          onChange={(_, next) => chooseTaskView(next)}
+          aria-label="Show this repo's tasks as"
+        >
+          <ToggleButton value="list">List</ToggleButton>
+          <ToggleButton value="board">Board</ToggleButton>
+        </ToggleButtonGroup>
+      </div>
+      {/* The board is wrapped and the list is not: the board hands its
+          own scrolling to its columns and so needs a height to divide,
+          which on this page -- under a header block that can be taller
+          than the window -- it has to be given (.repo-board,
+          style.css). The list has always sized itself here. */}
+      {taskView === "board" ? (
+        <div className="repo-board">{children("board")}</div>
+      ) : (
+        children("list")
+      )}
     </div>
   );
 }

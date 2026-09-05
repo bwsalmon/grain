@@ -649,6 +649,43 @@ export default function App() {
     </>
   );
 
+  // taskBoardPane is the same pair for the board (TaskBoard.jsx): the
+  // columns, and the same batch-actions bar under them, so a card's
+  // checkbox feeds the selection the list's rows do. Rendered both as
+  // the board view itself and, scoped to one repo, as the body of that
+  // repo's page when its switch is on "Board" (grain/task-321) -- the
+  // same board either way, columns included, since the columns are one
+  // layout for every board in this browser (board.js).
+  //
+  // It takes no state filter for the reason the board view never had
+  // one: the columns *are* the board's answer to which states it is
+  // about, and a board pre-filtered to one state would be a single
+  // column. The narrowing it does take is the one every task view
+  // shares (see taskListPane), so a search survives the switch between
+  // a repo's list and a repo's board as it does the switch between
+  // pages.
+  const taskBoardPane = (list) => (
+    <>
+      <TaskBoard
+        tasks={list}
+        config={config}
+        narrowing={narrowing}
+        onNarrow={narrow}
+        onOpenTask={openTask}
+        selected={selected}
+        onToggleSelect={toggleSelect}
+        onSelectAll={setSelection}
+        onReorder={reorderTasks}
+      />
+      <BatchActionsBar
+        count={selected.size}
+        config={config}
+        onRun={runBatch}
+        onClear={clearSelection}
+      />
+    </>
+  );
+
   return (
     <div className="app-shell">
       {config === null ? (
@@ -694,10 +731,17 @@ export default function App() {
               onRefreshConfig={refreshConfig}
               showError={showError}
             >
-              {taskListPane(
-                tasks.filter((t) => t.repo === openRepo),
-                "all",
-              )}
+              {/* Both views over the same scoped tasks, and the page
+                  picks -- see RepoPage's own doc comment for why the
+                  choice lives there and the panes here. */}
+              {(repoView) =>
+                repoView === "board"
+                  ? taskBoardPane(tasks.filter((t) => t.repo === openRepo))
+                  : taskListPane(
+                      tasks.filter((t) => t.repo === openRepo),
+                      "all",
+                    )
+              }
             </RepoPage>
           ) : view === "repos" ? (
             <RepoList
@@ -744,33 +788,9 @@ export default function App() {
               showError={showError}
             />
           ) : view === "board" ? (
-            /* The board is the same tasks and the same batch-actions
-               bar as the list below, laid out in columns (TaskBoard.jsx):
-               a card's checkbox feeds the same selection, so "select
-               everything queued and run it" works from either view.
-               It is handed every task rather than the sidebar's current
-               state filter -- the board's columns *are* its answer to
-               which states it is about, and a board pre-filtered to one
-               state would be a single column. */
-            <div className="main-column">
-              <TaskBoard
-                tasks={tasks}
-                config={config}
-                narrowing={narrowing}
-                onNarrow={narrow}
-                onOpenTask={openTask}
-                selected={selected}
-                onToggleSelect={toggleSelect}
-                onSelectAll={setSelection}
-                onReorder={reorderTasks}
-              />
-              <BatchActionsBar
-                count={selected.size}
-                config={config}
-                onRun={runBatch}
-                onClear={clearSelection}
-              />
-            </div>
+            /* Every task, rather than the sidebar's current state
+               filter: see taskBoardPane above. */
+            <div className="main-column">{taskBoardPane(tasks)}</div>
           ) : (
             <div className="main-column">
               {taskListPane(tasks, stateFilter)}

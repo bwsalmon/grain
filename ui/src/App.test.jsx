@@ -280,6 +280,9 @@ describe("App", () => {
   afterEach(() => {
     api.mockReset();
     vi.useRealTimers();
+    // A repo page's List/Board switch is stored per browser (board.js),
+    // so one test's choice would otherwise be the next test's view.
+    localStorage.clear();
     // The address bar outlives a test's own render -- and now carries a
     // list's narrowing (grain/task-317) -- so put it back to "/" rather
     // than let one test's URL seed the next test's App.
@@ -632,6 +635,38 @@ describe("App", () => {
 
     expect(await screen.findByText("acme/widgets")).toBeInTheDocument();
     expect(window.location.pathname).toBe("/repos");
+  });
+
+  // grain/task-321: the same board, over one repo's tasks, from that
+  // repo's own page -- the switch is the page's, the tasks are the ones
+  // its list would have shown.
+  it("lays one repo's tasks out as a board from that repo's page", async () => {
+    setupApi();
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByText("Fix bug");
+
+    await user.click(screen.getByRole("button", { name: /^Repos/ }));
+    await user.click(await screen.findByText("acme/other"));
+    await screen.findByRole("heading", { name: "acme/other" });
+
+    // The page's own switch, not the rail's Board entry.
+    await user.click(
+      within(
+        screen.getByRole("group", { name: /Show this repo's tasks/ }),
+      ).getByRole("button", { name: "Board" }),
+    );
+
+    expect(
+      screen.getByText("Add feature").closest(".board-column"),
+    ).toHaveTextContent("Proposed");
+    expect(screen.queryByText("Fix bug")).not.toBeInTheDocument();
+    // Still the repo's page: the board is how it is showing its tasks,
+    // not somewhere else to be.
+    expect(
+      screen.getByRole("heading", { name: "acme/other" }),
+    ).toBeInTheDocument();
+    expect(window.location.pathname).toBe("/repos/acme/other");
   });
 
   it("files a new task against the repo whose page is open", async () => {
