@@ -1055,10 +1055,13 @@ func (p *printer) settings(s ui.Settings) {
 	// for exactly this. Disk has one like the other two now -- every
 	// dimension of a sandbox is a size grain names and passes, rather
 	// than disk being left to however large a deployment's guest image
-	// happens to be.
-	fmt.Printf("sandbox cpus:   %s\n", sandboxShapeValue(s.SandboxCPUs, s.SandboxCPUsDefault))
-	fmt.Printf("sandbox memory mb: %s\n", sandboxShapeValue(s.SandboxMemoryMB, s.SandboxMemoryMBDefault))
-	fmt.Printf("sandbox disk gb: %s\n", sandboxShapeValue(s.SandboxDiskGB, s.SandboxDiskGBDefault))
+	// happens to be. And on a deployment whose sandbox backend has no
+	// shape to apply at all, each line says so where the number is
+	// (SandboxShapeIgnored) -- these three settings are stored on every
+	// deployment but only kontur-managed sandboxes are built to them.
+	fmt.Printf("sandbox cpus:   %s\n", sandboxShapeValue(s.SandboxCPUs, s.SandboxCPUsDefault, s.SandboxShapeIgnored))
+	fmt.Printf("sandbox memory mb: %s\n", sandboxShapeValue(s.SandboxMemoryMB, s.SandboxMemoryMBDefault, s.SandboxShapeIgnored))
+	fmt.Printf("sandbox disk gb: %s\n", sandboxShapeValue(s.SandboxDiskGB, s.SandboxDiskGBDefault, s.SandboxShapeIgnored))
 	if len(s.TargetRepos) > 0 {
 		fmt.Printf("target repos:   %s\n", strings.Join(s.TargetRepos, ", "))
 	} else {
@@ -1138,14 +1141,28 @@ func promptExtensionBlock(label, text string) string {
 // that the setting is unset, which is all it can honestly say; nothing
 // this binary talks to reports one now that disk has a default too, but
 // an older daemon on the other end of the API still can.
-func sandboxShapeValue(stored, grainDefault int) string {
-	if stored != 0 {
-		return strconv.Itoa(stored)
+//
+// ignored (ui.Settings.SandboxShapeIgnored) is the deployment saying
+// this number sizes nothing here, because its sandboxes are directories
+// on the daemon's own machine. Said on each of the three lines rather
+// than once underneath them: whoever misreads this reads one line and
+// stops, and "sandbox cpus: 2" on its own is exactly the sentence that
+// misleads (grain/task-9). The number is still printed, and still
+// stored -- it is what this deployment would build VMs at if it were
+// switched to -kontur-sandboxes -- so what is annotated is that it is
+// not in effect, not that it is unset.
+func sandboxShapeValue(stored, grainDefault int, ignored bool) string {
+	value := "unset"
+	switch {
+	case stored != 0:
+		value = strconv.Itoa(stored)
+	case grainDefault != 0:
+		value = fmt.Sprintf("%d (grain default, unset)", grainDefault)
 	}
-	if grainDefault != 0 {
-		return fmt.Sprintf("%d (grain default, unset)", grainDefault)
+	if !ignored {
+		return value
 	}
-	return "unset"
+	return value + " -- not in effect: host-directory sandboxes have no shape"
 }
 
 // checkCapabilityCredential is `grain settings -check-capability <id>`:

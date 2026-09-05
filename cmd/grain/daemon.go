@@ -1761,6 +1761,22 @@ type defaultShaper interface {
 	SetDefaultShape(orchestrator.Shape)
 }
 
+// sandboxShapeIgnored reports whether this deployment's sandbox backend
+// drops the deployment-wide sandbox shape on the floor -- true for the
+// backend that is not a defaultShaper, which is exactly the test
+// refresh above applies before handing a changed shape on.
+//
+// Asked of the backend rather than of cfg.konturSandboxes so the answer
+// cannot drift from the code that actually applies the setting: whatever
+// refresh would skip is what the Settings pane annotates as not in
+// effect (ui.Config.SandboxShapeIgnored). A backend that grew a
+// SetDefaultShape tomorrow would stop being annotated on the same
+// commit that made the annotation false.
+func sandboxShapeIgnored(sandboxes orchestrator.Sandboxes) bool {
+	_, shaped := sandboxes.(defaultShaper)
+	return !shaped
+}
+
 // liveConfig is the store-backed configuration this process actually has
 // in effect: what loadConfig read at startup, plus every later change to
 // it that a *running* daemon can apply on its own.
@@ -2622,6 +2638,13 @@ func startUIServer(cfg config, store *model.Store, transcriptDir string, sandbox
 		// does not import pkg/orchestrator (see ui/sandbox_health.go's own
 		// doc comment). The sandbox health pane (bwsalmon/agents#536).
 		Sandboxes: sandboxHealthAdapter{sandboxes},
+		// Whether the three sandbox-shape settings on that same pane
+		// actually shape anything here, which is a property of the
+		// backend built above rather than of the row they are stored in
+		// (sandboxShapeIgnored's own doc comment). Under the default
+		// host-directory sandboxing they shape nothing at all, and
+		// saying so beside them is the whole of grain/task-9.
+		SandboxShapeIgnored: sandboxShapeIgnored(sandboxes),
 		// hostStats reads this same process's own machine, not any one
 		// sandbox -- see pkg/sysstat's own doc comment on why that's a
 		// separate reading from Sandboxes above. It takes a list of
