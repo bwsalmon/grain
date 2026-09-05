@@ -6991,7 +6991,7 @@ the questions that reach this pane are asked at.
 
 ## A root shell, from the UI
 
-Every debugging pane above answers one fixed question. Logs says what the
+Every panel of the System pane answers one fixed question. Logs says what the
 daemon, the proxy, config-sync and the kernel wrote down; Top says which
 process is spending the machine; Sandbox health says how loaded it is and
 what each slot is holding. The failure that reaches an operator anyway is
@@ -7000,7 +7000,7 @@ panel counts, a unit that will not come back, a container the daemon
 cannot see past — and the answer to it has always been the same: get a
 shell on the host and look.
 
-That is the pane: Debug → Root shell, one command at a time, run as root
+That is the pane: System → Root shell, one command at a time, run as root
 on the machine the daemon runs on, with its output read back in the
 browser (`POST /api/host/shell`, `pkg/rootshell`, `ui.Config.RootShell`).
 A scrollback of everything run since the pane was opened, because the

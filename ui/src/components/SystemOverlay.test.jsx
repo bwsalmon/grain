@@ -51,7 +51,7 @@ describe("SystemOverlay", () => {
     api.mockResolvedValueOnce(noLogs);
     const user = userEvent.setup();
     render(
-      <DebugOverlay
+      <SystemOverlay
         config={{ rebootEnabled: true, rootShellEnabled: true }}
         onClose={() => {}}
         showError={() => {}}
@@ -71,7 +71,7 @@ describe("SystemOverlay", () => {
     api.mockResolvedValueOnce(noLogs);
     const user = userEvent.setup();
     render(
-      <DebugOverlay
+      <SystemOverlay
         config={{ rebootEnabled: true, rootShellEnabled: false }}
         onClose={() => {}}
         showError={() => {}}

@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Alert, Box, Button, TextField, Typography } from "@mui/material";
 import api from "../api.js";
 
-// RootShellPage is the Root shell tab of DebugOverlay.jsx: one command,
+// RootShellPage is the Root shell tab of SystemOverlay.jsx: one command,
 // run as root on the machine the daemon itself runs on, over POST
 // /api/host/shell (grain/task-13).
 //

@@ -1,6 +1,6 @@
 package ui_test
 
-// POST /api/host/shell: the Debug overlay's Root shell tab
+// POST /api/host/shell: the System overlay's Root shell tab
 // (grain/task-13) -- one command, run as root on the machine the daemon
 // runs on, and everything it printed. Same nil-means-unavailable
 // convention host_test.go exercises for the Top tab beside it, with the

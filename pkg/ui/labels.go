@@ -361,7 +361,7 @@ type Config struct {
 	// RootShell, when set, is what POST /api/host/shell calls to run one
 	// command as root on that same machine -- cmd/grain/daemon.go's
 	// rootShell over pkg/rootshell, in a real deployment. It is the
-	// Debug overlay's last-resort tab: Logs, Top and Sandbox health each
+	// System overlay's last-resort tab: Logs, Top and Sandbox health each
 	// answer one fixed question, and this answers the ones left over,
 	// for an operator whose only way into the deployment may be this UI
 	// (grain/task-13).

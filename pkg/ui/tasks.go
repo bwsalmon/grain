@@ -483,7 +483,7 @@ type configResponse struct {
 	RebootEnabled bool `json:"rebootEnabled"`
 	// RootShellEnabled is the same flag for Config.RootShell: whether
 	// this deployment has a root shell responder behind POST
-	// /api/host/shell at all, so the Debug overlay's Root shell tab can
+	// /api/host/shell at all, so the System overlay's Root shell tab can
 	// say "not available here" instead of offering a prompt that could
 	// only ever 404 (grain/task-13).
 	RootShellEnabled bool `json:"rootShellEnabled"`

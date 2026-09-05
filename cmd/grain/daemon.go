@@ -278,7 +278,7 @@ func daemon(args []string) {
 	// Where the UI's root shell writes its requests (pkg/rootshell): the
 	// same control directory the reboot request above is touched in,
 	// watched on the host by grain-shell.path. Empty -- the default --
-	// means this deployment has no root shell at all and the Debug
+	// means this deployment has no root shell at all and the System
 	// overlay's tab says so, which is the right answer for anything
 	// standing this daemon up without setup.sh's host-side half.
 	rootShellControlDir := fs.String("root-shell-control-dir", "",
@@ -2841,13 +2841,13 @@ func rebootHost(argv []string) func(context.Context) error {
 }
 
 // rootShell builds startUIServer's ui.Config.RootShell out of
-// -root-shell-control-dir: the Debug overlay's Root shell tab, over the
+// -root-shell-control-dir: the System overlay's Root shell tab, over the
 // file exchange pkg/rootshell describes. An empty directory returns nil,
 // which is what makes the tab report itself unavailable rather than
 // offering a prompt with nothing behind it.
 //
 // Every command is logged before it runs, at the daemon's own log, which
-// is the Debug overlay's own "daemon" log source. That is deliberate and
+// is the System overlay's own "daemon" log source. That is deliberate and
 // it is the only record there is: the exchange leaves no file behind
 // (pkg/rootshell.Runner.clear) and the host-side responder is a systemd
 // oneshot whose journal names the unit, not the command. A root shell

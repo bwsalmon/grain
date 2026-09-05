@@ -52,11 +52,11 @@ type rootShellResponse struct {
 	ExitCode int    `json:"exitCode"`
 }
 
-// handleRootShell is the Debug overlay's Root shell tab: one command,
+// handleRootShell is the System overlay's Root shell tab: one command,
 // run as root on the machine this daemon runs on, and everything it
 // printed.
 //
-// It is the last resort of the Debug overlay's panes, and shaped like
+// It is the last resort of the System overlay's panes, and shaped like
 // one. Logs, Top and Sandbox health each answer a fixed question well;
 // this answers whatever question is left when none of them covered it,
 // on a deployment whose operator may have no other way in at all -- no

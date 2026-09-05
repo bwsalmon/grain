@@ -1,6 +1,6 @@
 // Package rootshell runs one shell command as root on the machine the
 // grain daemon runs on -- the UI's last-resort debug hatch, behind the
-// Debug overlay's Root shell tab (pkg/ui.Config.RootShell).
+// System overlay's Root shell tab (pkg/ui.Config.RootShell).
 //
 // It does not run anything itself. The daemon is a container process
 // running unprivileged as $GRAIN_USER, with no sudo in the image and no

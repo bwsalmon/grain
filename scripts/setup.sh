@@ -435,7 +435,7 @@ GRAIN_ENABLE_UI_UPGRADE="${GRAIN_ENABLE_UI_UPGRADE:-1}"
 # suspend policy back the way this script found it.
 GRAIN_DISABLE_SUSPEND="${GRAIN_DISABLE_SUSPEND:-1}"
 
-# The UI's root shell (pkg/rootshell, the Debug overlay's Root shell tab):
+# The UI's root shell (pkg/rootshell, the System overlay's Root shell tab):
 # a third control unit that runs whatever command the daemon writes to
 # $CONTROL_DIR/shell, as root, and writes back what it printed.
 #
@@ -690,7 +690,7 @@ Recognized variables:
                              race or drift out of sync with each other
 
   GRAIN_ROOT_SHELL          1 (default) to install the host-side responder
-                             behind the UI's Debug -> Root shell tab: one
+                             behind the UI's System -> Root shell tab: one
                              command, run as root on this machine, for the
                              failure the Logs/Top/Sandbox health panes
                              cannot explain and the machine SSH will no
@@ -1313,7 +1313,7 @@ write_root_shell_units() {
   cat > "$ROOT_SHELL_RESPONDER" <<'RESPONDER'
 #!/usr/bin/env bash
 # Written by scripts/setup.sh (write_root_shell_units). Runs one command
-# as root, on behalf of the grain daemon's Debug -> Root shell tab, and
+# as root, on behalf of the grain daemon's System -> Root shell tab, and
 # writes back what it printed. Invoked by grain-shell.service with the
 # control directory as its only argument; see pkg/rootshell for the other
 # end of this exchange and for the protocol both ends implement.
@@ -1359,7 +1359,7 @@ RESPONDER
 
   cat > /etc/systemd/system/grain-shell.path <<UNIT
 [Unit]
-Description=Watch for grain's root shell requests (the UI's Debug pane)
+Description=Watch for grain's root shell requests (the UI's System pane)
 
 [Path]
 PathModified=${CONTROL_DIR}/shell
@@ -2411,7 +2411,7 @@ write_systemd_units() {
   # the one thing that cannot work from inside a container.
   daemon_args+=(-reboot-cmd touch -reboot-cmd "$CONTROL_DIR/reboot")
 
-  # The Debug pane's Root shell tab, through that same channel: the
+  # The System pane's Root shell tab, through that same channel: the
   # daemon writes the command to $CONTROL_DIR/shell and grain-shell.path
   # (write_root_shell_units) turns it into a root shell out here. Passed
   # only when the responder was actually installed -- the daemon's own

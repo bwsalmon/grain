@@ -6,7 +6,7 @@ import api from "../api.js";
 
 vi.mock("../api.js", () => ({ default: vi.fn() }));
 
-// grain/task-13: the Debug pane's last resort -- one command as root on
+// grain/task-13: the System pane's last resort -- one command as root on
 // the machine the daemon runs on, for the failure none of the panels
 // beside it could explain.
 describe("RootShellPage", () => {
