@@ -232,7 +232,12 @@ It also fixes something the live renderer could not do: every mark is
 a task row that started running ten seconds after the sidebar would keep
 its own phase; `GrainMark.jsx` pins every one to the document timeline's
 origin instead, so the sidebar and every running row scatter and settle
-together.
+together. It re-pins on every `animationstart` rather than only at
+mount, because an element that is detached and reattached starts its
+animation over from the moment of the move — and moving a row's DOM node
+is what React does whenever a keyed list reorders, which a task list
+does every time a task changes state under the "State" sort or a filter
+drops the rows above it.
 
 The hero keeps the live renderer. Its frames would be 640px square —
 80MB of pixels in a strip, past what a browser will decode — and it is

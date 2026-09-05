@@ -84,10 +84,37 @@ export default function GrainMark({
   // seconds after the sidebar -- would each keep their own phase.
   // Pinning every one to the document timeline's origin puts them in
   // lockstep, and keeps them there as rows come and go.
+  //
+  // Pinning once at mount is not enough, which is what used to let a
+  // task list drift apart (grain/task-339). An element that is detached
+  // and reattached loses its running animation and starts a new one from
+  // the moment of the move, and moving a row is exactly what React does
+  // to a keyed <li> when the list it is in reorders -- a task changing
+  // state under the "State" sort, a filter dropping the rows above it,
+  // a drag landing. The mark never re-rendered in a way that would
+  // re-run a mount-time effect, so that row kept whatever phase the move
+  // left it on while every other row kept the original one.
+  //
+  // The browser tells us each time an animation begins, restarts
+  // included, so the lock rides on that instead: whenever this element's
+  // animation starts, it goes back on the shared timeline. It also
+  // covers a mark whose animation had not been created yet when the
+  // effect first ran -- one mounted inside a display:none subtree, say,
+  // where there is no animation to pin until the subtree is shown.
   useEffect(() => {
-    if (!spinning || !plays) return;
-    for (const animation of sheetRef.current?.getAnimations?.() ?? [])
-      animation.startTime = 0;
+    if (!spinning || !plays) return undefined;
+    const el = sheetRef.current;
+    if (!el) return undefined;
+    // Setting a start time the animation already has is a no-op, but
+    // checking first keeps this from writing to the animation on every
+    // event for no reason.
+    const pin = () => {
+      for (const animation of el.getAnimations?.() ?? [])
+        if (animation.startTime !== 0) animation.startTime = 0;
+    };
+    pin();
+    el.addEventListener("animationstart", pin);
+    return () => el.removeEventListener("animationstart", pin);
   }, [spinning, plays, size]);
 
   useEffect(() => {
