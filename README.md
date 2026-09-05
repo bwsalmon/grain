@@ -3545,6 +3545,18 @@ contents replace this installation's database, or an empty repository
 grain seeds from what it has. The last two are one operation, because
 adopting cannot tell them apart up front and does not need to.
 
+Local only is a real answer and the one a fresh install already has, but
+it is also the only one with no copy of anything anywhere else, so the
+pane warns rather than merely reporting it: every commit in the
+repository -- tasks, settings, capabilities, repo configuration -- is on
+one disk, and so is the secrets key beside it that nothing can
+regenerate. The warning names both moves out, because they cover
+different halves: adopt a remote, and keep a copy of the key file off
+this host (`GRAIN_SECRETS_KEY` on a later deploy, or the import field in
+the pane). `grain state status` has said this at a terminal for as long
+as it has existed, and an operator who runs a deployment through the UI
+never sees a terminal.
+
 An empty repository is worth formatting before it is adopted:
 `grain state format`, in a clone of it, writes the README, the
 `.gitignore` and the CI step that validates every later pull request
