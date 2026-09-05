@@ -221,11 +221,15 @@ type Config struct {
 	// pane, and the right default for `grain demo`'s throwaway UI, which
 	// has no real machine behind it worth rebooting.
 	Reboot func(ctx context.Context) error
-	// Credentials is the same GitHub credential ladder (secrets/github/
-	// credentials.json, loaded once at startup, not hot-reloaded) the
-	// git proxy resolves pushes against -- given here so Settings can
+	// Credentials is the same GitHub credential ladder (secrets/github/)
+	// the git proxy resolves pushes against -- given here so Settings can
 	// flag a targetRepos entry the ladder has no owner/repo, owner/*, or
-	// * pattern covering. nil (`grain demo`'s throwaway UI, or any UI
+	// * pattern covering, and so the GitHub pane can write both halves of
+	// it: a credential's material (SetToken) and the credentials.json
+	// entry that makes a repo resolve to it (SetPattern, grain/task-4).
+	// A pattern written here reaches the proxy without a restart -- that
+	// file is re-read; a *token* still waits for one, since the
+	// capability set this process offers is fixed at startup. nil (`grain demo`'s throwaway UI, or any UI
 	// not colocated with the proxy that built it) means Settings reports
 	// no such gaps rather than erroring, the same nil-means-unavailable
 	// contract Secrets and Reboot already give. Without this, the only
