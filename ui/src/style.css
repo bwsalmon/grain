@@ -807,6 +807,89 @@ main.board {
   min-height: 32rem;
 }
 
+/* ---------- Inbox (InboxPage.jsx, grain/task-20): the same task rows
+   the list draws, grouped by what each one is waiting on a person for,
+   each with that answer beside it. ---------- */
+
+/* The group's own heading, in the same left margin as a row's badge so
+   the two read as one column. Quieter than .content-header's page title
+   -- there are up to five of these on a page and only one of that. */
+.inbox-group-header {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  padding: 1.2rem 1.75rem 0.5rem;
+}
+.inbox-group-header h3 {
+  margin: 0;
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+.inbox-group-header .count {
+  color: var(--text-tertiary);
+  font-size: 0.8rem;
+  font-variant-numeric: tabular-nums;
+}
+/* The sentence saying what this group's wait actually is. On its own
+   line (flex-basis: 100%) rather than after the count, so a long one
+   does not push the number off the end of a narrow window. */
+.inbox-group-hint {
+  flex-basis: 100%;
+  margin: 0;
+  color: var(--text-tertiary);
+  font-size: 0.8rem;
+}
+
+/* The border moves from .task-row to the <li>, because a row's own reply
+   box (.inbox-responder) belongs inside the same bordered block as the
+   row it answers rather than under a rule of its own. */
+.inbox-item {
+  border-bottom: 1px solid var(--border);
+}
+.inbox-line {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+.inbox-line .task-row {
+  flex: 1;
+  min-width: 0;
+  border-bottom: none;
+}
+.inbox-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex: none;
+  padding-right: 1.75rem;
+}
+/* Indented to the row's title rather than to the page edge: the box is
+   about the one task above it, and the row's badge and number column is
+   what says which. */
+.inbox-responder {
+  padding: 0 1.75rem 0.9rem 3.6rem;
+}
+.inbox-responder-row {
+  display: flex;
+  gap: 0.6rem;
+  align-items: flex-start;
+  margin-top: 0.6rem;
+}
+/* The question being answered. Capped rather than left to run: an agent
+   that asks for a decision often lays out the whole of its reasoning
+   first, and a page of parked tasks is unreadable if each one can be a
+   screen tall. */
+.inbox-question {
+  max-height: 14rem;
+  overflow-y: auto;
+  color: var(--text-secondary);
+  font-size: 0.9rem;
+  padding: 0.6rem 0.8rem;
+  background: var(--canvas);
+  border-radius: 8px;
+}
+
 .empty {
   color: var(--text-tertiary);
   padding: 1.5rem 1.75rem;
@@ -1674,6 +1757,8 @@ fieldset legend {
 :root[data-phone="true"] .repo-list-row,
 :root[data-phone="true"] .repo-page-header,
 :root[data-phone="true"] .repo-tasks-switch,
+:root[data-phone="true"] .inbox-group-header,
+:root[data-phone="true"] .inbox-responder,
 :root[data-phone="true"] .schedule-row,
 :root[data-phone="true"] .template-row,
 :root[data-phone="true"] .empty,
@@ -1719,6 +1804,20 @@ fieldset legend {
   flex-wrap: wrap;
   row-gap: 0.35rem;
 }
+/* An inbox row is a task row plus its own answers, side by side, which
+   is two things competing for a width that barely holds one. So the
+   answers take a row of their own under the task, right-aligned so the
+   primary one (Approve, Submit, Retry) sits under the thumb rather than
+   across the screen from it. */
+:root[data-phone="true"] .inbox-line {
+  flex-wrap: wrap;
+}
+:root[data-phone="true"] .inbox-actions {
+  flex: 1 1 100%;
+  justify-content: flex-end;
+  padding: 0 1rem 0.75rem;
+}
+
 /* Reordering the backlog is a drag, and a drag is a gesture this list
    has no touch implementation of (the rows use the HTML5 drag events,
    which a phone browser does not fire). The handle is hidden rather than

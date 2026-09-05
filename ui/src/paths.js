@@ -43,7 +43,20 @@ import { FILTERS, NO_NARROWING, SORTS } from "./taskFilters.js";
 // (TaskBoard.jsx, grain/task-287) -- a destination of its own rather
 // than a mode of the tasks view, so /board is a link somebody can keep
 // and a reload lands back on the board rather than on the flat list.
-const VIEWS = ["tasks", "board", "repos", "schedules", "templates", "suites"];
+//
+// "inbox" is the same tasks again, narrowed to the ones waiting on the
+// reader and shown with the answers they are waiting for (InboxPage.jsx,
+// grain/task-20). It carries no narrowing of its own -- see
+// showsTaskView below.
+const VIEWS = [
+  "inbox",
+  "tasks",
+  "board",
+  "repos",
+  "schedules",
+  "templates",
+  "suites",
+];
 
 // parsePath turns a URL path into the {view, taskId, repo, showReleases,
 // scheduleId, templateId, suiteId, showSettings, showSystem, showMetrics}
@@ -129,6 +142,13 @@ function parseSegments(pathname) {
 // say no: each of those covers the list rather than narrowing it, and
 // none of them survives in the URL as "the thing behind the overlay"
 // today either.
+//
+// The inbox says no as well, and it is the one that does show tasks. It
+// is not a view over the backlog somebody refines -- it is one fixed
+// question ("what is waiting on me?") whose answer is grouped by what
+// each task wants, and a repo menu narrowing it would leave the count in
+// the nav rail disagreeing with the page under it. /inbox is one link,
+// the same for everybody.
 function showsTaskView(parsed) {
   if (parsed.showSettings || parsed.showSystem || parsed.showMetrics)
     return false;
