@@ -11,7 +11,14 @@ package grain
 //   - status writes Status.Activity, which the controller reads off the
 //     record stream. It is the one escape hatch that becomes *fully*
 //     local: today's update_status is an HTTP hop to the daemon to put a
-//     phrase on a row.
+//     phrase on a row, and here it is a file write in this container that
+//     cannot fail and costs no vsock hop.
+//
+// That last one is the agent's route and the cheapest, but not the only
+// one: anything running inside the sandbox sets the same field through
+// GuestActivityFile. Setup needs it, because it runs before there is an
+// agent to call a tool, and so does a long guest command the agent is
+// blocked on.
 //
 // There is no seventh tool, and nothing outside the sandbox is a tool at
 // all. An escape hatch is a CLI in the guest image with a credential

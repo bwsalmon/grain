@@ -2,6 +2,7 @@ package grain_test
 
 import (
 	"encoding/json"
+	"path"
 	"strings"
 	"testing"
 	"time"
@@ -500,5 +501,31 @@ func TestAGrainReportsNeitherItsNameNorItsReachability(t *testing.T) {
 	// carry nothing worth reading.
 	if !back.Health.Guest.Ready || back.Phase != grain.PhaseRunning {
 		t.Errorf("the grain's own half did not survive: %+v", back)
+	}
+}
+
+// The guest writes one path and the container mounts another, and they
+// must not overlap. Everything under Root arrives from outside and is
+// grain's own material; GuestActivityFile is written from inside the
+// sandbox by the work itself. A guest-writable path under Root would let
+// the sandbox appear to have authored a prompt, a credential or a setup
+// script.
+func TestTheGuestActivityPathIsOutsideTheMountedTree(t *testing.T) {
+	if strings.HasPrefix(grain.GuestActivityFile, grain.Root+"/") || grain.GuestActivityFile == grain.Root {
+		t.Fatalf("%s is inside the mounted tree %s", grain.GuestActivityFile, grain.Root)
+	}
+	if !path.IsAbs(grain.GuestActivityFile) || path.Clean(grain.GuestActivityFile) != grain.GuestActivityFile {
+		t.Errorf("%s is not an absolute, cleaned path", grain.GuestActivityFile)
+	}
+	// It is a guest path, so it is not something Files renders: a Spec
+	// that could write it would be the controller setting an activity on
+	// the grain's behalf, which is backwards.
+	spec := grain.Spec{Version: grain.Version, Prompt: "p", Setup: "s"}
+	files, err := spec.Files()
+	if err != nil {
+		t.Fatalf("rendering files: %v", err)
+	}
+	if _, ok := files[grain.GuestActivityFile]; ok {
+		t.Errorf("Files renders the guest activity path")
 	}
 }

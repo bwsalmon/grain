@@ -484,6 +484,48 @@ authenticate, nothing to version as an API, nothing that can hang — and
 `Grains`/`Grain` becomes container-runtime operations end to end, with
 zero methods that reach a shim.
 
+## Letting the sandbox speak: how the guest sets `activity`
+
+Needed because `activity`'s own example — "cloning acme/widgets" — is a
+setup-time phrase, and setup runs before there is an agent to call the
+`status` tool. Four ways for something in the guest to reach the shim:
+
+1. **A sentinel line on stdout.** The shim already captures every guest
+   command's output, so `echo "@grain:activity …"` needs no new path at
+   all. **Rejected**: in-band signalling in a stream that also carries
+   arbitrary build output, so any test that printed the sentinel would set
+   the activity, and escaping it properly means a parser where a file
+   would do.
+2. **A reverse channel over vsock.** Clean, and an ask of kontur — whose
+   ask list is already the blocking item. Rejected on cost, not on shape.
+3. **The shim polls a guest file on its own schedule.** A poll into the
+   guest, which is the thing the controller just stopped doing — though
+   inside the container it is far cheaper, being a vsock hop rather than a
+   docker or API-server one.
+4. **A guest file, read on the round trip the shim already makes for
+   `health.guest`.** *Chosen.* Option 3 without the extra call: the shim
+   reads the guest on its heartbeat anyway, so this is one more path on an
+   existing round trip, and the cadence is one already tuned.
+
+**What it gives up** is latency and durability, both on purpose. An
+activity set between heartbeats is not seen until the next one, and one
+overwritten before a heartbeat is never seen at all. That is acceptable
+because `activity` is a phrase for a human reading a task row and nothing
+branches on it — `Reconcile` reads it only to copy it and to quote it in a
+failure detail. A field anything decided on would not be allowed to work
+this way.
+
+**Not `/grain`.** The mounted tree is grain's own material, copied inward;
+a guest-writable path inside it would let the sandbox appear to have
+authored a prompt, a credential or a setup script. `/run/grain/activity`
+keeps the two directions separate, and a test holds the line.
+
+**Left open**: whether the guest-side writer is its own small binary or a
+verb of `grainctl`. They want different things — `grainctl` needs a placed
+credential and an address, this needs neither — which argues for two, but
+one binary in the guest image is one thing to ship. The file is the
+contract, so either can be chosen later without the design moving.
+
 ## Can stdout and stderr be told apart?
 
 **Docker: yes.** Each entry is tagged with its stream and the API can

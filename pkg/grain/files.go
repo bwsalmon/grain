@@ -73,6 +73,35 @@ const (
 	DirPlacements = Root + "/placements"
 )
 
+// GuestActivityFile is the one path in this file that is a *guest* path
+// rather than a container one: everything above is mounted into the
+// container and copied inward, and this is written from inside the
+// sandbox and read outward.
+//
+// It is how anything running in the guest sets Status.Activity. The
+// agent has a cheaper route -- the status tool, a local file write in the
+// container with no vsock hop -- so this exists for the two cases that
+// route cannot serve:
+//
+//   - Setup, which runs before there is an agent at all. Activity's own
+//     example is "cloning acme/widgets", which happens here; without this
+//     the phrase was unreachable and PhaseProvisioning could only say
+//     that a grain was provisioning, not what it had got to. A run killed
+//     by ProvisionBudget is exactly the one that needs the difference.
+//   - A long guest command the agent started and is waiting on, which can
+//     report its own progress rather than leaving the last thing the
+//     agent said to go stale for the length of a build.
+//
+// Read on the round trip the shim already makes for GuestHealth, so it
+// costs nothing extra and inherits that cadence: a heartbeat, not a
+// stream. Advisory by construction -- last writer wins, a torn read is a
+// garbled phrase and nothing more -- which is what lets it be a plain
+// file rather than a channel needing a protocol.
+//
+// A tool in the guest image writes it atomically; a setup script with no
+// such tool can echo into it, and the file is the contract either way.
+const GuestActivityFile = "/run/grain/activity"
+
 // FileTerminationLog is where a grain writes its final Result on the way
 // out, in addition to its status.
 //

@@ -97,6 +97,41 @@ controller exists.
 is an HTTP hop today to put a phrase on a task's row, and as a built-in it
 is a file write that cannot fail and costs the agent nothing.
 
+### Three things can set `activity`, and setup is why
+
+The agent's `status` tool is the cheapest route and not the only one,
+because it is not always available:
+
+| writer | how | when |
+| --- | --- | --- |
+| the shim | directly | the coarse steps it drives — booting, placements, starting setup |
+| the agent | the `status` tool | a local file write in the container, no vsock hop |
+| **anything in the sandbox** | **writing `/run/grain/activity`** | setup, and long guest commands |
+
+The third closes a gap the other two cannot. `activity`'s own worked
+example is `"cloning acme/widgets"` — which happens during **setup, before
+there is an agent to call a tool**. Without a guest-side writer,
+`PhaseProvisioning` could say a grain was provisioning but never what it
+had got to, and a grain killed by `ProvisionBudget` is exactly the one
+where that difference matters: "still cloning acme/widgets after ten
+minutes" names a stuck clone, where "still provisioning" names nothing.
+It also covers a build the agent is blocked on, which cannot ask the agent
+to speak for it.
+
+**The mechanism is a file, read on a round trip that already happens.**
+The shim reads the guest for `health.guest` on its heartbeat; picking up
+one more path on that call costs nothing and inherits that cadence. It is
+advisory by construction — last writer wins, a torn read is a garbled
+phrase — which is what lets it be a plain file rather than a channel with
+a protocol. A tool in the guest image writes it atomically; a setup script
+with nothing but a shell can `echo` into it, and the file is the contract
+either way.
+
+It is deliberately **outside `/grain`**: that tree is mounted inward and is
+grain's own material, and a guest-writable path inside it would let the
+sandbox appear to have authored a prompt or a credential
+(`TestTheGuestActivityPathIsOutsideTheMountedTree`).
+
 ### This is the git proxy's shape, reused
 
 Not a new mechanism — the one grain already has, pointed at a second
@@ -711,6 +746,12 @@ Two costs, paid only by deployments that select NAT:
    `grainctl` exists finishes without opening a pull request and reports
    success. Naming it belongs in the prompt or the setup script, per
    framework, and is part of the work rather than documentation.
+9. **The guest-side activity writer is a choice not yet made**: its own
+   small binary in the guest disk image, or a verb of `grainctl`. They
+   need different things — `grainctl` needs a placed credential and an
+   address, this needs neither — which argues for two; one binary is one
+   thing to ship. `/run/grain/activity` is the contract, so either can be
+   chosen later without the design moving.
 
 ### Asks of kontur
 

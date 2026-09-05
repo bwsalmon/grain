@@ -19,6 +19,12 @@ const (
 	// bounded by Policy.ProvisionBudget rather than by anything the grain
 	// knows, because a grain wedged here is precisely one that cannot
 	// report that it is wedged.
+	//
+	// It is also the phase with no agent in it, so Activity here comes
+	// from the shim or from the setup script itself through
+	// GuestActivityFile. That is what makes a budget kill legible: "still
+	// cloning acme/widgets after ten minutes" rather than "still
+	// provisioning".
 	PhaseProvisioning Phase = "provisioning"
 	// PhaseRunning is the agent CLI executing in the container.
 	PhaseRunning Phase = "running"
@@ -82,9 +88,25 @@ type Status struct {
 	Since time.Time `json:"since"`
 	// Activity is the grain's own short account of itself -- "cloning
 	// acme/widgets", "waiting for CI". It is what today's update_status
-	// tool writes, except that it is now read off this poll instead of
-	// posted to the daemon, so it costs the grain nothing and cannot
-	// fail.
+	// tool writes, except that it rides the record stream instead of
+	// being posted to the daemon, so it costs the grain nothing and
+	// cannot fail.
+	//
+	// Three things can set it, and the split follows what is running:
+	// the shim, for the coarse steps it drives itself; the agent, with
+	// the status tool, which is a local file write in the container; and
+	// anything inside the sandbox, through GuestActivityFile, which the
+	// shim reads on the round trip it already makes for Health.Guest.
+	//
+	// The third is not redundant with the second. Setup runs before there
+	// is an agent -- "cloning acme/widgets" is a setup-time phrase -- and
+	// a guest command the agent is blocked on cannot ask the agent to
+	// speak for it.
+	//
+	// Last writer wins, deliberately. This is a phrase for a human
+	// reading a task row, not a state anything branches on, so a lost
+	// update costs nothing and no writer needs to coordinate with
+	// another.
 	Activity string `json:"activity,omitempty"`
 	// Rebuilds counts the times this grain threw its guest away and built
 	// a fresh one. The decision is the grain's; the count is here so the
