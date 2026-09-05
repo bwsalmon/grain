@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import GrainMark from "./GrainMark.jsx";
 import {
@@ -39,13 +39,20 @@ function stubMatchMedia(reduced) {
   });
 }
 
-/** jsdom has no Web Animations API; this is the sliver the phase-lock uses. */
+/**
+ * jsdom has no Web Animations API; this is the sliver the phase-lock
+ * uses. One animation per element, in a map the test can reach into to
+ * play the browser's part -- replacing an element's animation with a
+ * fresh one is what a restart looks like from here.
+ */
 function stubAnimations() {
-  const animation = { startTime: null };
+  const animations = new Map();
   Element.prototype.getAnimations = function getAnimations() {
-    return this.classList.contains("grain-mark-sheet") ? [animation] : [];
+    if (!this.classList.contains("grain-mark-sheet")) return [];
+    if (!animations.has(this)) animations.set(this, { startTime: null });
+    return [animations.get(this)];
   };
-  return animation;
+  return animations;
 }
 
 afterEach(() => {
@@ -110,10 +117,29 @@ describe("GrainMark", () => {
     // A CSS animation starts when its element is attached, so a task row
     // that started running long after the sidebar would otherwise hold
     // its own phase and the two would scatter at different moments.
-    const animation = stubAnimations();
+    const animations = stubAnimations();
     render(<GrainMark size={20} animated />);
 
-    expect(animation.startTime).toBe(0);
+    expect(animations.get(marked()).startTime).toBe(0);
+  });
+
+  it("pins a mark again every time its animation starts over", () => {
+    // Pinning at mount alone let a task list drift apart
+    // (grain/task-339): React moves the DOM node of a keyed row the list
+    // reorders, an element that is detached and reattached starts its
+    // animation again from the moment of the move, and nothing re-ran
+    // the lock -- so that one row kept a phase of its own.
+    const animations = stubAnimations();
+    render(<GrainMark size={20} animated />);
+    const mark = marked();
+    expect(animations.get(mark).startTime).toBe(0);
+
+    // What the browser hands the element after a move: a new animation,
+    // started now, announced by animationstart.
+    animations.set(mark, { startTime: 4200 });
+    fireEvent.animationStart(mark);
+
+    expect(animations.get(mark).startTime).toBe(0);
   });
 
   it("paints a hero-sized mark live, since it has no sheet", () => {
