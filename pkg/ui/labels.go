@@ -358,6 +358,24 @@ type Config struct {
 	// erroring on every poll, the same nil-means-unavailable contract
 	// every other optional field here already gives.
 	HostTop func(ctx context.Context, lines int) ([]string, error)
+	// RootShell, when set, is what POST /api/host/shell calls to run one
+	// command as root on that same machine -- cmd/grain/daemon.go's
+	// rootShell over pkg/rootshell, in a real deployment. It is the
+	// System overlay's last-resort tab: Logs, Top and Sandbox health each
+	// answer one fixed question, and this answers the ones left over,
+	// for an operator whose only way into the deployment may be this UI
+	// (grain/task-13).
+	//
+	// It is a func for the same reason HostTop above is -- this package
+	// shells out to nothing itself -- but unlike every other optional
+	// field here, what a deployment hands over by setting it is
+	// unrestricted root on the host. So nil is not merely the `grain
+	// demo` default: it is what a deployment that installed no root
+	// shell responder has (GRAIN_ROOT_SHELL=0, scripts/setup.sh), and
+	// the tab says the pane is unavailable rather than offering a prompt
+	// whose every command could only 404 -- the same
+	// nil-means-unavailable contract Reboot and HostTop above give.
+	RootShell func(ctx context.Context, command string) (RootShellResult, error)
 	// AutoMergeDegraded, when set, is polled by GET /api/config to report
 	// whether this deployment's GitHub credential can read pull request
 	// check runs at all -- orchestrator.ChecksUnavailable's own doc

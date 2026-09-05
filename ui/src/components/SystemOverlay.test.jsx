@@ -19,7 +19,7 @@ describe("SystemOverlay", () => {
     api.mockReset();
   });
 
-  it("shows Logs by default, with Sandbox health, Top and Restart as other tabs", async () => {
+  it("shows Logs by default, with Sandbox health, Top, Root shell and Restart as other tabs", async () => {
     api.mockResolvedValueOnce(noLogs);
     render(
       <SystemOverlay
@@ -37,8 +37,54 @@ describe("SystemOverlay", () => {
       screen.getByRole("tab", { name: "Sandbox health" }),
     ).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "Top" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Root shell" })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "Restart" })).toBeInTheDocument();
     expect(api).toHaveBeenCalledTimes(1);
+  });
+
+  // grain/task-13: the last of the reading panes and the first that
+  // changes the machine -- one command as root on the host, for the
+  // failure the three tabs before it could not explain. It needs no
+  // fetch of its own to render: GET /api/config has already said whether
+  // this deployment has a responder behind the route.
+  it("shows the root shell on its own tab, without a call of its own", async () => {
+    api.mockResolvedValueOnce(noLogs);
+    const user = userEvent.setup();
+    render(
+      <SystemOverlay
+        config={{ rebootEnabled: true, rootShellEnabled: true }}
+        onClose={() => {}}
+        showError={() => {}}
+      />,
+    );
+    await screen.findByText(/no log sources configured/i);
+
+    await user.click(screen.getByRole("tab", { name: "Root shell" }));
+
+    expect(
+      screen.getByRole("button", { name: /run as root/i }),
+    ).toBeInTheDocument();
+    expect(api).toHaveBeenCalledTimes(1);
+  });
+
+  it("says the root shell is unavailable where the deployment has none", async () => {
+    api.mockResolvedValueOnce(noLogs);
+    const user = userEvent.setup();
+    render(
+      <SystemOverlay
+        config={{ rebootEnabled: true, rootShellEnabled: false }}
+        onClose={() => {}}
+        showError={() => {}}
+      />,
+    );
+    await screen.findByText(/no log sources configured/i);
+
+    await user.click(screen.getByRole("tab", { name: "Root shell" }));
+
+    expect(screen.getByText(/no root shell configured/i)).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /run as root/i }),
+    ).not.toBeInTheDocument();
   });
 
   // grain/task-173: the throughput and latency report is a sidebar
