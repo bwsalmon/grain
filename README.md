@@ -302,7 +302,9 @@ cmd/grain/      the one binary this repo builds (bwsalmon/agents#313
                 terminal instead of a browser: list/get/create/update a
                 task, approve (and withdraw that approval again, which
                 puts a queued task back among the proposals rather than
-                closing it), attach or detach a capability, comment
+                closing it), defer one for later (and undefer it, which
+                puts it back in whichever of those two states its
+                approval says), attach or detach a capability, comment
                 (which also answers a parked question), close ("delete"
                 -- a task that ran is a record of a dispatch that
                 happened) or reopen one (bwsalmon/agents#271). "daemon"
@@ -2870,7 +2872,11 @@ direction](docs/data-model.md#direction-a-first-party-ui): create a
 task, approve a proposed one (or withdraw that approval, which is what
 [`docs/data-model.md`](docs/data-model.md#taskstate-is-derived-not-stored)
 calls taking a queued task back out of the queue: the approval is a
-declaration, and removing it leaves the task a proposal again), attach or
+declaration, and removing it leaves the task a proposal again), defer one
+(grain/task-21: work that is still meant to happen but not now — it drops
+out of the queue and out of every list until somebody ticks "Show
+deferred tasks" or picks it back up, and its approval survives the round
+trip, which is what tells deferring from withdrawing), attach or
 remove a capability, comment,
 close/reopen — everything a human used to do by hand to a task issue,
 from a form instead of a body of directive lines and a label picker.
