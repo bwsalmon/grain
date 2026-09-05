@@ -249,6 +249,23 @@ type Config struct {
 	// nil-means-unavailable contract Secrets, Reboot and Credentials
 	// above already give.
 	CapabilityChecks CapabilityChecker
+	// AgentKeyChecks, when set, is what POST /api/agent-keys/{framework}/
+	// check calls to test one agent framework's own credential against
+	// the vendor that issued it -- cmd/grain/daemon.go's own adapter over
+	// the same secrets store and key files a dispatch reads a credential
+	// from. It is to the "set"/"not set" chip on Settings' Agents tab
+	// what CapabilityChecks above is to **Ready**: presence is the whole
+	// of what a pane reading grain's own store can see, and a key revoked
+	// at the far end leaves every stored fact unchanged (see
+	// Client.CheckAgentKey).
+	//
+	// nil means this UI was not handed one (`grain demo`'s throwaway UI,
+	// or any UI not colocated with a daemon holding the credentials), and
+	// the route answers 404 while Settings.AgentKeyChecksEnabled reports
+	// false so the pane offers no button that could not work -- the same
+	// nil-means-unavailable contract every other optional field here
+	// gives.
+	AgentKeyChecks AgentKeyChecker
 	// AgentModels, when set, is what GET /api/agent-models calls to ask
 	// the installed agent CLI which models it can actually run --
 	// cmd/grain/daemon.go's agyModelLister over antigravity.Catalog,

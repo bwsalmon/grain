@@ -85,6 +85,7 @@ import (
 	"github.com/bwsalmon/grain/pkg/agent/antigravity"
 	"github.com/bwsalmon/grain/pkg/agent/claude"
 	"github.com/bwsalmon/grain/pkg/agent/codex"
+	"github.com/bwsalmon/grain/pkg/agent/credcheck"
 	"github.com/bwsalmon/grain/pkg/capability/bootstrap"
 	"github.com/bwsalmon/grain/pkg/capability/gcpkey"
 	"github.com/bwsalmon/grain/pkg/capability/geminikey"
@@ -2560,6 +2561,14 @@ func startUIServer(cfg config, store *model.Store, transcriptDir string, sandbox
 		// ladder above), all available before (and regardless of
 		// whether) that loop ever starts.
 		CapabilityChecks: capabilityCheckAdapter{live: live, creds: uiSecrets},
+		// The same action for the other kind of credential this
+		// deployment holds (ui.Config.AgentKeyChecks): the key each agent
+		// framework runs as, which the Agents tab can otherwise only
+		// report as "set". Wired here for the same reasons as the two
+		// around it -- it needs the live configuration (for the
+		// -*-key-file fallbacks) and this same secrets directory, and
+		// nothing the reconcile loop builds.
+		AgentKeyChecks: agentKeyCheckAdapter{live: live, creds: uiSecrets},
 		// The Gemini model field's own picker (ui.Config.AgentModels):
 		// the model names agy will accept are agy's to say, and this
 		// deployment has the binary right here. Wired unconditionally,
@@ -2933,6 +2942,68 @@ func (a capabilityCheckAdapter) CheckCapability(ctx context.Context, id string) 
 	// made, and a refusal's whole remedy is "replace what is in that
 	// secret" -- see ui.CapabilityCheck.Credentials.
 	return ui.CapabilityCheckResult{Credentials: check.Credentials, Detail: check.Detail}, err
+}
+
+// agentKeyCheckAdapter is ui.Config.AgentKeyChecks over this
+// deployment's own agent credentials: it resolves the credential a run
+// with that framework would be dispatched with, and asks the vendor that
+// issued it whether it still works (pkg/agent/credcheck).
+//
+// It resolves exactly as a dispatch resolves -- agentCredential, secrets
+// database first and then whatever -gemini-api-key-file /
+// -claude-oauth-token-file / -openai-api-key-file names -- and reads the
+// key files off the live configuration rather than off a copy taken at
+// startup, for the same reason capabilityCheckAdapter above rebuilds its
+// providers per call: the answer has to be about what the *next*
+// dispatch would authenticate with, not about what this process was
+// started with. A deployment seeded by file and a deployment configured
+// from the UI are therefore both testable, and a key pasted into
+// Settings a second ago is what gets tested.
+//
+// Nothing here reads a credential back out to the caller: material goes
+// into credcheck, and what comes back is a sentence about what the
+// vendor said.
+type agentKeyCheckAdapter struct {
+	live  *liveConfig
+	creds *secrets.Store
+	// checker is the zero value in a deployment -- the vendors' own
+	// hosts. Only tests set it, pointing it at a stub, so that testing
+	// this adapter's own job (which file, which secret, which sentence)
+	// costs no call to anybody's real API.
+	checker credcheck.Checker
+}
+
+func (a agentKeyCheckAdapter) CheckAgentKey(ctx context.Context, framework string) (ui.AgentKeyCheckResult, error) {
+	secret, ok := credcheck.SecretFor(framework)
+	if !ok {
+		// pkg/ui rejects an unknown framework before reaching here; this
+		// is the same answer for any other caller.
+		return ui.AgentKeyCheckResult{}, fmt.Errorf("no agent framework named %q", framework)
+	}
+	result := ui.AgentKeyCheckResult{Secret: secret}
+	cfg := a.live.current()
+	var keyFile string
+	switch model.NormalizeAgentFrameworkName(framework) {
+	case model.AgentFrameworkAntigravity:
+		keyFile = cfg.geminiAPIKeyFile
+	case model.AgentFrameworkClaude:
+		keyFile = cfg.claudeOAuthTokenFile
+	case model.AgentFrameworkCodex:
+		keyFile = cfg.openAIAPIKeyFile
+	}
+	credential, err := agentCredential(ctx, a.creds, secret, keyFile)
+	if err != nil {
+		return result, fmt.Errorf("reading the credential for %s: %w", framework, err)
+	}
+	// An empty credential falls through to credcheck rather than being
+	// answered here, so "not set" reads in one sentence written in one
+	// place whichever caller asked.
+	check, err := a.checker.Check(ctx, framework, credential)
+	if check.Secret != "" {
+		result.Secret = check.Secret
+	}
+	result.Detail = check.Detail
+	return result, err
 }
 
 // agyModelTimeout bounds one `agy models`. It is a network fetch made
