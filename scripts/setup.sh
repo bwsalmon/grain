@@ -1735,20 +1735,26 @@ setup_data_dir() {
 
   # GitHub credential ladder (pkg/gitproxy/credentials.go): a pattern
   # file plus one <name>.token or <name>.app.json per credential. "*" is
-  # the catch-all every repo falls back to absent a narrower entry -- an
-  # operator wanting a per-repo credential edits credentials.json and
-  # adds another <name>.token/.app.json by hand; this script only ever
-  # seeds the one default, as either kind (never both for the same name:
-  # CredentialSet.load prefers .app.json when present).
+  # the catch-all every repo falls back to absent a narrower entry; this
+  # script only ever seeds the one default, as either kind (never both
+  # for the same name: CredentialSet.load prefers .app.json when
+  # present). A per-repo credential is added from the UI rather than
+  # here -- see below.
   #
   # These files are the whole mechanism, and the only one: unlike the
   # agent credentials below, a GitHub credential is never read out of the
   # secrets database (grain/task-137 settled that deliberately -- see
   # pkg/gitproxy/credentials.go's own doc comment). What did change is
   # who else can write one: Settings -> GitHub in the UI adds and removes
-  # a <name>.token here, so an extra named token no longer needs shell
-  # access to this host. It still needs the daemon restarted afterwards,
-  # the same as everything else in this directory.
+  # a <name>.token here, and writes credentials.json itself
+  # (grain/task-4), so neither an extra named token nor the ladder entry
+  # pointing repos at it needs shell access to this host. Seeding either
+  # from here is a convenience for an unattended deploy, not the only
+  # way in -- a host that reaches this point with no GitHub credential at
+  # all is finishable from the UI, which is what the log line at the end
+  # of this function says. A ladder entry is live as soon as it is
+  # written; a new *token* still needs the daemon restarted before it can
+  # be ticked on a task, the same as everything else in this directory.
   if [ ! -s "$GRAIN_DATA_DIR/secrets/github/credentials.json" ] \
      && { [ -n "$GRAIN_GITHUB_TOKEN" ] || [ -n "$GRAIN_GITHUB_APP_ID" ]; }; then
     printf '{"*":"%s"}\n' "$GRAIN_GITHUB_CREDENTIAL_NAME" > "$GRAIN_DATA_DIR/secrets/github/credentials.json"
@@ -1787,9 +1793,10 @@ setup_data_dir() {
   mint_gemini_operating_key
 
   if [ ! -s "$GRAIN_DATA_DIR/secrets/github/credentials.json" ]; then
-    log "  no GitHub credential configured yet -- set GRAIN_GITHUB_TOKEN, or all three of"
-    log "  GRAIN_GITHUB_APP_ID/INSTALLATION_ID/PRIVATE_KEY, and re-run, or place"
-    log "  $GRAIN_DATA_DIR/secrets/github/credentials.json and a matching .token/.app.json by hand"
+    log "  no GitHub credential configured yet -- open Settings -> GitHub in the UI and paste a"
+    log "  token: the first one added becomes this deployment's default, no restart needed."
+    log "  Unattended: set GRAIN_GITHUB_TOKEN, or all three of"
+    log "  GRAIN_GITHUB_APP_ID/INSTALLATION_ID/PRIVATE_KEY, and re-run"
   fi
 }
 
@@ -2888,6 +2895,14 @@ report_readiness() {
      && { [ -s "$GRAIN_DATA_DIR/secrets/github/${GRAIN_GITHUB_CREDENTIAL_NAME}.token" ] \
           || [ -s "$GRAIN_DATA_DIR/secrets/github/${GRAIN_GITHUB_CREDENTIAL_NAME}.app.json" ]; }; then
     github="present as '${GRAIN_GITHUB_CREDENTIAL_NAME}'"
+  elif [ -s "$GRAIN_DATA_DIR/secrets/github/credentials.json" ] \
+       && { ls "$GRAIN_DATA_DIR"/secrets/github/*.token >/dev/null 2>&1 \
+            || ls "$GRAIN_DATA_DIR"/secrets/github/*.app.json >/dev/null 2>&1; }; then
+    # And a credential added from the UI is named by whoever added it,
+    # which has nothing to do with this script's own default name -- so
+    # a deployment finished in the UI reports what it has rather than
+    # reporting nothing (the same point the agent-key checks below make).
+    github="present"
   fi
   [ -s "$GRAIN_DATA_DIR/secrets/gemini-api-key" ] && gemini="present"
   [ -s "$GRAIN_DATA_DIR/secrets/claude-oauth-token" ] && claude="present"

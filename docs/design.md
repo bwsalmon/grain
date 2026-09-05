@@ -762,10 +762,27 @@ answer "what is credential X" is a state an operator has to reason about
 the moment they disagree. The restart is not papered over either — the
 pane reports what is on disk beside what the running process actually
 started with, and says which tokens are waiting on a restart to become
-grantable. Editing `credentials.json` is still host work: which repos
-fall back to which credential is a deployment-wide decision, and
-deleting a credential a pattern still names is refused rather than
-allowed to fail every push it covers.
+grantable.
+
+`credentials.json` is written from the same pane (`PUT`/`DELETE
+/api/github-credential-patterns`, `gitproxy.CredentialSet.SetPattern`),
+which is what makes standing a deployment up entirely a UI job: a token
+with no pattern naming it is material nothing resolves to, so the *first*
+credential added becomes the `*` entry on its own rather than leaving a
+deployment where every clone fails closed and nothing on screen says why.
+Narrower entries are listed and editable beside it, and deleting a
+credential a pattern still names is refused rather than allowed to fail
+every push it covers.
+
+This one file is re-read when it changes — the only thing under
+`/data/secrets` that is. The rest of the directory keeps the "replace a
+file and restart the one service that reads it" contract above, but a
+pattern cannot: three processes hold their own copy of the ladder, the
+proxy's was loaded before the UI wrote anything, and the restart that
+would fix that is the shell access this pane exists to do without. What a
+restart is still for is the *capability set* — which named tokens this
+process offers to tick on a task — which is built once at startup and
+says so.
 
 ### Scopes to withhold
 

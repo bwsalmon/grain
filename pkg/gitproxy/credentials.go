@@ -51,8 +51,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -106,10 +108,17 @@ type cacheEntry struct {
 // Select and Get are called from GitProxy.Handle, which NewHandler wires
 // straight into net/http -- one goroutine per inbound request, so every
 // sandbox's concurrent git traffic reaches load's cache at once. mu
-// guards it for exactly that reason.
+// guards it for exactly that reason, and guards patterns with it: the
+// pattern map is written by SetPattern/RemovePattern and re-read from
+// disk by patternsLocked while requests are in flight.
 type CredentialSet struct {
-	dir      string
-	patterns map[string]string
+	dir string
+	// patterns is credentials.json as this set last read it, and
+	// patternsStamp is what that reading was of (patternStamp below), so
+	// patternsLocked can tell "unchanged" from "someone rewrote the file"
+	// without parsing it on every request. Both are under mu.
+	patterns      map[string]string
+	patternsStamp patternStamp
 
 	// AppTransport is where a *.app.json credential's installation token
 	// gets minted -- always github.com's own REST API (see
@@ -128,13 +137,87 @@ type CredentialSet struct {
 
 // LoadCredentialSet reads credentials.json (a pattern -> credential name
 // map) from secretsDir. A missing file yields an empty ladder -- every
-// select then fails closed with "no credential configured."
+// select then fails closed with "no credential configured" until
+// something writes one, which every process holding a ladder then picks
+// up on its next Select (patternsLocked).
 func LoadCredentialSet(secretsDir string) (*CredentialSet, error) {
-	patterns, err := readStringMap(filepath.Join(secretsDir, "credentials.json"))
+	path := filepath.Join(secretsDir, "credentials.json")
+	patterns, err := readStringMap(path)
 	if err != nil {
 		return nil, err
 	}
-	return &CredentialSet{dir: secretsDir, patterns: patterns, cache: map[string]cacheEntry{}}, nil
+	return &CredentialSet{
+		dir:           secretsDir,
+		patterns:      patterns,
+		patternsStamp: statPatternFile(path),
+		cache:         map[string]cacheEntry{},
+	}, nil
+}
+
+// patternsFile is credentials.json's path in this set's own directory.
+func (c *CredentialSet) patternsFile() string {
+	return filepath.Join(c.dir, "credentials.json")
+}
+
+// patternStamp is enough of credentials.json's identity to notice it has
+// been rewritten: its size and modification time, or the zero value for
+// a file that is not there. Compared, never interpreted.
+type patternStamp struct {
+	exists  bool
+	size    int64
+	modTime time.Time
+}
+
+func statPatternFile(path string) patternStamp {
+	info, err := os.Stat(path)
+	if err != nil {
+		return patternStamp{}
+	}
+	return patternStamp{exists: true, size: info.Size(), modTime: info.ModTime()}
+}
+
+// patternsLocked is the pattern map, re-read from disk if credentials.json
+// has changed since this set last looked. Callers must hold mu.
+//
+// This one file *is* hot-reloaded, and it is the only thing in this
+// package that is -- the rest of the ladder (which token backs a name,
+// what is in it) is still loaded once and cached, as this file's own doc
+// comment describes. The exception exists because pkg/ui writes this
+// file now (SetPattern below) and a deployment's *first* credential is
+// written that way: the ladder a running daemon started with is empty,
+// so until it noticed the new file, every clone through the git proxy
+// went on failing closed with "no credential configured" and the only
+// way out was a restart from a shell on the host -- which is exactly the
+// hand-editing the UI took over. Three processes hold their own ladder
+// (the proxy's, the daemon's REST client's, `grain mcp-server`'s), so
+// re-reading the file is also what keeps them agreeing on it without any
+// of them being told.
+//
+// A stat per Select, and a parse only when the file actually changed: it
+// is one small JSON object in the same directory the credential material
+// is already read from, next to a git request about to cross the
+// network.
+//
+// A file that has become unreadable or unparseable keeps the last good
+// map rather than emptying the ladder mid-flight: a half-written or
+// clobbered credentials.json should not take every push on the
+// deployment down with it, and whatever wrote it can be seen in the log.
+func (c *CredentialSet) patternsLocked() map[string]string {
+	stamp := statPatternFile(c.patternsFile())
+	if stamp == c.patternsStamp {
+		return c.patterns
+	}
+	patterns, err := readStringMap(c.patternsFile())
+	if err != nil {
+		log.Printf("gitproxy: re-reading %s: %v -- keeping the pattern map already loaded",
+			c.patternsFile(), err)
+		// Remember the stamp anyway, so a file that stays broken is
+		// complained about once rather than on every single request.
+		c.patternsStamp = stamp
+		return c.patterns
+	}
+	c.patterns, c.patternsStamp = patterns, stamp
+	return c.patterns
 }
 
 // Dir is the secrets directory this ladder was loaded from -- for a
@@ -148,13 +231,25 @@ func (c *CredentialSet) Dir() string { return c.dir }
 // nothing covers it -- a distinct, fail-closed condition from "not
 // allowed at all."
 func (c *CredentialSet) Select(owner, repo string) (Credential, bool) {
-	owner, repo = canonicalizeRepo(owner, repo)
+	name, ok := c.selectName(canonicalizeRepo(owner, repo))
+	if !ok {
+		return Credential{}, false
+	}
+	return c.load(name), true
+}
+
+// selectName walks the ladder for a canonicalized repo. Split out from
+// Select because load takes mu itself, and this holds it.
+func (c *CredentialSet) selectName(owner, repo string) (string, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	patterns := c.patternsLocked()
 	for _, pattern := range []string{owner + "/" + repo, owner + "/*", "*"} {
-		if name, ok := c.patterns[pattern]; ok && name != "" {
-			return c.load(name), true
+		if name, ok := patterns[pattern]; ok && name != "" {
+			return name, true
 		}
 	}
-	return Credential{}, false
+	return "", false
 }
 
 // Get returns a named credential directly, bypassing the owner/repo
@@ -221,7 +316,11 @@ func (c *CredentialSet) Names() []string {
 // every repo with no narrower entry is pushed and pulled with, and so
 // the one a task needs no capability to be using already. Empty when
 // this deployment has no "*" entry at all.
-func (c *CredentialSet) DefaultName() string { return c.patterns["*"] }
+func (c *CredentialSet) DefaultName() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.patternsLocked()["*"]
+}
 
 // ExtraNames is Names minus DefaultName: every named GitHub token beyond
 // the deployment default, which is exactly the set that becomes a
@@ -264,13 +363,23 @@ func (c *CredentialSet) IsApp(name string) bool {
 // "no credential configured" on its next push.
 func (c *CredentialSet) PatternsFor(name string) []string {
 	var out []string
-	for pattern, credential := range c.patterns {
+	for pattern, credential := range c.Patterns() {
 		if credential == name {
 			out = append(out, pattern)
 		}
 	}
 	sort.Strings(out)
 	return out
+}
+
+// Patterns is the whole ladder as credentials.json currently spells it:
+// pattern -> credential name, a copy the caller may keep. For a caller
+// that has to *show* the ladder rather than resolve one repo through it
+// (pkg/ui's Settings pane, which now edits it too).
+func (c *CredentialSet) Patterns() map[string]string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return maps.Clone(c.patternsLocked())
 }
 
 // ValidCredentialName reports whether name may be used for a credential
@@ -300,6 +409,178 @@ func ValidCredentialName(name string) error {
 				"%q is not a usable credential name: letters, digits, %q and %q only", name, "-", "_")
 		}
 	}
+	return nil
+}
+
+// ValidCredentialPattern checks one credentials.json key and returns it
+// canonicalized -- lowercased, with any ".git" suffix dropped, exactly
+// the way Select canonicalizes the repo it looks up (canonicalizeRepo),
+// so a pattern written from a UI matches the requests it was written for
+// instead of silently never matching.
+//
+// The three shapes are the three Select walks and no others: "*" (the
+// deployment default), "owner/*", and "owner/repo". A fourth shape here
+// would be a pattern nothing ever consults.
+func ValidCredentialPattern(pattern string) (string, error) {
+	pattern = strings.ToLower(strings.TrimSpace(pattern))
+	if pattern == "" {
+		return "", fmt.Errorf("a repo pattern is required")
+	}
+	if pattern == "*" {
+		return pattern, nil
+	}
+	owner, repo, ok := strings.Cut(pattern, "/")
+	if !ok {
+		return "", fmt.Errorf(
+			"%q is not a usable repo pattern: use %q, %q or %q", pattern, "*", "owner/*", "owner/repo")
+	}
+	repo = strings.TrimSuffix(repo, ".git")
+	if err := validPatternSegment(owner, false); err != nil {
+		return "", err
+	}
+	if err := validPatternSegment(repo, true); err != nil {
+		return "", err
+	}
+	return owner + "/" + repo, nil
+}
+
+// validPatternSegment holds one half of an "owner/repo" pattern to what
+// GitHub itself allows in a name, with "*" additionally allowed as the
+// whole repo half (an owner wildcard, never a partial one -- Select does
+// no globbing).
+func validPatternSegment(segment string, wildcardAllowed bool) error {
+	if segment == "" {
+		return fmt.Errorf("a repo pattern needs both halves: owner/repo or owner/*")
+	}
+	if segment == "*" {
+		if wildcardAllowed {
+			return nil
+		}
+		return fmt.Errorf("%q may only be the repo half of a pattern: owner/*", "*")
+	}
+	// A dot is ordinary inside a name (docs.github.com is a repo) and
+	// never the start of one -- which keeps ".." out, so a pattern
+	// cannot be made to *read* like a path even though nothing here
+	// treats it as one.
+	if strings.HasPrefix(segment, ".") {
+		return fmt.Errorf("%q is not a usable name in a repo pattern: it may not start with %q", segment, ".")
+	}
+	for _, r := range segment {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+		case r == '-', r == '_', r == '.':
+		default:
+			return fmt.Errorf(
+				"%q is not a usable name in a repo pattern: letters, digits, %q, %q and %q only",
+				segment, "-", "_", ".")
+		}
+	}
+	return nil
+}
+
+// SetPattern points one credentials.json pattern at a credential --
+// "*" at the credential every repo falls back to, "owner/*" or
+// "owner/repo" at one that covers less. It returns the canonical form of
+// the pattern it wrote.
+//
+// The credential has to already exist, or be the literal "anonymous"
+// (load's no-Authorization-header shape, which is what a public repo
+// wants): a pattern naming nothing resolves to a credential with no
+// token, so every push it covers would fail at GitHub rather than here,
+// which is a worse way to find out about a typo than being told now.
+//
+// Unlike SetToken, this takes effect for readers that have already
+// loaded the ladder -- see patternsLocked on why this one file is
+// re-read. The capability *set* a running process offers is still fixed
+// at startup (pkg/ui's own restart banner): what this changes without a
+// restart is which credential a repo resolves to, which is the half a
+// deployment cannot be set up without.
+func (c *CredentialSet) SetPattern(pattern, name string) (string, error) {
+	pattern, err := ValidCredentialPattern(pattern)
+	if err != nil {
+		return "", err
+	}
+	if name != "anonymous" {
+		if err := namesOneFile(name); err != nil {
+			return "", err
+		}
+		if !slices.Contains(c.Names(), name) {
+			return "", fmt.Errorf(
+				"no credential named %q is configured: add its token first, "+
+					"or every repo %q covers fails its next push", name, pattern)
+		}
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	patterns := maps.Clone(c.patternsLocked())
+	patterns[pattern] = name
+	if err := c.writePatternsLocked(patterns); err != nil {
+		return "", err
+	}
+	return pattern, nil
+}
+
+// RemovePattern drops one pattern from credentials.json. It reports an
+// error when the pattern is not there, so a caller can tell "removed"
+// from "was never there" -- the same contract Remove keeps for material.
+//
+// Removing the "*" entry leaves the deployment with no default
+// credential, and so leaves every repo no narrower pattern covers
+// failing closed. That is a real thing to want (a deployment whose repos
+// are each named explicitly) and the caller is the one placed to say
+// whether it was meant, so it is allowed here and questioned there.
+func (c *CredentialSet) RemovePattern(pattern string) error {
+	pattern, err := ValidCredentialPattern(pattern)
+	if err != nil {
+		return err
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	patterns := maps.Clone(c.patternsLocked())
+	if _, ok := patterns[pattern]; !ok {
+		return fmt.Errorf("no credentials.json entry for %q", pattern)
+	}
+	delete(patterns, pattern)
+	return c.writePatternsLocked(patterns)
+}
+
+// writePatternsLocked replaces credentials.json with patterns, then
+// adopts it as this set's own map. Callers must hold mu.
+//
+// Written to a temporary file and renamed into place for the same reason
+// SetToken does it: another process's ladder is re-reading this file
+// whenever it changes, and it must see the whole old map or the whole
+// new one. Mode 0600 and indented, because the thing an operator reads
+// when they go looking on the host should be legible.
+func (c *CredentialSet) writePatternsLocked(patterns map[string]string) error {
+	data, err := json.MarshalIndent(patterns, "", "  ")
+	if err != nil {
+		return fmt.Errorf("writing credentials.json: %w", err)
+	}
+	data = append(data, '\n')
+	if err := os.MkdirAll(c.dir, 0o700); err != nil {
+		return fmt.Errorf("creating the GitHub secrets directory: %w", err)
+	}
+	tmp, err := os.CreateTemp(c.dir, ".credentials.json.tmp")
+	if err != nil {
+		return fmt.Errorf("writing credentials.json: %w", err)
+	}
+	defer os.Remove(tmp.Name())
+	if err := tmp.Chmod(0o600); err != nil {
+		tmp.Close()
+		return fmt.Errorf("writing credentials.json: %w", err)
+	}
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return fmt.Errorf("writing credentials.json: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("writing credentials.json: %w", err)
+	}
+	if err := os.Rename(tmp.Name(), c.patternsFile()); err != nil {
+		return fmt.Errorf("writing credentials.json: %w", err)
+	}
+	c.patterns, c.patternsStamp = patterns, statPatternFile(c.patternsFile())
 	return nil
 }
 

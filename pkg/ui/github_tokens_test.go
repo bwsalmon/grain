@@ -331,8 +331,9 @@ func TestRemovingATokenDeletesItAndAsksForARestart(t *testing.T) {
 }
 
 // Deleting a credential the ladder still points at would take every push
-// it covers down, so it is refused rather than done -- credentials.json
-// is not editable from here, and the error says so.
+// it covers down, so it is refused rather than done -- the error names
+// the entries to repoint or remove first, which is now work this same
+// pane does (grain/task-4).
 func TestRemovingACredentialTheLadderNamesIsRefused(t *testing.T) {
 	srv, _, dir := gitHubTokenServer(t,
 		map[string]string{"*": "bot", "acme/*": "acme-bot"},
@@ -344,8 +345,8 @@ func TestRemovingACredentialTheLadderNamesIsRefused(t *testing.T) {
 		if rec.Code != http.StatusBadRequest {
 			t.Fatalf("DELETE %s status = %d, want 400: %s", name, rec.Code, rec.Body)
 		}
-		if !strings.Contains(rec.Body.String(), "credentials.json") {
-			t.Errorf("DELETE %s said %q, want it to name credentials.json", name, rec.Body)
+		if !strings.Contains(rec.Body.String(), "credential ladder") {
+			t.Errorf("DELETE %s said %q, want it to name the ladder entries in the way", name, rec.Body)
 		}
 		if _, err := os.Stat(filepath.Join(dir, name+".token")); err != nil {
 			t.Errorf("%s.token was removed by a refused delete: %v", name, err)

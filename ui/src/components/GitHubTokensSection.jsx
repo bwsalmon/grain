@@ -4,6 +4,7 @@ import {
   Box,
   Button,
   Chip,
+  MenuItem,
   Stack,
   TextField,
   Typography,
@@ -25,16 +26,28 @@ import api from "../api.js";
 // Write-only like every other credential control in this pane: a value
 // goes in, names and presence come back, nothing is ever read out.
 //
+// grain/task-4 added the second half: which repos reach which
+// credential, credentials.json itself. That file was the last thing
+// standing a deployment up needed a shell on the host for -- and the
+// least discoverable, since a UI that had taken the token quite happily
+// gave no sign that every clone was still going to fail closed. The
+// first token added now becomes the deployment default on its own, and
+// the ladder below is there for the narrower entries.
+//
 // The one thing this pane cannot do for an operator is make a new token
-// usable straight away. The credential ladder is deliberately loaded
-// once, at daemon startup -- so a token added here is on disk, but this
-// process is still offering exactly the capabilities it started with.
-// The API answers with both facts per token (present, offered), and the
-// disagreement between them is what "restart needed" below is.
+// grantable straight away. The capability set is built once, at daemon
+// startup -- so a token added here is on disk, but this process is still
+// offering exactly the capabilities it started with. The API answers
+// with both facts per token (present, offered), and the disagreement
+// between them is what "restart needed" below is. A *ladder* change
+// carries no such wait: the git proxy re-reads credentials.json, so a
+// repo pointed at a credential here is pushed with it on its next clone.
 export default function GitHubTokensSection({ showError }) {
   const [resp, setResp] = useState(null);
   const [name, setName] = useState("");
   const [value, setValue] = useState("");
+  const [pattern, setPattern] = useState("");
+  const [patternCredential, setPatternCredential] = useState("");
 
   const refresh = useCallback(async () => {
     try {
@@ -76,6 +89,38 @@ export default function GitHubTokensSection({ showError }) {
     }
   };
 
+  const submitPattern = async (evt) => {
+    evt.preventDefault();
+    try {
+      setResp(
+        await api("/api/github-credential-patterns", {
+          method: "PUT",
+          body: JSON.stringify({
+            pattern: pattern.trim(),
+            credential: patternCredential,
+          }),
+        }),
+      );
+      setPattern("");
+      setPatternCredential("");
+    } catch (err) {
+      showError(err);
+    }
+  };
+
+  const removePattern = async (entry) => {
+    try {
+      setResp(
+        await api(
+          `/api/github-credential-patterns?pattern=${encodeURIComponent(entry)}`,
+          { method: "DELETE" },
+        ),
+      );
+    } catch (err) {
+      showError(err);
+    }
+  };
+
   // Nothing until the listing is in hand -- and a response with no body
   // at all (an older daemon that has never heard of this endpoint,
   // answering 204) is read the same way rather than rendered as an empty
@@ -83,6 +128,14 @@ export default function GitHubTokensSection({ showError }) {
   if (!resp) return null;
 
   const tokens = resp.tokens || [];
+  const patterns = resp.patterns || [];
+  // Anything a ladder entry may name: a credential that exists, plus the
+  // no-credential-at-all case a public repo wants. The same set
+  // SetPattern accepts, so the picker cannot offer what the API refuses.
+  const credentialChoices = [
+    ...tokens.filter((token) => token.present).map((token) => token.name),
+    "anonymous",
+  ];
 
   return (
     <Box sx={{ mt: 3 }}>
@@ -92,9 +145,9 @@ export default function GitHubTokensSection({ showError }) {
         default one serves every repo the ladder covers; each of the others is a
         capability a single task can be given (&quot;GitHub token:
         &lt;name&gt;&quot;), for work that needs a scope or an account the
-        default deliberately isn&apos;t. Which repos fall back to which
-        credential is still credentials.json on the host
-        {resp.dir ? ` (${resp.dir})` : ""}, not editable from here.
+        default deliberately isn&apos;t. They are files under
+        {resp.dir ? ` ${resp.dir}` : " this deployment's secrets directory"},
+        the ones the git proxy reads.
       </Typography>
       {!resp.enabled && (
         <Alert severity="info" sx={{ mb: 2 }}>
@@ -105,6 +158,14 @@ export default function GitHubTokensSection({ showError }) {
       )}
       {resp.enabled && (
         <>
+          {tokens.length > 0 && !resp.defaultName && (
+            <Alert severity="warning" sx={{ mb: 2 }}>
+              No default credential: nothing in the ladder below covers a repo
+              with no entry of its own, so every clone and push for one fails
+              with &quot;no credential configured&quot;. Point &quot;*&quot; at
+              a credential to fix it.
+            </Alert>
+          )}
           {resp.restartRequired && (
             <Alert severity="warning" sx={{ mb: 2 }}>
               Restart the daemon to finish applying the changes below. The
@@ -201,6 +262,92 @@ export default function GitHubTokensSection({ showError }) {
                 disabled={name.trim() === "" || value === ""}
               >
                 Save token
+              </Button>
+            </Stack>
+          </form>
+
+          <Typography variant="subtitle2" sx={{ mt: 3 }}>
+            Which repos use which credential
+          </Typography>
+          <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+            credentials.json, the ladder the git proxy resolves every clone and
+            push against. The narrowest entry covering a repo wins: owner/repo,
+            then owner/*, then &quot;*&quot; -- the deployment default, which
+            the first credential added above becomes. Changes here need no
+            restart.
+          </Typography>
+          <ul className="secrets-list">
+            {patterns.map((entry) => (
+              <li className="secret-row" key={entry.pattern}>
+                <span className="secret-name">{entry.pattern}</span>
+                <Box
+                  sx={{ display: "flex", gap: 0.6, flexWrap: "wrap", flex: 1 }}
+                >
+                  <Chip
+                    size="small"
+                    color={entry.pattern === "*" ? "primary" : "default"}
+                    label={entry.credential}
+                  />
+                  {entry.missing && (
+                    <Chip
+                      size="small"
+                      color="error"
+                      label="no such credential"
+                    />
+                  )}
+                </Box>
+                <Button
+                  size="small"
+                  variant="outlined"
+                  aria-label={`delete ladder entry ${entry.pattern}`}
+                  onClick={() => removePattern(entry.pattern)}
+                >
+                  Delete
+                </Button>
+              </li>
+            ))}
+          </ul>
+          {patterns.length === 0 && (
+            <p className="empty">
+              No ladder entries: every repo fails closed until one is added.
+            </p>
+          )}
+          <form onSubmit={submitPattern}>
+            <TextField
+              label="Repo pattern"
+              helperText='"*" for the deployment default, or owner/* or owner/repo for something narrower.'
+              value={pattern}
+              onChange={(evt) => setPattern(evt.target.value)}
+              autoComplete="off"
+              required
+              InputLabelProps={{ required: false }}
+              fullWidth
+              margin="normal"
+            />
+            <TextField
+              select
+              label="Credential"
+              helperText='the credential those repos are pushed and pulled with -- "anonymous" sends no credential at all, which is what a public repo needs.'
+              value={patternCredential}
+              onChange={(evt) => setPatternCredential(evt.target.value)}
+              required
+              InputLabelProps={{ required: false }}
+              fullWidth
+              margin="normal"
+            >
+              {credentialChoices.map((choice) => (
+                <MenuItem key={choice} value={choice}>
+                  {choice}
+                </MenuItem>
+              ))}
+            </TextField>
+            <Stack direction="row" justifyContent="flex-end" sx={{ mt: 2 }}>
+              <Button
+                type="submit"
+                variant="contained"
+                disabled={pattern.trim() === "" || patternCredential === ""}
+              >
+                Save entry
               </Button>
             </Stack>
           </form>
