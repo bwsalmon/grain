@@ -1734,6 +1734,25 @@ fieldset legend {
   padding-left: 1.9rem;
 }
 
+/* Metrics reports its latency percentiles and its tool use as tables of
+   six and seven columns, and MUI's own cell padding is most of a phone
+   screen before a single figure is printed -- a table that will not fit
+   takes the whole pane sideways with it when it is panned. Tighter
+   cells, and the columns fit. */
+:root[data-phone="true"] .MuiTableCell-sizeSmall {
+  padding: 6px;
+  font-size: 0.78rem;
+}
+
+/* The rail's entries are 38px tall, which is a comfortable click and a
+   miss with a thumb; in the drawer they get the ~44px a touch target
+   wants. The rail beside a page keeps its own density -- this is the
+   drawer's paper, so only the phone's copy of it is affected. */
+:root[data-phone="true"] .MuiDrawer-paper .MuiListItemButton-root,
+:root[data-phone="true"] .MuiDrawer-paper .MuiButton-root {
+  min-height: 44px;
+}
+
 /* A board column is a screen wide, and the strip snaps: the board is
    the one view that scrolls sideways, and on a phone that turns into
    swiping between whole columns rather than dragging a strip of

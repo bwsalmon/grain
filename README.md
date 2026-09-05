@@ -2950,6 +2950,31 @@ are unchanged. `style.css` still owns what MUI has no primitive for: the
 state dot/badge, the sidebar's brand mark, and layout for the task list
 and detail panel.
 
+**A phone gets a shell that fits it; a tablet gets the one above
+(grain/task-19).** Every view here is built around a permanent 232px nav
+rail standing beside a pane, which a tablet has the width for and a
+phone does not: on a 390px screen the rail is more than half the window,
+a task row truncates everything after its title, and a board column is a
+third of a screen wide. `ui/src/phone.js` asks the one question — under
+600px wide, or short and landscape, which is a phone turned sideways and
+never a tablet — and both the layout and the stylesheet answer it the
+same way, because `App.jsx` publishes the answer as `data-phone` on
+`<html>` exactly as `AppThemeProvider` publishes the resolved light/dark
+mode. That is what keeps `style.css` from carrying a second copy of the
+media query, and it reaches the overlay panes, which MUI renders into a
+portal outside the shell. What a phone gets is not a second UI: the same
+`Sidebar` element moves, whole, into `PhoneNav`'s drawer behind a top bar
+(and the drawer closes on any tap inside it, since every control in the
+rail is a navigation), panes take the full width, centered dialogs go
+full screen, and `style.css`'s phone block brings the page gutters in,
+wraps a task row's chips onto lines of their own, widens a board column
+to the screen and stacks the task detail's two columns.
+`ui/e2e/phone.spec.js` is where that is checked, because it is the only
+suite with a layout engine in it — jsdom can say which elements rendered
+and nothing about how wide they came out — and it asserts the tablet half
+of the bargain too: at 820px the rail is still beside the page and a pane
+still starts exactly where the rail ends.
+
 **Agent prose is rendered as the markdown it is written in
 (grain/task-93).** Every framework grain dispatches answers in markdown
 by default, so a relayed question or a `comment_on_issue` note arrives
