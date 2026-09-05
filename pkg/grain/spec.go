@@ -97,10 +97,18 @@ type Spec struct {
 	// This is how a run reaches anything outside its sandbox, and it is
 	// the only way. There is no tool for it and no connection to the
 	// controller: whatever a deployment wants an agent to be able to ask
-	// for, it puts a CLI in the guest image and a credential here, and
-	// the agent runs it with run_command like anything else. grain's own
+	// for, it puts a CLI in the guest and a credential here, and the
+	// agent runs it with run_command like anything else. grain's own
 	// escape hatches -- opening a pull request, asking a human -- are
 	// that and nothing more.
+	//
+	// How the CLI gets there is not this field's business, and there are
+	// two routes: grain's own grainctl is baked into the container layer
+	// and installed by the shim on the pass that applies these, while a
+	// deployment's extras can be in the guest image or arrive here like
+	// anything else. A binary does not travel in a Placement -- that
+	// would make the configuration path a delivery mechanism -- but a
+	// wrapper script around one may.
 	//
 	// Into the guest, with no other side to choose. Every capability
 	// grain has that places anything places it in the sandbox --

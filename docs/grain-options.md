@@ -668,7 +668,7 @@ protocol's problem. That deleted `grain proxy`, `SocketUpstream`,
 hazard, the wait-for-first-attach rule and the merging server.
 
 **5. A CLI in the guest.** *Chosen.* Nothing leaves the container at all.
-The escape hatch is a binary in the guest image with a credential placed
+The escape hatch is a binary in the guest with a credential placed
 beside it, run with `run_command` like anything else the agent runs.
 
 ### Why the fifth won
@@ -723,7 +723,7 @@ silently doing the wrong thing. But it is a real loss and worth naming.
 
 **The one-sentence extension story.** Under design 4 it was: write a plain
 MCP server, list it in the controller's config, and its tools appear to
-every agent. Now it is: ship a binary in the guest image, place a
+every agent. Now it is: ship a binary into the guest, place a
 credential, and mention it in the prompt or the setup script. Comparable
 work, but the second one is not a standard anybody else implements.
 
@@ -827,5 +827,5 @@ scoped anyway.
 Both properties were kept and paid for differently. `wait_for_checks`
 still blocks in-run, as a guest command that has not returned. The
 extension story is no longer one sentence of a public standard; it is a
-binary in the guest image and a placement, which is the trade the section
-above accepts.
+binary in the guest and a placement, which is the trade the section above
+accepts.

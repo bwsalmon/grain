@@ -36,7 +36,7 @@
 //
 // Everything else is not a tool at all. Whatever a deployment wants an
 // agent to be able to ask for -- open a pull request, wait on checks, ask
-// a human a question -- it puts a CLI in the guest image and a credential
+// a human a question -- it puts a CLI in the guest and a credential
 // beside it as a Spec.Placement, and the agent runs it with run_command
 // like anything else it runs. Grain holds no vocabulary for any of it.
 //

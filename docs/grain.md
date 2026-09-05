@@ -208,7 +208,7 @@ in one of four shapes:
   the clone included, since a clone is git commands in a guest;
 - **a placement** (`/grain/placements/…`), which is where a credential the
   work needs goes, git's among them;
-- **a CLI in the guest image**, with its credential as a placement, for
+- **a CLI in the guest**, with its credential as a placement, for
   anything the agent should be able to ask for beyond its own sandbox.
 
 A shim that understood repositories would have to agree with the
@@ -724,11 +724,57 @@ places are the same ones every other decision here turns on.
 | **`grain`** | the container, as PID 1 | boots the VMM, applies placements, runs setup, starts the agent, serves the six sandbox tools, writes records to stdout | the guest, over vsock |
 | **`grainctl`** | the guest | what the agent runs with `run_command`: `activity` locally, and the controller verbs — `open-pull-request`, `wait-for-checks`, `ask-question` | the controller, with a placed credential |
 
-Ships alongside, not grain's: `kontur` in the container image
+Ships alongside, not grain's: `kontur` in the container layer
 (`COPY --from=kontur`, since kontur's own final stage is `FROM scratch`),
-and `kontur-agent` in the guest disk image. So the container holds `grain`
-+ `kontur` + the agent CLIs, and the guest holds `kontur-agent` +
-`grainctl`.
+and `kontur-agent` in the guest.
+
+### Where each one is baked, which is fewer places than it looks
+
+Grain publishes **two images, as it does today**: its own, and the sandbox
+image (`sandboximage.go`, `grainimage.go`, stamped into each other at link
+time so a build says which sandbox it expects). The sandbox image is
+already *one artifact carrying both halves* — "the container and the guest
+are the same thing, with one tag to stamp and one to pull", since kontur
+generates the SSH keypair per VM boot and the guest disk stopped needing
+to be built per host. So all three binaries live in two images:
+
+| image | holds |
+| --- | --- |
+| grain's own | the controller |
+| the sandbox image | `grain` + `kontur` + the agent CLIs in the container layer; `kontur-agent` in the guest disk; **`grainctl`** |
+
+**`grainctl` is baked into the container layer and installed into the
+guest by the shim**, on the same provisioning pass that applies
+placements. Not *as* a placement — a placement's bytes come from the Spec,
+and a Spec carrying a binary is the configuration path being used as a
+delivery mechanism — but by the same walk, from a fixed path in the
+container to a fixed path in the guest.
+
+That way round because the guest disk is *derived* from a published kontur
+image (`scripts/kontur/build-guest.sh`) rather than authored, so keeping
+grain's binaries out of the derivation keeps it a derivation. It also
+means `grainctl` versions with the shim that reads its `activity` file,
+which is the coupling that would otherwise need a rule.
+
+### But it is a separable artifact, and should be published as one
+
+The default path is the sandbox image; it should not be the only one. A
+deployment running a different agent harness — no grain shim, no kontur
+guest, an agent somewhere else entirely — still wants the controller
+verbs, and the controller does not care what is on the other end: it
+resolves a token to a live run and checks scope, which is true of any
+caller.
+
+Two things follow for how `grainctl` is built:
+
+- **Static, with no assumption that grain is around it.** It has to run in
+  a guest grain did not build.
+- **Its verbs split by what they assume, and that split is worth being
+  explicit about.** The controller verbs need only an address and a
+  credential. `activity` needs grain's shim to be reading
+  `/run/grain/activity` — outside a grain, it writes a file nobody reads.
+  A no-op sink rather than an error, since a harness that cannot report
+  activity should not thereby fail to open a pull request.
 
 **This resolves the guest-writer question** (open item 9, now closed): one
 guest CLI means `activity` is a verb of `grainctl` rather than a second
@@ -769,13 +815,14 @@ named for the condition rather than the cure.
    persist what it reads. It also puts prompts and model output wherever
    that deployment ships container logs — a per-deployment decision rather
    than a detail.
-2. **grain needs its own images — two of them.** kontur's final stage is
-   `FROM scratch` with `ENTRYPOINT ["/usr/local/bin/kontur"]`, so a
-   node-based CLI cannot run there; kontur keeps its scratch image. grain
-   ships a **container image** — a real base, `COPY --from=kontur`, the
-   agent CLIs, and `grain run` as entrypoint — and adds `grainctl` to the
-   **guest disk image** beside `kontur-agent`. Two artifacts on two sides
-   of the vsock boundary, matching the binary split.
+2. **The sandbox image gains a real base and an entrypoint.** kontur's
+   final stage is `FROM scratch` with
+   `ENTRYPOINT ["/usr/local/bin/kontur"]`, so a node-based CLI cannot run
+   there; kontur keeps its scratch image. Grain's sandbox image needs a
+   real base, `COPY --from=kontur`, the agent CLIs, `grainctl`, and `grain
+   run` as entrypoint. Still two published images, not three — the
+   sandbox image already carries the container layer and the guest disk
+   together.
 3. **Verify kontur tolerates not being PID 1.** Its run mode currently boots
    the VMM as PID 1; as a child of the shim, signal forwarding and zombie
    reaping become the shim's job.
@@ -839,8 +886,8 @@ path and the agent's location, not of the task model.
    daemon. Shares `gitproxy`'s token store and `startGitProxy`'s
    advertise-host handling. `grainctl activity` lands here too and depends
    on none of it.
-6. kontur's NAT mode (the blocking ask), then `grain run` and the two
-   images. Steps 1–5 do not wait on it.
+6. kontur's NAT mode (the blocking ask), then `grain run` and the sandbox
+   image. Steps 1–5 do not wait on it.
 7. `KonturGrains`.
 8. Delete: `recreate.go`, `orphan.go`, `recover.go`, `InFlight`, `runOne`,
    `RunDispatch`'s sandbox half, `pkg/ui/sandbox_recreate.go`.

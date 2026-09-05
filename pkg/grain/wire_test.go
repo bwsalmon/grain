@@ -403,7 +403,7 @@ func keys(m map[string]grain.File) []string {
 }
 
 // Nothing outside the sandbox is a tool. A deployment's escape hatches --
-// opening a pull request, asking a human -- are a CLI in the guest image
+// opening a pull request, asking a human -- are a CLI in the guest
 // and a credential in a placement, run with run_command like anything
 // else, so this package holds no vocabulary for any of them and no idea
 // that a controller exists.
