@@ -1340,8 +1340,9 @@ kontur_unavailable() {
   echo "          machine with no isolation, which nothing about this run asked for. Fix the" >&2
   echo "          prerequisite above and re-run, or re-run with GRAIN_HOST_SANDBOXES=1 to accept" >&2
   echo "          an unsandboxed deployment deliberately." >&2
-  echo "setup.sh: whatever was already installed here is untouched -- grain-daemon.service, if this" >&2
-  echo "          host had one, is still running the configuration it had before this run." >&2
+  echo "setup.sh: this stops before write_systemd_units and write_image_ref, so a host that already" >&2
+  echo "          had a grain-daemon.service is still running the unit and the image it had before" >&2
+  echo "          this run -- an update that cannot meet its prerequisites changes nothing." >&2
   exit 1
 }
 
