@@ -8,7 +8,7 @@ import {
   ListItemText,
   Typography,
 } from "@mui/material";
-import { STATE_LABELS, STATE_ORDER, repoRows } from "../state.js";
+import { STATE_LABELS, STATE_ORDER, inboxTasks, repoRows } from "../state.js";
 import { SIDEBAR_WIDTH } from "../theme.js";
 import { useTimeZone } from "../TimeZoneContext.jsx";
 import { formatDateTime } from "../time.js";
@@ -119,6 +119,7 @@ export default function Sidebar({
     if (t.blocked) blocked += 1;
   }
   const repoCount = repoRows(config, tasks).length;
+  const inboxCount = inboxTasks(tasks).length;
 
   // Picking a state filter always lands on the task list -- there is
   // nothing for it to scope on the repo page.
@@ -218,6 +219,48 @@ export default function Sidebar({
         disablePadding
         sx={{ display: "flex", flexDirection: "column", gap: 0.2 }}
       >
+        {/* The inbox (InboxPage.jsx, grain/task-20) is first in the
+            rail, above the backlog itself, because it is the only
+            entry here that is about the reader: everything below counts
+            work, and this counts what that work is waiting on *them*
+            for. A deployment left alone for a day fills up with tasks
+            parked on a question and proposals nobody approved, and none
+            of that is visible in a list whose top row is whatever ran
+            most recently.
+            No glyph, the state entries' invisible `dot dot-all` -- it
+            shows tasks rather than a list of its own kind of thing, the
+            same reasoning the Board entry below follows -- and no
+            count at all when nothing is waiting, since the whole point
+            of the number is that it is worth acting on. */}
+        <ListItemButton
+          selected={view === "inbox"}
+          onClick={() => onSetView("inbox")}
+          sx={{ borderRadius: 1.5, py: 0.6, px: 0.9 }}
+        >
+          <span className="nav-icon">
+            <span className="dot dot-all" />
+          </span>
+          <ListItemText
+            primary="Inbox"
+            sx={{ ml: 1 }}
+            primaryTypographyProps={{ fontSize: "0.85rem", fontWeight: 500 }}
+          />
+          {inboxCount > 0 && (
+            <Chip
+              label={inboxCount}
+              size="small"
+              color="primary"
+              title={`${inboxCount} task${inboxCount === 1 ? "" : "s"} waiting on you`}
+              sx={{
+                height: 18,
+                fontSize: "0.7rem",
+                fontWeight: 600,
+                "& .MuiChip-label": { px: 0.7 },
+              }}
+            />
+          )}
+        </ListItemButton>
+        <Divider sx={{ my: 0.7 }} />
         <NavItem
           id="all"
           label="All tasks"

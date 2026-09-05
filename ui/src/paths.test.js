@@ -7,9 +7,18 @@ describe("parsePath", () => {
   });
 
   it("parses each sidebar destination", () => {
-    for (const view of ["board", "repos", "schedules", "templates"]) {
+    for (const view of ["inbox", "board", "repos", "schedules", "templates"]) {
       expect(parsePath(`/${view}`)).toEqual({ view });
     }
+  });
+
+  // The inbox shows tasks and still takes no narrowing: it is one fixed
+  // question rather than a view of the backlog somebody refines
+  // (paths.js's showsTaskView).
+  it("ignores a query on the inbox", () => {
+    expect(parsePath("/inbox", "?q=ci&repo=acme/widgets")).toEqual({
+      view: "inbox",
+    });
   });
 
   it("falls back to tasks for the retired logs/sandboxes paths", () => {
@@ -171,6 +180,13 @@ describe("buildPath", () => {
   it("builds a plain path for the other sidebar views", () => {
     expect(buildPath({ view: "repos" })).toBe("/repos");
     expect(buildPath({ view: "board" })).toBe("/board");
+    expect(buildPath({ view: "inbox" })).toBe("/inbox");
+  });
+
+  it("leaves a narrowing off the inbox's own path", () => {
+    expect(buildPath({ view: "inbox", narrowing: { search: "ci" } })).toBe(
+      "/inbox",
+    );
   });
 
   it("builds a repo's own path, and its releases pane's", () => {

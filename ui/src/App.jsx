@@ -4,6 +4,7 @@ import { buildPath, parsePath } from "./paths.js";
 import { NO_NARROWING } from "./taskFilters.js";
 import { TimeZoneProvider } from "./TimeZoneContext.jsx";
 import Sidebar from "./components/Sidebar.jsx";
+import InboxPage from "./components/InboxPage.jsx";
 import TaskList from "./components/TaskList.jsx";
 import TaskBoard from "./components/TaskBoard.jsx";
 import RepoList from "./components/RepoList.jsx";
@@ -348,6 +349,23 @@ export default function App() {
       }
     },
     [openTask, refreshList, showError],
+  );
+
+  // inboxAct is `act` without the overlay: run one mutation, then
+  // refresh the list. The inbox's own row buttons (InboxPage.jsx) answer
+  // a task where it sits, so opening its detail on the way -- which is
+  // the whole difference between this and `act` -- would put a pane over
+  // the list the reader is working down, once per click.
+  const inboxAct = useCallback(
+    async (mutate) => {
+      try {
+        await mutate();
+        await refreshList();
+      } catch (err) {
+        showError(err);
+      }
+    },
+    [refreshList, showError],
   );
 
   // actBatch is `act` (above) widened to many tasks at once: run one
@@ -791,6 +809,18 @@ export default function App() {
                 onRefresh={refreshSuites}
                 onRefreshRuns={refreshSuiteRuns}
                 onRefreshTemplates={refreshTemplates}
+                showError={showError}
+              />
+            ) : view === "inbox" ? (
+              /* Every task, like the board: which ones belong here is
+                 the page's own question (state.js's waitsOnUser), and
+                 the sidebar's state filter is a question about the flat
+                 list. */
+              <InboxPage
+                tasks={tasks}
+                config={config}
+                onOpenTask={openTask}
+                onAct={inboxAct}
                 showError={showError}
               />
             ) : view === "board" ? (

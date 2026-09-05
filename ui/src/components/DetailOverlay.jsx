@@ -30,6 +30,7 @@ import {
   knownRepos,
   lastBaseForRepo,
   orphanedPullRequest,
+  pullRequestUrl,
   runActivity,
   stateLabel,
 } from "../state.js";
@@ -360,13 +361,6 @@ function EditTaskForm({ t, templates, act, onDone }) {
       </Stack>
     </Stack>
   );
-}
-
-// pullRequestUrl turns "owner/name#123" (t.pullRequest, straight off
-// model.PullRequestRef.String()) into the GitHub URL it names.
-function pullRequestUrl(ref) {
-  const [repo, number] = ref.split("#");
-  return `https://github.com/${repo}/pull/${number}`;
 }
 
 // Real columns on the task now, not directive lines parsed out of a

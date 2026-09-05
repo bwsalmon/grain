@@ -779,6 +779,48 @@ describe("App", () => {
     expect(window.location.pathname).toBe("/board");
   });
 
+  // grain/task-20: the inbox is the same tasks again, narrowed to what
+  // is waiting on the reader and answered where they sit -- so an action
+  // fired from a row must not open that task's pane over the list they
+  // are working down.
+  it("answers a proposal from the inbox without opening its pane", async () => {
+    setupApi();
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByText("Fix bug");
+
+    // The count of what is waiting rides in the entry's own label.
+    await user.click(screen.getByRole("button", { name: "Inbox 1" }));
+
+    expect(
+      await screen.findByRole("heading", { name: "Inbox" }),
+    ).toBeInTheDocument();
+    expect(window.location.pathname).toBe("/inbox");
+    // The queued task is grain's business, not the reader's.
+    expect(screen.queryByText("Fix bug")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Approve" }));
+
+    await waitFor(() =>
+      expect(api).toHaveBeenCalledWith("/api/tasks/2/approve", {
+        method: "POST",
+      }),
+    );
+    expect(document.querySelector(".detail-header")).toBeNull();
+  });
+
+  it("opens the inbox on a fresh load of /inbox", async () => {
+    window.history.replaceState(null, "", "/inbox");
+    setupApi();
+    render(<App />);
+
+    expect(
+      await screen.findByRole("heading", { name: "Inbox" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Add feature")).toBeInTheDocument();
+    expect(window.location.pathname).toBe("/inbox");
+  });
+
   it("opens the board on a fresh load of /board", async () => {
     window.history.replaceState(null, "", "/board");
     setupApi();

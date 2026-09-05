@@ -152,6 +152,62 @@ export function relativeAge(iso, now = Date.now()) {
   return `${Math.floor(hours / 24)}d`;
 }
 
+// waitsOnUser is the question the inbox asks of one task: is grain done
+// with this until a person does something about it? (InboxPage.jsx,
+// grain/task-20.)
+//
+// Four states say yes on their own. "Awaiting reply" and "Awaiting
+// submit" are the two a task never leaves by itself (STATE_LABELS' own
+// wording for both). "Failed" is the third in practice: dispatch has
+// given up after model.MaxConsecutiveFailures, and Retry is the only way
+// out. "Proposed" is the fourth -- an agent's own propose_task filed it
+// and nothing dispatches it until somebody approves it -- and it is the
+// one whose wait is easy to miss, because a proposal that nobody ever
+// looks at simply sits in the backlog looking like queued work.
+//
+// The fifth is not a state at all: a completed task the merge queue has
+// given up on (completionPhase above). Its badge still reads "Queued for
+// merge" and it is on no queue, so of everything here it is the case a
+// human is least likely to find by scrolling the list.
+//
+// Deliberately not here: "blocked". A blocked task is waiting on another
+// task, not on a person -- it starts on its own the moment what it
+// depends on lands -- and putting it here would fill the inbox with rows
+// there is nothing to do about.
+export function waitsOnUser(t) {
+  if (INBOX_STATES.includes(t.state)) return true;
+  return t.state === "completed" && completionPhase(t) !== null;
+}
+
+// INBOX_STATES is waitsOnUser's own list of states, in no particular
+// order -- the inbox decides what order to show its groups in
+// (InboxPage.jsx's GROUPS), which is a question about urgency rather
+// than about the life cycle STATE_ORDER describes.
+export const INBOX_STATES = [
+  "awaiting_reply",
+  "awaiting_submit",
+  "failed",
+  "proposed",
+];
+
+// inboxTasks is every task waitsOnUser admits, in the order they were
+// given -- the backlog's own order (ui.Client.ListTasks), the same order
+// every other list of tasks starts from.
+export function inboxTasks(tasks) {
+  return (tasks || []).filter(waitsOnUser);
+}
+
+// pullRequestUrl turns "owner/name#123" (t.pullRequest, straight off
+// model.PullRequestRef.String()) into the GitHub URL it names. It lived
+// in DetailOverlay.jsx until the inbox needed the same link on a row
+// (InboxPage.jsx) -- two views spelling out github.com/.../pull/... for
+// themselves is one of them getting it wrong the first time the ref's
+// own shape changes.
+export function pullRequestUrl(ref) {
+  const [repo, number] = ref.split("#");
+  return `https://github.com/${repo}/pull/${number}`;
+}
+
 // orphanedPullRequest names the pull request a closed task has left open
 // behind it, or null when there is none to name.
 //

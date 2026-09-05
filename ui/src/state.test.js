@@ -7,16 +7,79 @@ import {
   closablePullRequest,
   completionPhase,
   defaultCapabilitiesFor,
+  inboxTasks,
   knownRepos,
   lastBaseForRepo,
   orphanedPullRequest,
+  pullRequestUrl,
   relativeAge,
   repoActivity,
   repoRows,
   runActivity,
   stateLabel,
   unionCapabilities,
+  waitsOnUser,
 } from "./state.js";
+
+describe("waitsOnUser", () => {
+  it("admits the four states a task never leaves on its own", () => {
+    for (const state of [
+      "proposed",
+      "awaiting_reply",
+      "awaiting_submit",
+      "failed",
+    ]) {
+      expect(waitsOnUser({ state })).toBe(true);
+    }
+  });
+
+  it("leaves out the states grain is still working through", () => {
+    for (const state of ["queued", "running", "completed", "closed"]) {
+      expect(waitsOnUser({ state })).toBe(false);
+    }
+  });
+
+  // Its badge still reads "Queued for merge" and it is on no queue --
+  // the one case in the inbox that nothing else on screen says out loud.
+  it("admits a completed task the merge queue has given up on", () => {
+    expect(
+      waitsOnUser({
+        state: "completed",
+        pullRequest: "acme/widgets#1",
+        mergeQueueBlockedAt: "2026-08-01T00:00:00Z",
+      }),
+    ).toBe(true);
+  });
+
+  // A blocked task starts on its own the moment what it depends on
+  // lands, so there is nothing for a reader to do about it.
+  it("leaves out a blocked task waiting on another task", () => {
+    expect(waitsOnUser({ state: "queued", blocked: true })).toBe(false);
+  });
+});
+
+describe("inboxTasks", () => {
+  it("keeps the order it was given", () => {
+    const tasks = [
+      { id: "1", state: "failed" },
+      { id: "2", state: "running" },
+      { id: "3", state: "proposed" },
+    ];
+    expect(inboxTasks(tasks).map((t) => t.id)).toEqual(["1", "3"]);
+  });
+
+  it("reads a missing list as an empty one", () => {
+    expect(inboxTasks(undefined)).toEqual([]);
+  });
+});
+
+describe("pullRequestUrl", () => {
+  it("turns a pull request ref into the GitHub URL it names", () => {
+    expect(pullRequestUrl("acme/widgets#42")).toBe(
+      "https://github.com/acme/widgets/pull/42",
+    );
+  });
+});
 
 describe("completionPhase", () => {
   it("returns null for a task whose run is not over", () => {

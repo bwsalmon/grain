@@ -149,6 +149,62 @@ describe("Sidebar", () => {
     expectOnly("Metrics");
   });
 
+  // grain/task-20: the inbox is the entry above the backlog itself,
+  // counting what is waiting on the reader rather than what grain is
+  // working through.
+  it("counts the tasks waiting on the reader beside the inbox entry", () => {
+    render(
+      <Sidebar
+        {...baseProps}
+        config={null}
+        tasks={[
+          ...tasks,
+          { id: 4, state: "proposed", blocked: false },
+          { id: 5, state: "awaiting_reply", blocked: false },
+        ]}
+      />,
+    );
+    expect(screen.getByRole("button", { name: /Inbox 2/ })).toBeInTheDocument();
+  });
+
+  it("shows no count on the inbox when nothing is waiting", () => {
+    render(<Sidebar {...baseProps} config={null} tasks={tasks} />);
+    expect(screen.getByRole("button", { name: "Inbox" })).toBeInTheDocument();
+  });
+
+  it("switches to the inbox view when clicked, and marks it while it is up", async () => {
+    const onSetView = vi.fn();
+    const user = userEvent.setup();
+    const { rerender } = render(
+      <Sidebar
+        {...baseProps}
+        config={null}
+        tasks={tasks}
+        view="tasks"
+        onSetView={onSetView}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Inbox" }));
+    expect(onSetView).toHaveBeenCalledWith("inbox");
+    expect(screen.getByRole("button", { name: "Inbox" })).not.toHaveClass(
+      "Mui-selected",
+    );
+
+    rerender(
+      <Sidebar
+        {...baseProps}
+        config={null}
+        tasks={tasks}
+        view="inbox"
+        onSetView={onSetView}
+      />,
+    );
+    expect(screen.getByRole("button", { name: "Inbox" })).toHaveClass(
+      "Mui-selected",
+    );
+  });
+
   // grain/task-287: the board is a destination of its own, not one of
   // the state entries above it -- those each ask for one state and
   // always land on the flat list, and a board's own columns are what
