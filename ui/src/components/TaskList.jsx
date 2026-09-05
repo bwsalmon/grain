@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Button, Checkbox, Chip, FormControlLabel } from "@mui/material";
 import DragIndicatorIcon from "@mui/icons-material/DragIndicator";
 import {
+  HIDDEN_BY_DEFAULT,
   STATE_LABELS,
   capabilityName,
   completionPhase,
@@ -89,21 +90,33 @@ export default function TaskList({
   const setFilter = (id, value) =>
     onNarrow({ filters: { ...filters, [id]: value } });
 
-  // showClosedOverride is null until this list's own "Show closed tasks"
-  // checkbox is touched -- until then, showClosed instead follows
-  // config.showClosedByDefault (bwsalmon/agents#537's deployment-wide
-  // default), even though config itself only arrives after this
-  // component's first render (App.jsx fetches it once, asynchronously).
-  // Once a viewer picks a value here it wins for the rest of this list's
-  // life. It stays local where search/sortBy/filters no longer are: it
-  // is not a narrowing somebody would link to but a standing rule about
-  // what this list shows at all, and its default is the deployment's
-  // (config.showClosedByDefault) rather than the URL's.
-  const [showClosedOverride, setShowClosedOverride] = useState(null);
-  const showClosed =
-    showClosedOverride !== null
-      ? showClosedOverride
-      : !!config?.showClosedByDefault;
+  // overrides holds, per state, whether this list's own "Show closed
+  // tasks" / "Show deferred tasks" checkbox has been touched and what it
+  // was set to. A state missing from it follows the deployment instead
+  // (state.js's HIDDEN_BY_DEFAULT names the setting, where there is one
+  // -- bwsalmon/agents#537's config.showClosedByDefault), which matters
+  // because config itself only arrives after this component's first
+  // render (App.jsx fetches it once, asynchronously). Once a viewer picks
+  // a value it wins for the rest of this list's life.
+  //
+  // These stay local where search/sortBy/filters no longer are: they are
+  // not a narrowing somebody would link to but a standing rule about what
+  // this list shows at all, and their default is the deployment's rather
+  // than the URL's.
+  const [overrides, setOverrides] = useState({});
+  const showing = (state, configKey) =>
+    overrides[state] !== undefined
+      ? overrides[state]
+      : !!(configKey && config?.[configKey]);
+  // One row per hidden-by-default state that this list could actually be
+  // hiding something of: a checkbox nobody needs is a checkbox nobody
+  // should have to read past, and viewing a state's own filter is itself
+  // a request to see it.
+  const hideable = HIDDEN_BY_DEFAULT.map((h) => ({
+    ...h,
+    shown: showing(h.state, h.configKey),
+    count: tasks.filter((t) => t.state === h.state).length,
+  })).filter((h) => h.count > 0 && stateFilter !== h.state);
 
   const q = search.trim().toLowerCase();
 
@@ -119,10 +132,13 @@ export default function TaskList({
         : stateFilter !== "all" && t.state !== stateFilter
     )
       return false;
-    // Closed tasks are hidden everywhere except the "Closed" filter
-    // itself, unless showClosed turns that back on -- viewing "Closed"
-    // is always a request to see them, so the toggle has no say there.
-    return showClosed || stateFilter === "closed" || t.state !== "closed";
+    // Closed and deferred tasks are hidden everywhere except their own
+    // filter, unless their checkbox turns them back on -- picking
+    // "Closed" or "Deferred" in the sidebar is always a request to see
+    // them, so the checkbox has no say there (and is not offered).
+    const hidden = HIDDEN_BY_DEFAULT.find((h) => h.state === t.state);
+    if (!hidden || stateFilter === t.state) return true;
+    return showing(hidden.state, hidden.configKey);
   };
   const inStateTasks = tasks.filter(inState);
 
@@ -134,7 +150,13 @@ export default function TaskList({
   const narrowed = q !== "" || activeFilters.length > 0;
 
   const matches = (t) => inState(t) && matchesFilters(t, activeFilters, q);
-  const closedCount = tasks.filter((t) => t.state === "closed").length;
+  // What an empty list owes the reader: "there is nothing here" and
+  // "there is nothing here that you are looking at" are different
+  // answers, and only the second one has a checkbox to fix it.
+  const hiddenNote = hideable
+    .filter((h) => !h.shown)
+    .map((h) => STATE_LABELS[h.state].toLowerCase())
+    .join(" and ");
 
   const reorderEnabled = !!onReorder && sortBy === "manual";
   const sortedTasks = sortTasks(tasks, sortBy);
@@ -234,18 +256,21 @@ export default function TaskList({
               Clear
             </Button>
           )}
-          {closedCount > 0 && stateFilter !== "closed" && (
+          {hideable.map((h) => (
             <FormControlLabel
+              key={h.state}
               control={
                 <Checkbox
                   size="small"
-                  checked={showClosed}
-                  onChange={(e) => setShowClosedOverride(e.target.checked)}
+                  checked={h.shown}
+                  onChange={(e) =>
+                    setOverrides({ ...overrides, [h.state]: e.target.checked })
+                  }
                 />
               }
-              label="Show closed tasks"
+              label={h.label}
             />
-          )}
+          ))}
         </ListToolbar>
       )}
       {visibleIds.length > 0 && (
@@ -335,8 +360,8 @@ export default function TaskList({
             ? "No tasks match your search."
             : activeFilters.length > 0
               ? "No tasks match these filters."
-              : !showClosed && closedCount > 0 && stateFilter !== "closed"
-                ? "No tasks in this state (closed tasks are hidden)."
+              : hiddenNote
+                ? `No tasks in this state (${hiddenNote} tasks are hidden).`
                 : "No tasks in this state."}
         </ListEmpty>
       )}

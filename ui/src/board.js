@@ -7,8 +7,8 @@
 // A board is the flat list's answer to a different question. The list
 // answers "what is the backlog, in order"; the board answers "where is
 // everything right now", and that only reads as an answer if the
-// columns match how this deployment actually works. grain has eight
-// states and no two operators want the same eight columns: one wants
+// columns match how this deployment actually works. grain has nine
+// states and no two operators want the same nine columns: one wants
 // proposed and queued side by side because approving is the daily job,
 // another wants a single "waiting on me" column holding awaiting_reply,
 // failed and awaiting_submit, because those are the three that never
@@ -74,11 +74,13 @@ export const REPO_VIEW_STORAGE_KEY = "grain.repo.view";
 // collected into one column, because they are one question: what needs
 // me.
 //
-// "Closed" gets no column. It is the same judgement the list makes with
-// its "Show closed tasks" checkbox (config.showClosedByDefault): a
-// finished task is not part of "where is everything right now", and a
-// board whose widest column is the archive says nothing. Adding a
-// column for it is two clicks in the editor for whoever disagrees.
+// "Closed" and "Deferred" get no column. It is the same judgement the
+// list makes with its "Show closed tasks" / "Show deferred tasks"
+// checkboxes (state.js's HIDDEN_BY_DEFAULT): neither a finished task nor
+// one somebody deliberately put aside is part of "where is everything
+// right now", and a board whose widest column is the archive says
+// nothing. Adding a column for either is two clicks in the editor for
+// whoever disagrees.
 export const DEFAULT_COLUMNS = [
   { id: "proposed", title: "Proposed", states: ["proposed"] },
   { id: "queued", title: "Queued", states: ["queued"] },

@@ -797,6 +797,39 @@ function Actions({ t, config, act }) {
           Withdraw approval
         </Button>
       )}
+      {/* Putting a task aside, and picking it back up: offered on
+          exactly the states ui.Client.Defer accepts, which are the two a
+          task can be in before it has ever run. It is neither closing
+          (this task is still meant to happen) nor withdrawing approval
+          (the approval survives, so a task deferred off the queue comes
+          back onto it) -- so it is its own button rather than a variant
+          of either, sitting between them here the way it sits between
+          them in the life of a task. */}
+      {(t.state === "proposed" || t.state === "queued") && (
+        <Button
+          variant="outlined"
+          title="Put this task aside for later. It stops waiting to run and drops out of the lists until you ask for it, and nothing about it is lost."
+          onClick={() =>
+            act(() => api(`/api/tasks/${t.id}/defer`, { method: "POST" }), t.id)
+          }
+        >
+          Defer
+        </Button>
+      )}
+      {t.state === "deferred" && (
+        <Button
+          variant="contained"
+          title="Pick this task back up. It returns to the queue, or to the proposals, exactly as it was left."
+          onClick={() =>
+            act(
+              () => api(`/api/tasks/${t.id}/undefer`, { method: "POST" }),
+              t.id,
+            )
+          }
+        >
+          Undefer
+        </Button>
+      )}
       {/* Once a task's run has produced a pull request, submitting is
           what puts it on the merge queue for automatic conflict
           resolution and merging. Already-submitted tasks (autoMerge

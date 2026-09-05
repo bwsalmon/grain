@@ -7,6 +7,12 @@ export const STATE_ORDER = [
   "failed",
   "awaiting_submit",
   "completed",
+  // The two states a task is in when it is not in play: one put aside
+  // for later and one over with. They sit together at the end because
+  // that is how they are read -- everything above this line is the work
+  // in flight, and both of these are hidden from a list until somebody
+  // asks for them (HIDDEN_BY_DEFAULT below).
+  "deferred",
   "closed",
 ];
 
@@ -48,8 +54,43 @@ export const STATE_LABELS = {
   // corrects, since there is no wait to report and it is rare enough not
   // to be worth a state of its own.
   completed: "Queued for merge",
+  // Put aside on purpose (model.StateDeferred): still work grain is
+  // meant to do one day, but not work anybody is waiting on today, so it
+  // is out of the way until somebody picks it back up. "Deferred" rather
+  // than "Later" or "Someday" because it is the word the store, the API
+  // and the CLI all use for it.
+  deferred: "Deferred",
   closed: "Closed",
 };
+
+// HIDDEN_BY_DEFAULT is the states a task list leaves out unless it is
+// asked for them: a list is about what is in play, and neither a closed
+// task nor one somebody deliberately put aside is. Each entry carries
+// the checkbox that turns it back on and, where there is one, the
+// deployment setting that decides what that checkbox starts at.
+//
+// deferred has no setting of its own on purpose. showClosedByDefault is
+// named for closed and means it (ui.Settings), and the case for a second
+// deployment-wide knob is unmade: deferring is a per-task "not now" and
+// the checkbox is right there in the toolbar for whoever wants to look.
+// The day somebody wants deferred tasks on by default, this is the one
+// place that has to learn a second key.
+//
+// Viewing a state's own filter is always a request to see it, so the
+// checkboxes have no say there -- see TaskList.jsx's inState, which is
+// the one reader of this list.
+export const HIDDEN_BY_DEFAULT = [
+  {
+    state: "deferred",
+    label: "Show deferred tasks",
+    configKey: null,
+  },
+  {
+    state: "closed",
+    label: "Show closed tasks",
+    configKey: "showClosedByDefault",
+  },
+];
 
 // stateLabel is STATE_LABELS for one task, plus the single thing a task's
 // state cannot say on its own: that the run it is in, or waiting for, is
