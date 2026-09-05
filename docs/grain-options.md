@@ -119,10 +119,16 @@ replays from `--since`.
 `pkg/agent/claude`, `/antigravity`, `/codex` owns a transcript reader
 because "the two event vocabularies differ".
 
-The shim sits between the agent's MCP client and its own server, so it
-could mirror that JSON-RPC into the trajectory verbatim as the `agent`
-records — one well-specified vocabulary across every framework, at no cost
-to produce. It covers tool calls but not the model's prose, so the
+The shim *is* the agent's MCP server, so every call it serves is already
+JSON-RPC in its hands and could be mirrored into the trajectory verbatim
+as the `agent` records — one well-specified vocabulary across every
+framework, at no cost to produce.
+
+Narrower than it was when there was an upstream to relay, and the guest
+CLI is why: what the shim now sees is the six sandbox tools, so the
+mirror covers `run_command` and its siblings but not what an agent asks
+of the controller, which is an argv inside a `run_command` rather than a
+frame of its own. It never covered the model's prose either, so the
 per-framework readers do not fully disappear.
 
 ## The network

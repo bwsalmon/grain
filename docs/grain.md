@@ -6,12 +6,13 @@
 > is what was considered and why, including the paths not taken and the
 > conditions that would reopen them.
 
-**A grain is a polled MCP server that runs one agent in one sandbox.**
+**A grain is a polled container that runs one agent against one sandbox.**
 
-Everything below follows from that sentence. The agent talks to an
-ordinary MCP server in its own container; that server answers what it can
-itself and, for anything else, holds the call open and waits to be *asked*
-for it rather than dialling anyone.
+Everything below follows from that sentence, and it has two faces that
+should not be confused. Facing its agent, a grain is an ordinary MCP
+server over stdio, and everything it serves is about the sandbox. Facing
+its controller, it is polled and answers questions; it never dials out,
+holds nothing open, and does not know a controller exists.
 
 ## What runs today
 
@@ -65,7 +66,7 @@ wire format. The residual: the agent process can read its own token and
 could write it into the guest. That is unchanged from today, and is not
 what the VM boundary defends against.
 
-## Tools: six built in, the rest from an MCP server
+## Tools: six built in, and nothing else is a tool
 
 Grain's own are six, every one about the sandbox:
 
@@ -169,8 +170,8 @@ in one of four shapes:
   the clone included, since a clone is git commands in a guest;
 - **a placement** (`/grain/placements/…`), which is where a credential the
   work needs goes, git's among them;
-- **a tool on the controller's MCP server**, for anything the agent should
-  be able to ask for beyond its own sandbox.
+- **a CLI in the guest image**, with its credential as a placement, for
+  anything the agent should be able to ask for beyond its own sandbox.
 
 A shim that understood repositories would have to agree with the
 controller about branch naming, proxy URLs, what to do with a half-made
@@ -326,9 +327,9 @@ grain status                       > status.json
 
 **One verb**, and it is the fallback: state normally arrives on the record
 stream. Everything else a controller does to a grain is a container-runtime
-operation — create it, list it, tail its logs, destroy it — and everything
-the *agent* does goes to the controller's MCP endpoint without the shim's
-involvement.
+operation — create it, list it, tail its logs, destroy it. An agent
+reaching past its sandbox does so as a command in the guest, which to the
+shim is an ordinary `run_command` and to this CLI is nothing at all.
 
 `run`'s stdout is the container log stream; a `status` started by `docker
 exec` writes to whoever called it. Different streams, which reads as a
