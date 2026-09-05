@@ -753,6 +753,34 @@ function outcomeLabel(outcome) {
   );
 }
 
+// setupBreadcrumb is how far grain got in setting an attempt up before
+// it stopped -- ui.Attempt.SetupNote, the last phrase grain stamped on
+// the run while it was still building its sandbox, cloning its repo or
+// minting its credentials, left standing because the run ended before
+// its agent ever started.
+//
+// It is null for almost every attempt, and that is the ordinary case:
+// grain clears its last phrase as it hands a run to its agent, so a note
+// survives only on a run that never got that far -- a "setup-failed"
+// one, or a "failed"/"cancelled" one whose checkout or capabilities
+// broke first. Nothing an agent wrote through update_status is ever
+// carried here (attemptFrom's own doc comment on why: an agent's last
+// words beside a failed attempt read as that attempt's diagnosis and are
+// not one).
+//
+// Only for a finished attempt. A live one is already narrated as
+// something happening now, at the top of this same page (runActivity),
+// and the wording below is deliberately past tense -- this is a
+// breadcrumb, not a status.
+//
+// The verb follows the outcome: a run somebody cancelled, or one grain
+// paused for want of agent budget, did not give up on anything.
+function setupBreadcrumb(a) {
+  if (!a.setupNote || !a.finishedAt) return null;
+  const stopped = a.outcome === "cancelled" || a.outcome === "paused";
+  return `${stopped ? "stopped while" : "gave up while"}: ${a.setupNote}`;
+}
+
 // timelineEvents merges everything grain has recorded about a task --
 // every state transition (bwsalmon/agents#452's t.transitions, which
 // already covers filed/queued/running/awaiting_reply/failed/completed/
@@ -818,6 +846,7 @@ function timelineEvents(t) {
       a.number === 1
         ? outcomeLabel(a.outcome)
         : `Attempt #${a.number} · ${outcomeLabel(a.outcome)}`;
+    const breadcrumb = setupBreadcrumb(a);
     events.push({
       key: `attempt-${a.number}`,
       at: new Date(a.startedAt),
@@ -839,6 +868,20 @@ function timelineEvents(t) {
               <> · finished {new Date(a.finishedAt).toLocaleString()}</>
             )}
           </div>
+          {/* Marked as grain's own words, the same way the live phrase
+              is on the task row (TaskList.jsx): every other sentence
+              shown about an attempt is the agent's, and "gave up while"
+              is grain talking about the setup it was doing, not the
+              agent talking about its work. */}
+          {breadcrumb && (
+            <div
+              className="timeline-setup-note"
+              title="How far grain got in setting this attempt up before it stopped"
+            >
+              <span className="task-activity-by">grain</span>
+              {breadcrumb}
+            </div>
+          )}
           {a.detail && <div className="timeline-detail">{a.detail}</div>}
         </>
       ),

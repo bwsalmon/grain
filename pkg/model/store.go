@@ -2450,18 +2450,24 @@ func (s *Store) Runs(ctx context.Context, taskID string) ([]Run, error) {
 	var out []Run
 	err := each(ctx, s.db,
 		"SELECT `id`,`sandbox`,`unit`,`attempt`,`started_at`,`finished_at`,`outcome`,`detail`,"+
-			"`activity`,`activity_at` "+
+			"`activity`,`activity_at`,`agent_started_at` "+
 			"FROM `task_run` WHERE `task_id` = ? ORDER BY `attempt` ASC", taskID,
 		func(rows *sql.Rows) error {
 			r := Run{TaskID: taskID}
 			var unit, outcome, detail, activity sql.NullString
-			var finishedAt, activityAt sql.NullTime
+			var finishedAt, activityAt, agentStartedAt sql.NullTime
 			if err := rows.Scan(&r.ID, &r.Sandbox, &unit, &r.Attempt,
-				&r.StartedAt, &finishedAt, &outcome, &detail, &activity, &activityAt); err != nil {
+				&r.StartedAt, &finishedAt, &outcome, &detail, &activity, &activityAt,
+				&agentStartedAt); err != nil {
 				return err
 			}
 			r.Unit, r.Outcome, r.Detail = unit.String, outcome.String, detail.String
+			// agent_started_at comes along for the same reason
+			// TaskActivity selects it: it is what says whether the
+			// activity beside it is grain's own account of this run's
+			// setup or the run's own (Run.AgentStartedAt).
 			r.Activity, r.ActivityAt = activity.String, timePtr(activityAt)
+			r.AgentStartedAt = timePtr(agentStartedAt)
 			r.FinishedAt = timePtr(finishedAt)
 			out = append(out, r)
 			return nil

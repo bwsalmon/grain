@@ -167,6 +167,53 @@ func TestTaskActivityBeforeTheAgentStartedIsGrainsOwn(t *testing.T) {
 	}
 }
 
+// The same attribution survives the run finishing: Runs carries
+// agent_started_at alongside the note, so a caller reading a *finished*
+// run -- which TaskActivity deliberately never returns -- can still tell
+// grain's own account of the setup from the agent's own account of its
+// work (ui.Attempt.SetupNote is exactly that reader).
+func TestRunsCarryWhetherTheAgentEverStarted(t *testing.T) {
+	store, _, ctx := openStore(t)
+	startedTask(t, store, ctx, "a1b2")
+
+	if _, err := store.SetTaskActivity(ctx, "a1b2", "cloning acme/widgets", now); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.FinishRun(ctx, "run-a1b2", now.Add(time.Minute), "setup-failed",
+		"this run's sandbox could not be prepared: no such repo"); err != nil {
+		t.Fatal(err)
+	}
+	runs, err := store.Runs(ctx, "a1b2")
+	if err != nil || len(runs) != 1 {
+		t.Fatalf("Runs = (%v, %v)", runs, err)
+	}
+	if runs[0].AgentStartedAt != nil {
+		t.Errorf("AgentStartedAt = %v, want nil: this run never reached its agent", runs[0].AgentStartedAt)
+	}
+	if runs[0].Activity != "cloning acme/widgets" {
+		t.Errorf("Activity = %q, want the phrase grain broke on", runs[0].Activity)
+	}
+
+	// A second attempt, this one handed to its agent.
+	if err := store.StartRun(ctx, model.Run{
+		ID: "run2-a1b2", TaskID: "a1b2", Sandbox: "sandbox-a1b2",
+		Attempt: 2, StartedAt: now.Add(time.Hour),
+	}, model.Limits{}); err != nil {
+		t.Fatal(err)
+	}
+	started := now.Add(time.Hour + time.Minute)
+	if err := store.SetRunAgentStarted(ctx, "run2-a1b2", started); err != nil {
+		t.Fatal(err)
+	}
+	runs, err = store.Runs(ctx, "a1b2")
+	if err != nil || len(runs) != 2 {
+		t.Fatalf("Runs = (%v, %v), want both attempts", runs, err)
+	}
+	if runs[1].AgentStartedAt == nil || !runs[1].AgentStartedAt.Equal(started) {
+		t.Errorf("AgentStartedAt = %v, want %v", runs[1].AgentStartedAt, started)
+	}
+}
+
 // An empty note clears the row rather than leaving an empty phrase on it
 // -- how the dispatch path hands a run over to its agent without leaving
 // "minting the task's credentials" standing over the agent's first turns
