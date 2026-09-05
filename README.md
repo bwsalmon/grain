@@ -5714,6 +5714,55 @@ frameworks, either per task", above). `GRAIN_CLAUDE_PATH` and
 pin a particular version, and `setup.sh` bind-mounts whatever they name
 at that same path.
 
+One thing containerizing the deployment did not change is how anyone
+reaches it. The daemon binds `127.0.0.1:80` and nothing here opens a
+firewall hole, so getting at the UI has always been an SSH tunnel or
+"whatever the operator's network already puts in front of the host — a
+loopback port, an SSH tunnel, Tailscale, IAP". `GRAIN_TAILSCALE_ENABLE=1`
+(default `0`) is `setup.sh` building the third of those rather than only
+naming it: it installs `tailscale` from Tailscale's own apt repository,
+brings the node up with `GRAIN_TAILSCALE_AUTH_KEY` so an unattended
+deploy needs no browser at a login URL, and runs `tailscale serve --bg
+--yes --http=80 http://127.0.0.1:80` — the UI's own port, published on
+this node's tailnet address. `GRAIN_TAILSCALE_SERVE_PORT=443` serves it
+over HTTPS with a tailnet certificate instead, for a tailnet with
+certificates enabled; `GRAIN_TAILSCALE_HOSTNAME` and
+`GRAIN_TAILSCALE_UP_ARGS` name the node and pass anything else
+`tailscale up` takes (`--advertise-tags=tag:grain`, say).
+
+What it deliberately does not do is move the UI. `-ui-addr` stays on
+loopback, the container keeps host networking, and `tailscaled` — a host
+process, outside the container, since a tailnet address belongs to the
+machine and has to outlive any one `docker run` — is what proxies the
+tailnet to it. The alternative, binding the UI to every address and
+letting a tailnet ACL sort it out, would reach the same browser and open
+the same port to everything else on the network on the way. The
+repository is packaged rather than a distribution's own because
+`tailscale serve`'s current flag syntax is only spoken by releases from
+1.50 onwards, and only the two files that repository needs are fetched
+here — with the *image's* `curl`, through `image_run`, since there is
+none on the host by design.
+
+The auth key is the one credential `setup.sh` handles that never reaches
+`$GRAIN_DATA_DIR`: it authenticates this *host* to a tailnet rather than
+this deployment to anything, so it is `tailscaled`'s to keep under
+`/var/lib/tailscale`, and a re-run with no key at all leaves a node that
+is already up exactly as it is (`tailscale up` over a live node with a
+since-expired key would take a working deployment off the tailnet for no
+gain). Every step of this converges rather than failing, the way the
+kontur prerequisites do: an unsupported distribution, a missing key, a
+tailnet without certificates each end with the feature off, the reason
+logged, and the readiness report saying `GRAIN_TAILSCALE_ENABLE=1 was
+requested but this run could not finish it` — reachability is not what
+makes a deployment work, so it must not be what makes one fail.
+
+The security note above is the whole reason this is a flag rather than a
+default: the UI and the API it serves carry no auth of their own, so
+publishing them to a tailnet makes everyone on that tailnet this
+deployment's one configured actor. A tailnet ACL restricting the node is
+the answer, the closing report says so on every run that turns this on,
+and choosing it is not something a deploy script can do for an operator.
+
 ## Upgrading from the UI
 
 bwsalmon/agents#396 (filed "For v2") asked for a specific, narrow thing:

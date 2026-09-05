@@ -71,6 +71,16 @@
 #      v1's own notes on the same failure for why
 #      enable-without-restart was already a bug once in v1's own proxy
 #      service
+#   9. optionally (GRAIN_TAILSCALE_ENABLE=1) installs tailscale on this
+#      host, joins it to a tailnet with GRAIN_TAILSCALE_AUTH_KEY, and
+#      hands the UI's own loopback port to `tailscale serve`, so the UI
+#      is reachable from the tailnet without an SSH tunnel and without a
+#      firewall hole -- the "or put it behind Tailscale" this file has
+#      always suggested and never done anything about (setup_tailscale).
+#      Off by default, and non-fatal at every step: a host that cannot
+#      install tailscale, or has no way to log in yet, still finishes
+#      this run with a working loopback-only daemon rather than no
+#      deployment at all
 #
 # Alongside those, and before the daemon is started, it takes this host
 # out of the business of suspending itself (disable_host_suspend): a
@@ -157,7 +167,12 @@
 # forwarding that one port over SSH: `ssh -L 8080:localhost:80
 # <this-host>`, then open http://localhost:8080 locally, or put it behind
 # Tailscale/IAP (the issue's own framing) instead of an SSH tunnel if the
-# deployment already has one of those. See pkg/ui/README's own
+# deployment already has one of those. GRAIN_TAILSCALE_ENABLE=1 is the
+# first of those two this script will set up for you (setup_tailscale):
+# the UI stays bound to loopback exactly as it is, and tailscaled -- a
+# process on this host, outside the container -- proxies the tailnet to
+# it, so the port that is open is open to one tailnet rather than to the
+# internet. See pkg/ui/README's own
 # "single-operator tool" framing (README.md, "The UI") for why that is
 # the whole access-control story today -- the API and the UI it serves
 # carry no auth of their own, so whatever reaches -ui-addr can act as the
@@ -420,6 +435,60 @@ GRAIN_ENABLE_UI_UPGRADE="${GRAIN_ENABLE_UI_UPGRADE:-1}"
 # suspend policy back the way this script found it.
 GRAIN_DISABLE_SUSPEND="${GRAIN_DISABLE_SUSPEND:-1}"
 
+# --- Tailscale (how anyone reaches the UI at all) -----------------------
+#
+# Off by default, because turning it on publishes this deployment's UI to
+# a whole tailnet and the UI carries no auth of its own (see the note at
+# the end of this file's header): whatever reaches -ui-addr acts as the
+# deployment's one configured actor, so "who is on the tailnet" becomes
+# "who can dispatch tasks here". A tailnet ACL restricting this node to
+# the accounts that should have it is the answer, and it is a decision
+# this script cannot make for an operator -- hence a flag rather than a
+# default.
+#
+# On, this installs tailscale on the host (never in the daemon's
+# container: the tailnet address belongs to the machine, and tailscaled
+# has to outlive any one `docker run`), brings the node up, and points
+# `tailscale serve` at the loopback port the UI already listens on.
+# Nothing about the daemon changes -- GRAIN_UI_ADDR stays 127.0.0.1, the
+# container keeps host networking, and no port is opened to anything but
+# the tailnet.
+GRAIN_TAILSCALE_ENABLE="${GRAIN_TAILSCALE_ENABLE:-0}"
+# Remembers what was asked for, for the same reason
+# GRAIN_KONTUR_REQUESTED does: every step below is allowed to give up and
+# set GRAIN_TAILSCALE_ENABLE back to 0 rather than fail the deploy, and
+# report_readiness has to tell "never asked for" apart from "asked for and
+# not achieved this run".
+GRAIN_TAILSCALE_REQUESTED="$GRAIN_TAILSCALE_ENABLE"
+# A tailnet auth key (tailscale admin console -> Settings -> Keys), which
+# is what lets `tailscale up` complete without a human following a URL in
+# a browser -- the only shape that works on a host being deployed
+# unattended. An ephemeral, pre-authorized, tagged key is the one to use
+# for a machine a redeploy can replace.
+#
+# Not seeded into $GRAIN_DATA_DIR/secrets and not written to disk by this
+# script at all: it authenticates this *host* to a tailnet, which is
+# tailscaled's business rather than the daemon's, and tailscaled keeps
+# its own state under /var/lib/tailscale once the node is up. A re-run of
+# this script with no key at all therefore leaves a node that is already
+# logged in exactly as it is.
+GRAIN_TAILSCALE_AUTH_KEY="${GRAIN_TAILSCALE_AUTH_KEY:-}"
+# The name this node takes on the tailnet, and so the hostname its URL is
+# built from. Empty leaves tailscale's own default, this host's hostname.
+GRAIN_TAILSCALE_HOSTNAME="${GRAIN_TAILSCALE_HOSTNAME:-}"
+# The tailnet-side port the UI is served on. 443 means HTTPS with a
+# tailnet certificate, which needs HTTPS enabled for the tailnet (admin
+# console -> DNS -> HTTPS Certificates) and is what a deployment should
+# prefer; the default 80 is plain HTTP over WireGuard, which needs
+# nothing enabled and is already encrypted on the wire by the tailnet
+# itself.
+GRAIN_TAILSCALE_SERVE_PORT="${GRAIN_TAILSCALE_SERVE_PORT:-80}"
+# Extra arguments appended to `tailscale up`, word-split as written --
+# GRAIN_EXTRA_DOCKER_ARGS' counterpart for the tailnet side, and the way
+# to pass whatever the four variables above do not name:
+#   GRAIN_TAILSCALE_UP_ARGS="--advertise-tags=tag:grain --ssh"
+GRAIN_TAILSCALE_UP_ARGS="${GRAIN_TAILSCALE_UP_ARGS:-}"
+
 usage() {
   cat <<'EOF'
 Usage: sudo ./setup.sh
@@ -601,6 +670,35 @@ Recognized variables:
                              keys. Set to 0 to leave this machine's own
                              power policy alone -- a re-run with 0 also
                              undoes what an earlier run masked
+
+  GRAIN_TAILSCALE_ENABLE     1 to install tailscale on this host, join it to a
+                             tailnet, and serve the UI on its tailnet address
+                             (default: 0 -- loopback only, reachable over an
+                             SSH tunnel and nothing else). The UI stays bound
+                             to GRAIN_UI_ADDR; tailscaled proxies to it, so no
+                             port is opened to anything but the tailnet. Left
+                             off (with a logged reason) if anything it needs is
+                             missing, rather than failing the whole run.
+                             NOTE: the UI carries no auth of its own, so
+                             everyone who can reach this node on the tailnet
+                             can act as this deployment. Restrict it with a
+                             tailnet ACL.
+  GRAIN_TAILSCALE_AUTH_KEY   tailnet auth key `tailscale up` logs in with, so a
+                             deploy needs no browser (admin console -> Settings
+                             -> Keys; an ephemeral, pre-authorized, tagged key
+                             suits a host a redeploy replaces). Not needed on a
+                             host already logged in -- this never re-logs one
+                             in, and never writes the key anywhere itself
+  GRAIN_TAILSCALE_HOSTNAME   name this node takes on the tailnet, and so the
+                             hostname in its URL (default: tailscale's own
+                             default, this host's hostname)
+  GRAIN_TAILSCALE_SERVE_PORT tailnet-side port the UI is served on (default:
+                             80, plain HTTP inside the tailnet's own
+                             encryption). 443 serves HTTPS with a tailnet
+                             certificate instead, which needs HTTPS enabled for
+                             the tailnet (admin console -> DNS)
+  GRAIN_TAILSCALE_UP_ARGS    extra arguments for `tailscale up`, word-split as
+                             written -- e.g. "--advertise-tags=tag:grain --ssh"
 
   GRAIN_KONTUR_ENABLE        1 to dispatch onto real bwsalmon/kontur-managed
                              VMs over SSH (orchestrator.KonturSandboxes)
@@ -2510,6 +2608,246 @@ enable_services() {
   fi
 }
 
+# --- 9. Tailscale (optional) --------------------------------------------
+#
+# Everything below is off unless GRAIN_TAILSCALE_ENABLE=1, and every step
+# of it converges rather than failing: a host that cannot install
+# tailscale, cannot log in, or cannot serve still ends this run with the
+# deployment it would have had anyway -- a daemon on loopback, reachable
+# over an SSH tunnel -- and a log line naming what was missing. That is
+# the same trade the kontur steps above make, and for the same reason:
+# how an operator reaches the UI is not what makes a deployment work, so
+# it must not be what makes one fail.
+#
+# The UI itself is untouched by any of this. It stays bound to
+# GRAIN_UI_ADDR (127.0.0.1 by default), and tailscaled -- a host process,
+# not something in the daemon's container -- proxies the tailnet to it.
+# Nothing here opens a port to anything but the tailnet, and the daemon
+# needs no configuration of its own to be reached this way.
+
+# os_release_field reads one field out of /etc/os-release, in a subshell:
+# that file is a shell fragment setting a dozen variables (ID, NAME,
+# VERSION, ...), and sourcing it here would land every one of them in
+# this script's own namespace.
+os_release_field() {
+  (
+    # shellcheck disable=SC1091 # a host file, not one in this repository -- and absent on a host without one, hence the guard
+    . /etc/os-release 2>/dev/null || exit 0
+    printf '%s\n' "${!1:-}"
+  )
+}
+
+# install_tailscale puts tailscale on this host from Tailscale's own apt
+# repository, which is what gets a *current* one: the serve syntax below
+# ("tailscale serve --bg --http=...") is only spoken by releases from
+# 1.50 onwards, and a distribution's own package is routinely older than
+# that or absent entirely.
+#
+# The two files that repository needs are fetched with the image's curl
+# rather than a host one (image_run, and this file's header on why there
+# is no curl out here to use), and installed only once they have actually
+# arrived -- a redirect straight onto the keyring path would leave a
+# truncated key behind on a failed fetch, and apt fails closed on that
+# for every package on the host, not just this one.
+install_tailscale() {
+  if command -v tailscale >/dev/null 2>&1; then
+    return 0
+  fi
+  if ! command -v apt-get >/dev/null 2>&1; then
+    log "  tailscale is not installed and this host has no apt-get to install it with -- install it by hand (https://tailscale.com/download) and re-run"
+    return 1
+  fi
+
+  # Which of Tailscale's per-distribution, per-release repositories fits
+  # this host. A derivative (Mint, Pop!_OS, an Ubuntu respin) names what
+  # it is built from in ID_LIKE and is served by that one's packages.
+  local distro codename
+  distro="$(os_release_field ID)"
+  codename="$(os_release_field VERSION_CODENAME)"
+  [ -n "$codename" ] || codename="$(os_release_field UBUNTU_CODENAME)"
+  case "$distro" in
+    debian | ubuntu | raspbian) ;;
+    *)
+      case "$(os_release_field ID_LIKE)" in
+        *ubuntu*) distro="ubuntu" ;;
+        *debian*) distro="debian" ;;
+        *) distro="" ;;
+      esac
+      ;;
+  esac
+  if [ -z "$distro" ] || [ -z "$codename" ]; then
+    log "  cannot tell which tailscale package repository fits this host (/etc/os-release: ID=$(os_release_field ID), VERSION_CODENAME=$(os_release_field VERSION_CODENAME)) -- install tailscale by hand (https://tailscale.com/download) and re-run"
+    return 1
+  fi
+
+  local base="https://pkgs.tailscale.com/stable/${distro}/${codename}"
+  local tmp
+  log "  installing tailscale from ${base}"
+  install -d -m0755 /usr/share/keyrings /etc/apt/sources.list.d
+  tmp="$(mktemp)"
+  if ! image_run --entrypoint curl -- -fsSL "${base}.noarmor.gpg" > "$tmp"; then
+    rm -f "$tmp"
+    log "  could not fetch tailscale's package signing key (${base}.noarmor.gpg)"
+    return 1
+  fi
+  install -m0644 "$tmp" /usr/share/keyrings/tailscale-archive-keyring.gpg
+  if ! image_run --entrypoint curl -- -fsSL "${base}.tailscale-keyring.list" > "$tmp"; then
+    rm -f "$tmp"
+    log "  could not fetch tailscale's apt source list (${base}.tailscale-keyring.list)"
+    return 1
+  fi
+  install -m0644 "$tmp" /etc/apt/sources.list.d/tailscale.list
+  rm -f "$tmp"
+
+  apt-get update -qq || true
+  DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends tailscale || true
+  if ! command -v tailscale >/dev/null 2>&1; then
+    log "  apt-get could not install tailscale from ${base} -- install it by hand and re-run"
+    return 1
+  fi
+}
+
+# tailscale_backend_state is what tailscaled says it is doing:
+# "NeedsLogin", "Stopped", "Starting", "Running", or nothing at all if it
+# is not running yet. Read out of `tailscale status --json` with bash's
+# own regex match rather than jq, for the reason kontur_gcp_access_token
+# above reads its token that way: there is no jq on this host, by design.
+tailscale_backend_state() {
+  local json
+  json="$(tailscale status --json --peers=false 2>/dev/null)" || return 1
+  [[ "$json" =~ \"BackendState\"[[:space:]]*:[[:space:]]*\"([^\"]+)\" ]] || return 1
+  printf '%s\n' "${BASH_REMATCH[1]}"
+}
+
+# tailscale_login brings this node onto its tailnet.
+#
+# A node that is already up is left exactly as it is: its login is
+# tailscaled's state, not this script's, and re-running `tailscale up`
+# over it with a key that has since expired would take a working node
+# down for no gain. Which is also why an auth key is optional on a re-run
+# -- and why it is never written anywhere by this script, unlike every
+# credential the daemon itself needs.
+tailscale_login() {
+  local state
+  state="$(tailscale_backend_state || true)"
+  case "$state" in
+    Running | Starting)
+      log "  this host is already on a tailnet (state: $state) -- leaving its login as it is"
+      return 0
+      ;;
+  esac
+
+  local args=()
+  if [ -n "$GRAIN_TAILSCALE_AUTH_KEY" ]; then
+    args+=("--authkey=$GRAIN_TAILSCALE_AUTH_KEY")
+  elif [ "$state" != "Stopped" ]; then
+    # "Stopped" is a node that has logged in before and been brought
+    # down; `tailscale up` needs no key to bring that one back. Anything
+    # else needs one, or a human at a browser this deploy does not have.
+    log "  this host is not logged in to a tailnet (state: ${state:-tailscaled not responding}) and no GRAIN_TAILSCALE_AUTH_KEY was given -- run 'tailscale up' here by hand, or re-run this script with a key"
+    return 1
+  fi
+  if [ -n "$GRAIN_TAILSCALE_HOSTNAME" ]; then
+    args+=("--hostname=$GRAIN_TAILSCALE_HOSTNAME")
+  fi
+  if [ -n "$GRAIN_TAILSCALE_UP_ARGS" ]; then
+    # Word-split as written, the same contract GRAIN_EXTRA_DOCKER_ARGS
+    # has: this is a list of arguments, not one argument.
+    # shellcheck disable=SC2206
+    args+=($GRAIN_TAILSCALE_UP_ARGS)
+  fi
+  log "  bringing this node onto its tailnet (tailscale up)"
+  if ! tailscale up "${args[@]}"; then
+    log "  'tailscale up' failed -- an expired, exhausted or wrong-tailnet auth key is the usual reason; see: journalctl -u tailscaled -n 50"
+    return 1
+  fi
+}
+
+# tailscale_serve_ui is the point of all of the above: the UI's own
+# loopback port, published on this node's tailnet address.
+#
+# GRAIN_TAILSCALE_SERVE_PORT being the same 80 the UI itself listens on
+# is not a conflict -- tailscaled serves it on the tailnet address and
+# the daemon binds 127.0.0.1 -- unless a deployment has moved
+# GRAIN_UI_ADDR off loopback onto every address, in which case the two
+# really do want the same socket and this reports the failure rather than
+# hiding it.
+tailscale_serve_ui() {
+  # --yes because nothing here has a terminal to answer with: `tailscale
+  # serve` asks before replacing a configuration this deployment already
+  # has, and a re-run of this script -- which is the update path, so it
+  # is the common case rather than the odd one -- is exactly when it
+  # would ask.
+  local args=(--bg --yes)
+  if [ "$GRAIN_TAILSCALE_SERVE_PORT" = "443" ]; then
+    # HTTPS on the tailnet needs a certificate, which tailscaled fetches
+    # itself -- but only for a tailnet with HTTPS enabled, so this is the
+    # one setting here that can fail on the tailnet's configuration
+    # rather than on this host's.
+    args+=("--https=443")
+  else
+    args+=("--http=$GRAIN_TAILSCALE_SERVE_PORT")
+  fi
+  args+=("http://127.0.0.1:${GRAIN_UI_ADDR##*:}")
+  log "  serving the UI on the tailnet: tailscale serve ${args[*]}"
+  if ! tailscale serve "${args[@]}"; then
+    log "  'tailscale serve' failed -- with --https, a tailnet without HTTPS certificates enabled (admin console -> DNS) is the usual reason; see: tailscale serve status"
+    return 1
+  fi
+}
+
+# tailnet_url is where an operator actually points a browser, built from
+# this node's MagicDNS name. Empty when the tailnet has MagicDNS off,
+# which costs nothing but the URL: the node is still served, on the
+# address `tailscale status` reports for it.
+tailnet_url() {
+  local json name
+  json="$(tailscale status --json --peers=false 2>/dev/null)" || return 1
+  # Self comes first in that document and --peers=false leaves nothing
+  # else in it carrying a DNSName, so the first match is this node's.
+  # Trailing dot dropped: it is a valid hostname and an ugly URL.
+  [[ "$json" =~ \"DNSName\"[[:space:]]*:[[:space:]]*\"([^\"]+)\" ]] || return 1
+  name="${BASH_REMATCH[1]%.}"
+  [ -n "$name" ] || return 1
+  case "$GRAIN_TAILSCALE_SERVE_PORT" in
+    443) printf 'https://%s/\n' "$name" ;;
+    80) printf 'http://%s/\n' "$name" ;;
+    *) printf 'http://%s:%s/\n' "$name" "$GRAIN_TAILSCALE_SERVE_PORT" ;;
+  esac
+}
+
+# Where the UI ended up reachable, for the closing report. Empty means
+# "loopback and an SSH tunnel", which is every deployment that did not
+# ask for this.
+TAILSCALE_URL=""
+
+setup_tailscale() {
+  if [ "$GRAIN_TAILSCALE_ENABLE" != "1" ]; then
+    return 0
+  fi
+  log "Setting up tailscale (GRAIN_TAILSCALE_ENABLE=1)"
+  if ! install_tailscale; then
+    GRAIN_TAILSCALE_ENABLE=0
+    return 0
+  fi
+  # enable, not just start, for the reason ensure_docker enables docker:
+  # a tailnet address that does not come back after a reboot is a UI
+  # nobody can reach until someone SSHes in.
+  systemctl enable --now tailscaled > /dev/null 2>&1 || true
+  if ! tailscale_login; then
+    GRAIN_TAILSCALE_ENABLE=0
+    return 0
+  fi
+  if ! tailscale_serve_ui; then
+    GRAIN_TAILSCALE_ENABLE=0
+    return 0
+  fi
+  TAILSCALE_URL="$(tailnet_url || true)"
+  if [ -n "$TAILSCALE_URL" ]; then
+    log "  the UI is now reachable on the tailnet at $TAILSCALE_URL"
+  fi
+}
+
 # report_readiness prints what this host can actually do, as opposed to
 # what this script did. The two have come apart repeatedly: seeding a
 # credential is seed-once, minting the Gemini key is deliberately
@@ -2609,6 +2947,11 @@ report_readiness() {
   else
     echo "    sandboxing:        host directories (orchestrator.HostSandboxes, inside the container)"
   fi
+  if [ "$GRAIN_TAILSCALE_ENABLE" = "1" ]; then
+    echo "    tailnet:           serving ${TAILSCALE_URL:-<the tailnet address of this node>} -> http://${GRAIN_UI_ADDR}"
+  else
+    echo "    tailnet:           off -- the UI is on ${GRAIN_UI_ADDR} and reachable over an SSH tunnel"
+  fi
 
   if [ "$github" = "MISSING" ]; then
     ready=0
@@ -2674,6 +3017,20 @@ report_readiness() {
     ready=0
     echo "    !! grain-daemon.service is $daemon -- see: journalctl -u grain-daemon -n 50"
   fi
+  if [ "$GRAIN_TAILSCALE_REQUESTED" = "1" ] && [ "$GRAIN_TAILSCALE_ENABLE" != "1" ]; then
+    ready=0
+    echo "    !! GRAIN_TAILSCALE_ENABLE=1 was requested but this run could not finish it (see"
+    echo "       the earlier log line naming what was missing) -- the UI is reachable on"
+    echo "       ${GRAIN_UI_ADDR} over an SSH tunnel and nowhere else. Re-run once it is;"
+    echo "       nothing else about this deployment has to change."
+  fi
+  # Not a readiness failure -- it is what was asked for -- but the one
+  # consequence of asking for it that is easy to miss.
+  if [ "$GRAIN_TAILSCALE_ENABLE" = "1" ]; then
+    echo "    -- everyone who can reach this node on the tailnet can act as this deployment:"
+    echo "       the UI and the API it serves carry no auth of their own, so whatever reaches"
+    echo "       them acts as its one configured actor. Restrict this node with a tailnet ACL."
+  fi
   if [ "$GRAIN_KONTUR_REQUESTED" = "1" ] && [ "$GRAIN_KONTUR_ENABLE" != "1" ]; then
     ready=0
     echo "    !! GRAIN_KONTUR_ENABLE=1 was requested but a prerequisite wasn't ready this run"
@@ -2688,6 +3045,9 @@ print_summary() {
   echo
   log "Done."
   echo "    UI:      http://${GRAIN_UI_ADDR} -- reach it with: ssh -L 8080:localhost:${GRAIN_UI_ADDR##*:} <this-host>, then open http://localhost:8080"
+  if [ "$GRAIN_TAILSCALE_ENABLE" = "1" ]; then
+    echo "             ${TAILSCALE_URL:-<the tailnet address of this node>} -- the same UI on the tailnet, no tunnel needed (tailscale serve status)"
+  fi
   echo "    Store:   embedded SQLite under ${GRAIN_DATA_DIR}/store, owned by grain-daemon.service alone"
   echo "    Secrets: ${GRAIN_DATA_DIR}/secrets"
   echo "    State:   ${GRAIN_DATA_DIR}/state-repo -- the same rows as text, in git (grain state status)"
@@ -2734,6 +3094,12 @@ main() {
   # should not exist at all.
   disable_host_suspend
   enable_services
+  # After enable_services: `tailscale serve` publishes the port the
+  # daemon listens on, so pointing it at a service that is already up
+  # means a failure here is about tailscale rather than about a UI that
+  # had not started yet -- and it is print_summary, immediately below,
+  # that reports the resulting URL.
+  setup_tailscale
   print_summary
 }
 

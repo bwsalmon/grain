@@ -1015,6 +1015,86 @@ func TestTheInstallerNeedsNothingOnTheHostButDockerAndSystemd(t *testing.T) {
 	}
 }
 
+// The tailnet option publishes the UI without moving it.
+//
+// "Put it behind Tailscale" has been this deployment's own suggested
+// answer to reachability since the UI was first bound to loopback
+// (setup.sh's header, README.md's "The UI"), and GRAIN_TAILSCALE_ENABLE
+// is the script finally doing it. The whole of what it may change is the
+// host: tailscaled proxies the tailnet to the port the daemon already
+// listens on, so the daemon's own configuration -- what it binds, what
+// its container is given -- has to come out of this identical to a
+// deployment that never asked for it. A version that widened -ui-addr
+// instead would reach the same browser and open the port to everything
+// else on the network too.
+func TestTheTailnetOptionServesTheUIWithoutMovingIt(t *testing.T) {
+	code := setupCode(t)
+
+	// Off unless asked for: turning it on publishes an API with no auth
+	// of its own to a whole tailnet, which is an operator's decision.
+	contains(t, code, `GRAIN_TAILSCALE_ENABLE="${GRAIN_TAILSCALE_ENABLE:-0}"`)
+	// And the daemon still binds loopback either way.
+	contains(t, code, `GRAIN_UI_ADDR="${GRAIN_UI_ADDR:-127.0.0.1:80}"`)
+
+	// The served target is whatever -ui-addr's port is, rather than a
+	// literal 80: a deployment that moved the UI must still be the thing
+	// published, not a port nothing is listening on.
+	serve := body(t, code, "tailscale_serve_ui() {")
+	contains(t, serve, `http://127.0.0.1:${GRAIN_UI_ADDR##*:}`)
+	contains(t, serve, `args+=("--http=$GRAIN_TAILSCALE_SERVE_PORT")`)
+
+	// tailscaled is a host service, not something the daemon's container
+	// gets: the tailnet address belongs to the machine and has to
+	// outlive any one `docker run`.
+	absent(t, dockerRunArgs(t, code), "tailscale")
+	contains(t, body(t, code, "setup_tailscale() {"), "systemctl enable --now tailscaled")
+
+	// After the daemon is up, so that a `tailscale serve` failure is
+	// about tailscale rather than about a UI that had not started yet.
+	before(t, body(t, code, "main() {"), "enable_services", "setup_tailscale",
+		"the tailnet is served before the daemon it points at is running")
+
+	// The auth key authenticates this *host* to a tailnet; it is
+	// tailscaled's to keep, and nothing here may copy it in among the
+	// daemon's own credentials.
+	for n, line := range strings.Split(code, "\n") {
+		if strings.Contains(line, "GRAIN_TAILSCALE_AUTH_KEY") && strings.Contains(line, "GRAIN_DATA_DIR") {
+			t.Errorf("setup.sh:%d writes the tailnet auth key into the deployment's own data directory: %s",
+				n+1, strings.TrimSpace(line))
+		}
+	}
+}
+
+// Asking for a tailnet cannot cost you the deployment.
+//
+// Reachability is not what makes a deployment work, so it must not be
+// what makes one fail: an unsupported distribution, a missing auth key,
+// a tailnet without HTTPS certificates enabled. Every one of those ends
+// the same way the kontur prerequisites above do -- the feature off, the
+// reason logged, the rest of the run finished -- and report_readiness is
+// what keeps that from passing for success.
+func TestTheTailnetOptionConvergesRatherThanFailingTheDeploy(t *testing.T) {
+	code := setupCode(t)
+
+	setup := body(t, code, "setup_tailscale() {")
+	for _, step := range []string{"install_tailscale", "tailscale_login", "tailscale_serve_ui"} {
+		if !strings.Contains(setup, "if ! "+step+"; then") {
+			t.Errorf("setup_tailscale does not let %s give up: a step that cannot converge fails the whole deploy", step)
+		}
+	}
+	if strings.Contains(setup, "exit ") {
+		t.Error("setup_tailscale exits: a host that cannot reach its tailnet still has a working loopback deployment")
+	}
+	contains(t, setup, "GRAIN_TAILSCALE_ENABLE=0")
+
+	// Which is only honest if the closing report says so -- the same
+	// requested-but-not-achieved distinction GRAIN_KONTUR_REQUESTED
+	// exists to draw.
+	contains(t, code, `GRAIN_TAILSCALE_REQUESTED="$GRAIN_TAILSCALE_ENABLE"`)
+	contains(t, body(t, code, "report_readiness() {"),
+		`[ "$GRAIN_TAILSCALE_REQUESTED" = "1" ] && [ "$GRAIN_TAILSCALE_ENABLE" != "1" ]`)
+}
+
 // Nothing rewrites setup.sh underneath the process running it.
 //
 // sync_repo pulled a new copy of the checkout over the file this process
