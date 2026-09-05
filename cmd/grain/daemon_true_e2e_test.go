@@ -251,7 +251,12 @@ func TestRunLiveWithKonturAndRESTAPIOpensAPullRequest(t *testing.T) {
 	defer cancel()
 	done, stopped := startLiveDaemon(ctx, config{
 		dataDir: dataDir, maxWorkers: 1, pollInterval: 5 * time.Second,
-		geminiAPIKeyFile: writeKeyFile(t, apiKey), geminiModel: antigravity.DefaultModel, maxAgentTurns: 15,
+		geminiAPIKeyFile: writeKeyFile(t, apiKey), geminiModel: antigravity.DefaultModel,
+		// The other half of the model selection, as -gemini-effort's
+		// own default gives it to a real daemon: agy refuses a bare
+		// family name with no --effort beside it, and a config literal
+		// here parses no flags to fill it in.
+		geminiEffort: antigravity.DefaultEffort, maxAgentTurns: 15,
 		githubHost: githubHost, githubInsecureHTTP: true,
 
 		uiAddr: uiAddr, actor: "tester",

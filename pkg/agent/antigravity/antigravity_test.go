@@ -688,12 +688,13 @@ func TestAgyConfigPathsAreTheOnesAgyReads(t *testing.T) {
 	}
 }
 
-// TestDefaultModelNamesItsEffort: agy's model catalog spells the
-// reasoning effort into the name, and refuses a bare family name before
-// the run starts ("--model gemini-3.1-pro requires --effort"). Passing
-// --effort alongside a suffixed name is refused too, so the suffix is
-// the only form that works and this is what asserts we ship one.
-func TestDefaultModelNamesItsEffort(t *testing.T) {
+// TestRunNamesAModelAndAnEffort: a model selection is two values to agy,
+// and it refuses a bare family name before the run starts ("--model
+// gemini-3.1-pro requires --effort (available: low, high)"). So whatever
+// this package ships as its default has to be a pair -- a family name
+// and an effort agy will take beside it -- and this asserts a dispatch
+// passes both.
+func TestRunNamesAModelAndAnEffort(t *testing.T) {
 	r := &recordingRunner{stdout: okStream()}
 	f := newFramework(r, "/usr/local/bin/grain")
 
@@ -703,15 +704,71 @@ func TestDefaultModelNamesItsEffort(t *testing.T) {
 	if !argsHave(r.args, "--model", DefaultModel) {
 		t.Errorf("args = %v, want --model %s", r.args, DefaultModel)
 	}
+	if !argsHave(r.args, "--effort", DefaultEffort) {
+		t.Errorf("args = %v, want --effort %s: agy refuses a bare family name without one", r.args, DefaultEffort)
+	}
+	if !slices.Contains(Efforts(), DefaultEffort) {
+		t.Errorf("DefaultEffort = %q, want one of %v (agy's own --effort vocabulary)", DefaultEffort, Efforts())
+	}
+	for _, effort := range Efforts() {
+		if strings.HasSuffix(DefaultModel, "-"+effort) {
+			t.Errorf("DefaultModel = %q, want the bare family name: a suffixed one drops the --effort "+
+				"this ships beside it, so the effort setting would do nothing by default", DefaultModel)
+		}
+	}
+}
+
+// TestWithEffortIsWhatAgyIsAskedFor: the effort is a setting of its own
+// (`grain settings -gemini-effort`), so the value a deployment chose has
+// to be the one on the command line.
+func TestWithEffortIsWhatAgyIsAskedFor(t *testing.T) {
+	r := &recordingRunner{stdout: okStream()}
+	f := newFramework(r, "/usr/local/bin/grain", WithModel("gemini-3.8-flash"), WithEffort("medium"))
+
+	if _, err := f.Run(context.Background(), agent.RunConfig{Prompt: "go", SandboxRoot: t.TempDir()}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !argsHave(r.args, "--model", "gemini-3.8-flash") || !argsHave(r.args, "--effort", "medium") {
+		t.Errorf("args = %v, want --model gemini-3.8-flash --effort medium", r.args)
+	}
+}
+
+// TestRunDropsEffortForAModelThatNamesOne is the compatibility half of
+// the pair above, and the reason it is not simply "pass both, always":
+// `agy models` prints only the suffixed spelling, so a deployment that
+// named a model before the effort was a setting of its own has
+// gemini-3.1-pro-high stored -- and agy refuses that name alongside an
+// --effort that disagrees with it ("--model gemini-3.1-pro-high
+// conflicts with --effort=low"), which would fail every run of a
+// deployment that had changed neither setting.
+func TestRunDropsEffortForAModelThatNamesOne(t *testing.T) {
+	r := &recordingRunner{stdout: okStream()}
+	f := newFramework(r, "/usr/local/bin/grain", WithModel("gemini-3.1-pro-high"), WithEffort("low"))
+
+	if _, err := f.Run(context.Background(), agent.RunConfig{Prompt: "go", SandboxRoot: t.TempDir()}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !argsHave(r.args, "--model", "gemini-3.1-pro-high") {
+		t.Errorf("args = %v, want the stored model passed through untouched", r.args)
+	}
 	if slices.Contains(r.args, "--effort") {
-		t.Errorf("args = %v, want no --effort: agy rejects it alongside a model whose name carries one", r.args)
+		t.Errorf("args = %v, want no --effort: agy rejects one alongside a model whose name carries its own", r.args)
 	}
-	var suffixed bool
-	for _, effort := range []string{"-low", "-medium", "-high"} {
-		suffixed = suffixed || strings.HasSuffix(DefaultModel, effort)
+}
+
+// TestWithoutEffortPassesNone: empty means "say nothing about the
+// effort", which is what leaves agy's own answer in place -- the same
+// thing an empty model does, and what a stored row written before this
+// column existed reads back as.
+func TestWithoutEffortPassesNone(t *testing.T) {
+	r := &recordingRunner{stdout: okStream()}
+	f := newFramework(r, "/usr/local/bin/grain", WithEffort(""))
+
+	if _, err := f.Run(context.Background(), agent.RunConfig{Prompt: "go", SandboxRoot: t.TempDir()}); err != nil {
+		t.Fatalf("Run: %v", err)
 	}
-	if !suffixed {
-		t.Errorf("DefaultModel = %q, want a name carrying its own effort (agy refuses a bare family name)", DefaultModel)
+	if slices.Contains(r.args, "--effort") {
+		t.Errorf("args = %v, want no --effort at all", r.args)
 	}
 }
 

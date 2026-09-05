@@ -102,15 +102,51 @@ const (
 	// across agy upgrades the same way the former gemini package's own
 	// DefaultModel did.
 	//
-	// The reasoning effort is part of the name rather than a separate
-	// --effort flag because that is the vocabulary agy's own catalog uses
-	// (`agy models` lists gemini-3.1-pro-high and gemini-3.1-pro-low, not
-	// a bare gemini-3.1-pro), and it refuses either half on its own: a
-	// bare "gemini-3.1-pro" fails the run before it starts with "--model
-	// gemini-3.1-pro requires --effort", and a suffixed name passed
-	// alongside --effort fails as a conflict. A deployment overriding
-	// this (`grain settings -gemini-model`) names a model the same way.
-	DefaultModel = "gemini-3.1-pro-high"
+	// It is the bare family name, with DefaultEffort below carrying the
+	// reasoning effort as agy's own --effort. A model selection is two
+	// values to agy, not one, and it accepts them written either way --
+	// measured against agy 1.1.26 with a live key, every line of this
+	// checked by running it:
+	//
+	//	--model gemini-3.1-pro                 refused, "--model
+	//	                                       gemini-3.1-pro requires
+	//	                                       --effort (available: low,
+	//	                                       high)"
+	//	--model gemini-3.1-pro --effort high   runs
+	//	--model gemini-3.1-pro-high            runs
+	//	--model gemini-3.1-pro-high
+	//	                       --effort high   runs
+	//	--model gemini-3.1-pro-high
+	//	                       --effort low    refused, "--model
+	//	                                       gemini-3.1-pro-high
+	//	                                       conflicts with
+	//	                                       --effort=low"
+	//	--model gemini-3.1-pro --effort medium refused, "gemini-3.1-pro
+	//	                                       has no \"medium\" effort"
+	//
+	// So the two forms name the same run, and the pair is the one that
+	// lets a deployment change the effort without touching the model.
+	// `agy models` still lists the suffixed spelling
+	// (gemini-3.1-pro-high, gemini-3.8-flash-medium), which is what a
+	// deployment that named a model before this existed has stored, so
+	// Run drops --effort for a model whose name already carries one --
+	// see modelNamesItsEffort.
+	DefaultModel = "gemini-3.1-pro"
+
+	// DefaultEffort is the reasoning effort agy is asked for when a
+	// caller names none: the depth half of the model selection described
+	// above, passed as --effort.
+	//
+	// agy takes low, medium or high (`agy --help`), but which of them a
+	// given model has is the model's own business -- Gemini 3.1 Pro
+	// offers low and high and refuses medium, the Flash models offer all
+	// three -- so a deployment changing one of these two settings
+	// (`grain settings -gemini-effort`, Settings -> Agent frameworks)
+	// wants to know what the other one is. high, rather than agy's own
+	// default, for the reason DefaultModel is named at all: a run's depth
+	// should not change under a deployment because the binary was
+	// upgraded.
+	DefaultEffort = "high"
 
 	// defaultMaxTurns is the cap on agentic turns a run may take before
 	// turnCap stops it, and zero means no cap at all -- the same default
@@ -198,6 +234,7 @@ type Framework struct {
 	grainBinaryPath string
 	apiKey          func(context.Context) (string, error)
 	model           string
+	effort          string
 	maxTurns        int
 	konturSSHUser   string
 	konturExecKey   string
@@ -220,6 +257,16 @@ type Option func(*Framework)
 // WithModel overrides the model agy is asked for.
 func WithModel(model string) Option {
 	return func(f *Framework) { f.model = model }
+}
+
+// WithEffort overrides the reasoning effort agy is asked for -- the
+// other half of a model selection (DefaultModel and DefaultEffort have
+// the two forms agy accepts and how they were measured). Empty passes no
+// --effort at all, leaving whichever effort the model name itself names,
+// and a model name that already names one wins over this either way,
+// since agy refuses the pair when they disagree.
+func WithEffort(effort string) Option {
+	return func(f *Framework) { f.effort = effort }
 }
 
 // WithMaxTurns sets the cap on agentic turns a single Run allows. Unlike
@@ -320,11 +367,40 @@ func New(agyPath, grainBinaryPath string, opts ...Option) *Framework {
 }
 
 func newFramework(run runner, grainBinaryPath string, opts ...Option) *Framework {
-	f := &Framework{run: run, grainBinaryPath: grainBinaryPath, model: DefaultModel, maxTurns: defaultMaxTurns}
+	f := &Framework{
+		run:             run,
+		grainBinaryPath: grainBinaryPath,
+		model:           DefaultModel,
+		effort:          DefaultEffort,
+		maxTurns:        defaultMaxTurns,
+	}
 	for _, opt := range opts {
 		opt(f)
 	}
 	return f
+}
+
+// Efforts is the reasoning efforts agy's --effort accepts, in the order
+// its own help text lists them ("Reasoning effort for the current CLI
+// session (low|medium|high)"). Whether a given model offers all three is
+// the model's own business and only agy knows it -- Gemini 3.1 Pro
+// refuses medium -- so this is what can be checked without the binary,
+// and it is what ui.UpdateSettings validates a saved effort against
+// rather than letting a typo reach the run that fails on it.
+func Efforts() []string { return []string{"low", "medium", "high"} }
+
+// modelNamesItsEffort reports whether model is one of the catalog names
+// that spells its reasoning effort into the model name itself
+// (gemini-3.1-pro-high, gemini-3.8-flash-medium -- the only spelling
+// `agy models` prints). Run passes no --effort alongside one of those;
+// DefaultModel has why.
+func modelNamesItsEffort(model string) bool {
+	for _, effort := range Efforts() {
+		if strings.HasSuffix(model, "-"+effort) {
+			return true
+		}
+	}
+	return false
 }
 
 // publishedTools names the exact tools NewSandboxTools, NewMockTools,
@@ -1315,6 +1391,16 @@ func (f *Framework) Run(ctx context.Context, cfg agent.RunConfig) (*agent.Result
 	)
 	if f.model != "" {
 		args = append(args, "--model", f.model)
+	}
+	// The other half of the selection, and dropped for a model whose own
+	// name already carries an effort: agy refuses that pair outright
+	// unless the two happen to agree ("--model gemini-3.1-pro-high
+	// conflicts with --effort=low"), and a deployment that stored a
+	// suffixed catalog name -- the only spelling `agy models` prints --
+	// has said which effort it wants in the model it named. See
+	// DefaultModel for the whole measured table.
+	if f.effort != "" && !modelNamesItsEffort(f.model) {
+		args = append(args, "--effort", f.effort)
 	}
 	// --add-dir names the one directory this run may touch. It is only
 	// meaningful for a host-rooted sandbox; a kontur run reaches its

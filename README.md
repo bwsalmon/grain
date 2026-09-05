@@ -2097,13 +2097,32 @@ The credential a run uses is grain's own either way: `GOOGLE_API_KEY` is
 cleared in the same environment, because agy prefers it when both are
 set and the subprocess inherits the controller's.
 
-The model name carries its reasoning effort: agy's catalog is
-`gemini-3.1-pro-high`, `gemini-3.1-pro-low`, `gemini-3.8-flash-medium`
-and so on (`agy models` lists them), and it refuses both a bare family
-name (`--model gemini-3.1-pro requires --effort`) and a suffixed name
-passed alongside `--effort`. `antigravity.DefaultModel` is one of the
-catalog names, and a deployment overriding it in Settings or with
-`-gemini-model` should name one too.
+A model selection is two values, not one: agy takes `--model` and
+`--effort`, and it refuses a bare family name without an effort. Both
+spellings work, and both were measured against agy 1.1.26 with a live key
+rather than reasoned about:
+
+| command line | agy |
+| --- | --- |
+| `--model gemini-3.1-pro` | refused — `--model gemini-3.1-pro requires --effort (available: low, high)` |
+| `--model gemini-3.1-pro --effort high` | runs |
+| `--model gemini-3.1-pro-high` | runs |
+| `--model gemini-3.1-pro-high --effort high` | runs |
+| `--model gemini-3.1-pro-high --effort low` | refused — `gemini-3.1-pro-high conflicts with --effort=low` |
+| `--model gemini-3.1-pro --effort medium` | refused — `gemini-3.1-pro has no "medium" effort` |
+
+So `antigravity.DefaultModel` is the bare family name and
+`antigravity.DefaultEffort` is the effort passed beside it, which is what
+lets a deployment change a run's depth without also choosing a different
+model (`grain settings -gemini-effort`, or the picker on Settings →
+Agents). The catalog `agy models` prints is still the suffixed spelling
+(`gemini-3.1-pro-high`, `gemini-3.8-flash-medium`), so a deployment that
+named one of those before the effort was a setting of its own has it
+stored — and `Framework.Run` passes no `--effort` at all for a model
+whose name already carries one, since agy refuses that pair unless the
+two happen to agree. Which efforts a model has is the model's own
+business (3.1 Pro has no `medium`); nothing in grain checks the pair, and
+agy refuses it before the run starts if it does not go together.
 
 ### Proving a live run actually gets the tools
 
@@ -3783,7 +3802,7 @@ clock, an hour after the task it belongs to.
 bwsalmon/agents#320 asked the same "the store is the record" question
 "Input is a model update, not a GitHub issue" (above) already answered
 for tasks, aimed at the daemon's own flags this time: `-max-workers`,
-`-poll-interval`, `-gemini-model`, `-claude-model`, `-max-agent-turns`, `-github-host`,
+`-poll-interval`, `-gemini-model`, `-gemini-effort`, `-claude-model`, `-max-agent-turns`, `-github-host`,
 `-github-insecure-http`, `-gcp-project` and `-gcp-agent-service-account`
 used to be the only way to set any of these, which meant changing one
 meant restarting the daemon with a different command line, and there was
@@ -3866,8 +3885,8 @@ for `gcp-project`/`gcp-agent-service-account`, and
 The rest were already read per cycle or per dispatch, or gained it here:
 `RunCycle` re-reads `max-workers`/`max-mergers`, `max-agent-turns` *and*
 `prompt-extension`;
-`dispatchConfig` re-reads `agent-framework`, `gemini-model` and
-`claude-model` when a run's framework is built (which is per dispatch,
+`dispatchConfig` re-reads `agent-framework`, `gemini-model`,
+`gemini-effort` and `claude-model` when a run's framework is built (which is per dispatch,
 for the same reason the credential is); and `target-repos`,
 `newest-first`, `environment-name` and the three "by default" toggles are
 read out of the store by `pkg/ui` on the request that needs them. What a

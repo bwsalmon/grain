@@ -42,6 +42,7 @@ var settingsAppliedLive = map[string]string{
 	"maxAgentTurns":          "orchestrator.RunCycle's own per-cycle re-read",
 	"agentFramework":         "dispatchConfig's own per-dispatch re-read",
 	"geminiModel":            "dispatchConfig's own per-dispatch re-read",
+	"geminiEffort":           "dispatchConfig's own per-dispatch re-read",
 	"claudeModel":            "dispatchConfig's own per-dispatch re-read",
 	"codexModel":             "dispatchConfig's own per-dispatch re-read",
 	"gcpProject":             "the capability registry the next cycle resolves grants against (liveConfig.refresh)",

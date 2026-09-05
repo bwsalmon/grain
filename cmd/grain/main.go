@@ -743,6 +743,12 @@ func cmdSettings(ctx context.Context, c *ui.HTTPClient, out *printer, args []str
 	agentFramework := fs.String("agent-framework", "",
 		"which agent framework a run is driven by unless its task names another: "+model.AgentFrameworkNames())
 	geminiModel := fs.String("gemini-model", "", "Gemini model the antigravity agent framework calls")
+	// Validated by ui.UpdateSettings against agy's own vocabulary rather
+	// than here, the same as -agent-framework above: one copy of the
+	// three words, at the end that stores them.
+	geminiEffort := fs.String("gemini-effort", "",
+		"reasoning effort the antigravity agent framework asks for beside -gemini-model "+
+			"(ignored for a model name that already carries one, e.g. gemini-3.1-pro-high)")
 	claudeModel := fs.String("claude-model", "", "Claude model the claude agent framework calls")
 	codexModel := fs.String("codex-model", "", "model the codex agent framework calls")
 	maxAgentTurns := fs.Int("max-agent-turns", 0, "cap on model/tool round trips per run (0 = uncapped; runs are bounded by wall-clock runtime instead)")
@@ -824,6 +830,9 @@ func cmdSettings(ctx context.Context, c *ui.HTTPClient, out *printer, args []str
 		case "gemini-model":
 			v := *geminiModel
 			req.GeminiModel = &v
+		case "gemini-effort":
+			v := *geminiEffort
+			req.GeminiEffort = &v
 		case "claude-model":
 			v := *claudeModel
 			req.ClaudeModel = &v
@@ -1010,6 +1019,7 @@ func (p *printer) settings(s ui.Settings) {
 	// this line names their framework.
 	fmt.Printf("agent framework: %s\n", s.AgentFramework)
 	fmt.Printf("gemini model:   %s\n", s.GeminiModel)
+	fmt.Printf("gemini effort:  %s\n", s.GeminiEffort)
 	fmt.Printf("claude model:   %s\n", s.ClaudeModel)
 	fmt.Printf("codex model:    %s\n", s.CodexModel)
 	fmt.Printf("max agent turns: %d\n", s.MaxAgentTurns)
