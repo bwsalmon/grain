@@ -3203,6 +3203,49 @@ offered only under backlog order. Cards carry the list's checkbox and
 feed the same selection, so the batch-actions bar works from either
 view: select a whole column and run it.
 
+**And the third question: what is waiting on *me* (grain/task-20).** The
+list answers "what is the backlog", the board answers "where is
+everything". Neither answers the one an operator actually opens grain to
+ask, which is what grain cannot get on with until they do something.
+Five kinds of task are stopped on a person: one parked on an
+`ask_question` call, one whose pull request nobody has submitted, one
+the merge queue has given up on, one that has burnt through its retries,
+and a proposal nobody has approved. They are scattered down a list
+ordered by what grain is about to run next, wearing five different
+badges, and a deployment left alone for a day accumulates all five.
+
+`Inbox` is the first entry on the rail, above the backlog itself,
+carrying a count of exactly those (`state.js`'s `waitsOnUser`, which the
+page and the count in the rail share so the number and the page cannot
+disagree). `/inbox` groups them by the answer each one needs rather than
+by state -- "Answer a question", "Submit for merge", "Unblock a merge",
+"Retry or close", "Approve a proposal" -- in the order of how stuck each
+kind of wait is, with proposals last because "not now" is so often the
+honest answer to one and a backlog of them should not stand between a
+reader and a run parked mid-sentence.
+
+What makes it more than a saved filter is that the answer is on the row.
+A filtered list still costs an opened pane per task to find out what that
+task wants -- Approve lives on one, Submit on another, and a question
+needs the timeline at the bottom of a third -- which is a lot of clicking
+for the tasks that by definition nobody has got round to. So each row
+carries the responses that apply to its own wait, they fire in place and
+refresh the list, and none of them opens anything (`App.jsx`'s
+`inboxAct`, which is `act` minus the pane it would put over the list
+somebody is working down). A parked question opens a reply box under its
+own row, with the question it is answering above it.
+
+The one row that gets no reply box is the one that most looks like it
+should have one. A run parked on `request_secret` is in the same state
+as a run parked on a question, and a reply is a comment -- stored in the
+conversation, and handed to the next run in its prompt. A box there
+invites somebody to paste a credential into exactly the place grain
+promises never to put one, so the inbox reads the task's own detail when
+the box is opened, and a task with a `pendingSecret` gets the sentence
+saying what was asked for and a way through to the write-only field on
+its own pane instead (see "Write-only secrets access when colocated"
+below).
+
 **`grain demo` (bwsalmon/agents#276, folded into its own subcommand by
 #363) for trying out the frontend on its own.** A real `grain daemon`
 needs a real Gemini key, a real store, and a real deployment's tasks to
