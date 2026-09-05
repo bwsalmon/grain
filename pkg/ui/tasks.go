@@ -318,12 +318,36 @@ func transitionFrom(t model.Transition) Transition {
 // same strings orchestrator.outcomeOf and orchestrator.run already
 // record, passed through rather than re-encoded so the UI's label for
 // one matches `grain get`'s.
+//
+// SetupNote is the last phrase grain stamped on this run while it was
+// still getting it started -- "building a sandbox", "cloning
+// acme/widgets", "minting the task's credentials" (orchestrator.
+// setupNotes) -- and SetupNoteAt when it said it. It is set only for a
+// run that never reached its agent (model.Run.AgentStartedAt is nil), and
+// so is empty for the overwhelming majority of attempts: grain clears its
+// last phrase in the same breath as handing the run over, and everything
+// written after that is the agent's own.
+//
+// That narrowing is the point, not a limitation. A run that ends
+// "setup-failed" gets a detail saying only that its sandbox could not be
+// prepared, and the phrase it broke on is the one record of how far setup
+// actually got -- which nothing showed a reader, because Store.
+// TaskActivity reads live runs only, by design. What the *agent* last
+// said through update_status is a different thing entirely, and is
+// deliberately not carried here: "waiting for CI on the second push"
+// beside a failed attempt reads as that attempt's diagnosis and is not
+// one, and an attempt whose agent ran has its whole transcript one click
+// away (AttemptTranscript). So only grain's own half travels, and the
+// frontend can render it in grain's voice without having to ask whose
+// sentence it is (DetailOverlay.jsx's attempt timeline).
 type Attempt struct {
-	Number     int        `json:"number"`
-	StartedAt  time.Time  `json:"startedAt"`
-	FinishedAt *time.Time `json:"finishedAt,omitempty"`
-	Outcome    string     `json:"outcome,omitempty"`
-	Detail     string     `json:"detail,omitempty"`
+	Number      int        `json:"number"`
+	StartedAt   time.Time  `json:"startedAt"`
+	FinishedAt  *time.Time `json:"finishedAt,omitempty"`
+	Outcome     string     `json:"outcome,omitempty"`
+	Detail      string     `json:"detail,omitempty"`
+	SetupNote   string     `json:"setupNote,omitempty"`
+	SetupNoteAt *time.Time `json:"setupNoteAt,omitempty"`
 }
 
 // taskFrom projects a model.Task to its JSON shape. closed reports, for
@@ -419,13 +443,20 @@ func commentFrom(c model.Comment, attachments []Attachment) Comment {
 }
 
 func attemptFrom(r model.Run) Attempt {
-	return Attempt{
+	out := Attempt{
 		Number:     r.Attempt,
 		StartedAt:  r.StartedAt,
 		FinishedAt: r.FinishedAt,
 		Outcome:    r.Outcome,
 		Detail:     r.Detail,
 	}
+	// Grain's own phrase travels; the agent's does not (Attempt's own doc
+	// comment). AgentStartedAt is the same test model.RunActivity.BySetup
+	// makes for a live run, asked of a finished one.
+	if r.AgentStartedAt == nil {
+		out.SetupNote, out.SetupNoteAt = r.Activity, r.ActivityAt
+	}
+	return out
 }
 
 // --- handlers ------------------------------------------------------------
