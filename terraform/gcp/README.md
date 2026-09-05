@@ -542,17 +542,26 @@ pulled either way, and built on the host in no case. (Pointing it at an
 Artifact Registry repository in this project works; create the repository
 yourself first.)
 
-A pull failing leaves `enable_kontur_sandboxes`'s intent unmet *for that
-run only*: the host still comes up dispatching into host directories,
-with a line in `journalctl -u grain-daemon -f`'s own deploy log and
-`setup.sh`'s own readiness report naming which prerequisite was not
-ready, rather than failing the whole install. Re-running `setup.sh` (or
-waiting for the next `config-sync` pass) picks it back up once it is.
+A pull failing now fails the deploy, rather than leaving
+`enable_kontur_sandboxes`'s intent unmet for that run and coming up on
+host directories instead (grain/task-15). The fallback was the friendlier
+behaviour right up until you consider what it fell back *to*: a
+deployment dispatching every agent directly onto its host, with that
+host's filesystem, network and credentials, arrived at because a registry
+was briefly unreachable and noticed by nobody. `setup.sh` refuses to
+install that shape unless something asked for it by name, so a host whose
+sandbox image will not pull keeps whatever it was already running and
+says which prerequisite was missing. Re-running `setup.sh` (or waiting
+for the next `config-sync` pass) picks it back up once it is there.
 
 Set `enable_kontur_sandboxes = false` to keep a deployment on
-host-directory sandboxing indefinitely -- nothing above is required then,
-and `enable_nested_virtualization` can come off with it if nothing else
-on this host needs `/dev/kvm`.
+host-directory sandboxing indefinitely -- that *is* the asking, and
+`files/deploy.sh` passes the matching `GRAIN_HOST_SANDBOXES=1` through to
+`setup.sh` on your behalf. Nothing above is required then, and
+`enable_nested_virtualization` can come off with it if nothing else on
+this host needs `/dev/kvm`. Know what it buys you: an agent on that
+deployment is running on the machine grain itself is on, and the UI says
+so on a standing banner for as long as it is true.
 
 Each VM's root filesystem is writable, not read-only:
 `write_systemd_units` passes `-disk-mode=overlay`, so the guest writes

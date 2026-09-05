@@ -577,6 +577,13 @@ type configResponse struct {
 	// rather than an operator having to notice tasks have stopped moving
 	// and go searching logs to learn why (bwsalmon/agents#576).
 	ReconcilerDown bool `json:"reconcilerDown,omitempty"`
+	// HostSandboxes mirrors Config.HostSandboxes' own doc comment: true
+	// means every dispatched run happens in a directory on the daemon's
+	// own machine, with no isolation from it. It rides on this response
+	// for the reason ReconcilerDown above does -- it drives a standing
+	// banner on every page, and this is the one call every view already
+	// polls (grain/task-15).
+	HostSandboxes bool `json:"hostSandboxes,omitempty"`
 	// AgentPause mirrors Config.AgentPause's own doc comment: set when
 	// this deployment's agent has said it has no budget left in the
 	// current window, so nothing is being dispatched until that window
@@ -764,6 +771,7 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	if s.tasks.Config.ReconcilerDown != nil {
 		resp.ReconcilerDown = s.tasks.Config.ReconcilerDown()
 	}
+	resp.HostSandboxes = s.tasks.Config.HostSandboxes
 	if status, ok := s.tasks.AgentPause(); ok && status.Paused {
 		resp.AgentPause = &status
 	}

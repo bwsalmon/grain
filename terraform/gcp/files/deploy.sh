@@ -288,6 +288,14 @@ log "  enable_kontur_sandboxes=$ENABLE_KONTUR_SANDBOXES kontur_oci_image=${KONTU
 # live at once would let an operator's UI click race, or silently drift
 # out of sync with, a `terraform apply` that changes grain_ref
 # (bwsalmon/agents#405).
+#
+# GRAIN_HOST_SANDBOXES is the inverse of GRAIN_KONTUR_ENABLE and carries
+# no new decision: setup.sh will not install an unisolated deployment
+# unless something asked for one by name (grain/task-15), and on this
+# deployment shape the asking is `enable_kontur_sandboxes = false` in an
+# operator's own tfvars. Passing it through here is what keeps that a
+# supported configuration rather than a refused install -- and what keeps
+# a sandbox image this host cannot pull from silently becoming one.
 
 env \
   GRAIN_REF="$GRAIN_REF" \
@@ -324,6 +332,7 @@ env \
   GRAIN_TARGET_REPO="$DEFAULT_TARGET_REPO" \
   GRAIN_TARGET_REPOS="$TARGET_REPOS" \
   GRAIN_KONTUR_ENABLE="$([ "$ENABLE_KONTUR_SANDBOXES" = "true" ] && echo 1 || echo 0)" \
+  GRAIN_HOST_SANDBOXES="$([ "$ENABLE_KONTUR_SANDBOXES" = "true" ] && echo 0 || echo 1)" \
   GRAIN_KONTUR_OCI_IMAGE="$KONTUR_OCI_IMAGE" \
   GRAIN_KONTUR_SSH_USER="$KONTUR_SSH_USER" \
   GRAIN_KONTUR_WORKSPACE="$KONTUR_WORKSPACE" \

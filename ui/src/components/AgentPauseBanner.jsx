@@ -16,8 +16,8 @@ import { formatTime } from "../time.js";
 // anywhere except the daemon's journal or the detail of an attempt they
 // would have to know to open (grain/task-132).
 //
-// A standing banner, not a five-second ErrorBanner toast, and pinned
-// with ReconcilerDownBanner's own layout for the same reason: like a
+// A standing banner, not a five-second ErrorBanner toast, and pinned in
+// BannerStrip beside ReconcilerDownBanner for the same reason: like a
 // dead reconcile loop this describes the whole deployment for as long as
 // it lasts, and it should stay on screen whichever page is showing.
 // Warning rather than error, though -- unlike a dead loop, nothing here
@@ -50,11 +50,6 @@ export default function AgentPauseBanner({ pause, onLifted, showError }) {
       severity="warning"
       variant="filled"
       sx={{
-        position: "fixed",
-        top: 0,
-        left: 0,
-        right: 0,
-        zIndex: 5,
         borderRadius: 0,
         justifyContent: "center",
       }}

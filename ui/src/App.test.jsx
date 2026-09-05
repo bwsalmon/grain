@@ -392,6 +392,54 @@ describe("App", () => {
     ).not.toBeInTheDocument();
   });
 
+  // grain/task-15: host sandboxing -- every run on the daemon's own
+  // machine, with no isolation from it -- used to be what a deployment
+  // got by leaving a flag off, and no screen here said so.
+  it("shows a banner when the deployment dispatches onto its own host", async () => {
+    setupApi();
+    const realImpl = api.getMockImplementation();
+    api.mockImplementation((path, opts) =>
+      path === "/api/config"
+        ? Promise.resolve({ ...config, hostSandboxes: true })
+        : realImpl(path, opts),
+    );
+
+    render(<App />);
+
+    expect(await screen.findByText(/host mode/i)).toBeInTheDocument();
+    expect(screen.getByText(/directly on the host/i)).toBeInTheDocument();
+  });
+
+  it("shows no host-mode banner on a sandboxed deployment", async () => {
+    setupApi();
+    render(<App />);
+
+    await screen.findByText("Fix bug");
+    expect(screen.queryByText(/host mode/i)).not.toBeInTheDocument();
+  });
+
+  // Unlike the two above, this one is not an incident that will pass: it
+  // is true for the life of the deployment, so it stacks with whatever
+  // else is wrong rather than losing to it.
+  it("keeps the host-mode banner up alongside a dead reconcile loop", async () => {
+    setupApi();
+    const realImpl = api.getMockImplementation();
+    api.mockImplementation((path, opts) =>
+      path === "/api/config"
+        ? Promise.resolve({
+            ...config,
+            hostSandboxes: true,
+            reconcilerDown: true,
+          })
+        : realImpl(path, opts),
+    );
+
+    render(<App />);
+
+    expect(await screen.findByText(/host mode/i)).toBeInTheDocument();
+    expect(screen.getByText(/reconcile loop has stopped/i)).toBeInTheDocument();
+  });
+
   // The banner's own "Resume now" -- an operator who has just topped a
   // plan up has no reason to wait out a window that no longer applies.
   it("lifts the pause and re-reads the config when Resume now is clicked", async () => {
