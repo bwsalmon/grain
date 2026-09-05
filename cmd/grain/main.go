@@ -88,6 +88,7 @@ import (
 
 	"github.com/bwsalmon/grain/pkg/agent/antigravity"
 	"github.com/bwsalmon/grain/pkg/kontur"
+	"github.com/bwsalmon/grain/pkg/mcp"
 	"github.com/bwsalmon/grain/pkg/model"
 	"github.com/bwsalmon/grain/pkg/ui"
 )
@@ -806,6 +807,17 @@ func cmdSettings(ctx context.Context, c *ui.HTTPClient, out *printer, args []str
 	// clock.
 	timeZone := fs.String("time-zone", "",
 		"IANA time zone this deployment keeps its clock in, e.g. America/Los_Angeles -- empty restores the default")
+	// The git identity every dispatched run commits under
+	// (ui.Settings.AgentGitName/AgentGitEmail). Settable from a shell for
+	// the same provisioning reason -environment-name is: pointing a
+	// deployment's commits at the bot account its operator wants to see
+	// on pull requests is part of standing it up. Empty restores grain's
+	// own default, the way -time-zone's does, rather than leaving the
+	// committer nameless.
+	agentGitName := fs.String("agent-git-name", "",
+		"name every agent's commits are authored under -- empty restores grain's own default, "+mcp.DefaultGitIdentityName)
+	agentGitEmail := fs.String("agent-git-email", "",
+		"email every agent's commits are authored under -- empty restores grain's own default, "+mcp.DefaultGitIdentityEmail)
 	// Not a setting: the one flag here that changes nothing and asks a
 	// question instead. It belongs on this command anyway, because the
 	// answer it gives is about the same capability listing this command
@@ -889,6 +901,12 @@ func cmdSettings(ctx context.Context, c *ui.HTTPClient, out *printer, args []str
 		case "time-zone":
 			v := *timeZone
 			req.TimeZone = &v
+		case "agent-git-name":
+			v := *agentGitName
+			req.AgentGitName = &v
+		case "agent-git-email":
+			v := *agentGitEmail
+			req.AgentGitEmail = &v
 		case "target-repos":
 			v := splitRepoList(*targetRepos)
 			req.TargetRepos = &v
@@ -1071,6 +1089,14 @@ func (p *printer) settings(s ui.Settings) {
 	fmt.Printf("sandbox cpus:   %s\n", sandboxShapeValue(s.SandboxCPUs, s.SandboxCPUsDefault, s.SandboxShapeIgnored))
 	fmt.Printf("sandbox memory mb: %s\n", sandboxShapeValue(s.SandboxMemoryMB, s.SandboxMemoryMBDefault, s.SandboxShapeIgnored))
 	fmt.Printf("sandbox disk gb: %s\n", sandboxShapeValue(s.SandboxDiskGB, s.SandboxDiskGBDefault, s.SandboxShapeIgnored))
+	// Like the sandbox shape above, this prints what is actually in
+	// effect rather than the bare stored value: empty means "grain's own
+	// identity", and printing nothing there would read as a deployment
+	// whose commits have no author at all. ui.Settings carries those
+	// defaults beside the stored values (AgentGitNameDefault/
+	// AgentGitEmailDefault) for exactly this.
+	fmt.Printf("agent git name: %s\n", orDefaultValue(s.AgentGitName, s.AgentGitNameDefault))
+	fmt.Printf("agent git email: %s\n", orDefaultValue(s.AgentGitEmail, s.AgentGitEmailDefault))
 	if len(s.TargetRepos) > 0 {
 		fmt.Printf("target repos:   %s\n", strings.Join(s.TargetRepos, ", "))
 	} else {
@@ -1139,6 +1165,22 @@ func promptExtensionBlock(label, text string) string {
 		b.WriteString("  " + line + "\n")
 	}
 	return b.String()
+}
+
+// orDefaultValue is sandboxShapeValue's counterpart for a setting whose
+// unset value is the empty string rather than 0: the stored value when
+// there is one, otherwise the default actually in effect, named as the
+// default rather than printed as the blank that is stored. A daemon too
+// old to report a default (or one with none) prints "unset", which is all
+// this end can honestly say about it.
+func orDefaultValue(stored, grainDefault string) string {
+	if stored != "" {
+		return stored
+	}
+	if grainDefault != "" {
+		return fmt.Sprintf("%s (grain default, unset)", grainDefault)
+	}
+	return "unset"
 }
 
 // sandboxShapeValue renders one dimension of the deployment-wide sandbox

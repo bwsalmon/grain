@@ -26,8 +26,8 @@ import (
 // Basic auth -- the same content ConfigureGitCredentials writes locally,
 // just placed over runner (sshWriteRemote, ssh_tools.go) instead of
 // os.WriteFile.
-func ConfigureGitCredentialsOverSSH(runner remoteRunner, remoteURL, token string) error {
-	credentials, gitconfig, err := gitCredentialFiles(remoteURL, token)
+func ConfigureGitCredentialsOverSSH(runner remoteRunner, remoteURL, token string, identity GitIdentity) error {
+	credentials, gitconfig, err := gitCredentialFiles(remoteURL, token, identity)
 	if err != nil {
 		return err
 	}

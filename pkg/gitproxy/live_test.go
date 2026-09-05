@@ -219,7 +219,7 @@ func TestLiveCloneAndPushThroughTheWholeStack(t *testing.T) {
 	// credentials configured exactly as a real dispatch would.
 	root := t.TempDir()
 	remote := proxyServer.URL + "/owner/widgets.git"
-	if err := mcp.ConfigureGitCredentials(root, remote, "live-test-sandbox-token"); err != nil {
+	if err := mcp.ConfigureGitCredentials(root, remote, "live-test-sandbox-token", mcp.GitIdentity{}); err != nil {
 		t.Fatal(err)
 	}
 

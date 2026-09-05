@@ -3980,8 +3980,9 @@ for `gcp-project`/`gcp-agent-service-account`, and
 `KonturSandboxes.SetDefaultShape` for
 `sandbox-cpus`/`sandbox-memory-mb`/`sandbox-disk-gb`.
 The rest were already read per cycle or per dispatch, or gained it here:
-`RunCycle` re-reads `max-workers`/`max-mergers`, `max-agent-turns` *and*
-`prompt-extension`;
+`RunCycle` re-reads `max-workers`/`max-mergers`, `max-agent-turns`,
+`prompt-extension` *and* the agent git identity
+(`agent-git-name`/`agent-git-email`);
 `dispatchConfig` re-reads `agent-framework`, `gemini-model`,
 `gemini-effort` and `claude-model` when a run's framework is built (which is per dispatch,
 for the same reason the credential is); and `target-repos`,
@@ -4824,6 +4825,48 @@ be a paragraph per repo on a response every open tab polls). That is what
 puts up a row for a repo whose only configuration is standing
 instructions, so text that reaches every run against it is not text with
 nowhere to read it.
+
+### Whose name is on the commits
+
+Every commit an agent pushed was authored as `grain agent
+<grain-agent@localhost>` — two constants in `pkg/mcp`, written into each
+sandbox's `.gitconfig` beside its credential helper, with nothing
+anywhere that could change them. That name is not an internal detail: it
+is what a reviewer sees against each commit on a pull request grain
+opens, and the address GitHub matches that commit to an account by. A
+deployment that wants its agents' work attributed to a bot account of its
+own — or simply to a name its reviewers recognise — had no way to say so.
+
+`model.Config.AgentGitName`/`AgentGitEmail` (grain/task-14) is that way,
+taking the route every other store-backed setting takes: two
+`grain_config` columns, `Settings → Agents` beside the prompt extension
+(it is the same question of what the agents do), `grain settings
+-agent-git-name`/`-agent-git-email` from a shell, and
+`orchestrator.Config.GitIdentity` into each sandbox's own `.gitconfig`
+via `Sandbox.ConfigureGitCredentials` — on both the host-directory and
+the kontur-VM paths, since a guest reached only over SSH needs the
+identity as much as a local directory does.
+
+**Empty means grain's own, not a nameless committer.** A sandbox with no
+`user.email` set is one where `git commit` fails outright, so the
+fallback lives at the last moment — `mcp.GitIdentity.OrDefault`, beside
+the file it is written into — rather than at each caller that would have
+to remember it, and it resolves the two halves independently, so renaming
+the committer without giving it an address still leaves a sandbox that
+can commit. `ui.Settings` reports those defaults beside the stored
+values, the way it already reports grain's default sandbox VM shape, so
+the pane and the CLI can show the identity actually in effect instead of
+a blank field. Refreshed by `RunCycle` every tick like the prompt
+extension above, so a change reaches the next run dispatched; a run
+already live keeps what its sandbox was prepared with, which is written
+once, before the checkout.
+
+**What this deliberately does not change is the GitHub account** a pull
+request or a comment is posted as. That is decided by which token the git
+proxy and the REST client authenticate with (`pkg/gitproxy`'s credential
+ladder), and no setting on this pane could move it — pointing the commits
+at a bot account and the API calls at a personal one is a real
+configuration, just two configurations rather than one.
 
 ### Setting a repo up before the first turn
 

@@ -93,7 +93,7 @@ func TestClosingATaskWhileItsRunIsStillLiveCancelsItAndNeverReDispatchesOrOpensA
 	// it builds the one sandbox it needs by hand rather than through a
 	// backend.
 	root := t.TempDir()
-	if err := mcp.ConfigureGitCredentials(root, remote, "unused"); err != nil {
+	if err := mcp.ConfigureGitCredentials(root, remote, "unused", mcp.GitIdentity{}); err != nil {
 		t.Fatal(err)
 	}
 	branch := model.BranchName(task.ID)

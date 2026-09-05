@@ -62,7 +62,7 @@ func (s worldSandbox) Tools(ctx context.Context) ([]mcp.Tool, error) {
 
 // ConfigureGitCredentials is a no-op: world.sandboxRoot has already
 // pointed this directory at the world's proxy with its own minted token.
-func (s worldSandbox) ConfigureGitCredentials(ctx context.Context, remoteURL, token string) error {
+func (s worldSandbox) ConfigureGitCredentials(ctx context.Context, remoteURL, token string, identity mcp.GitIdentity) error {
 	return nil
 }
 

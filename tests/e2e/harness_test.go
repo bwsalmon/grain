@@ -160,7 +160,7 @@ func (w *world) sandboxRoot(sandbox string) string {
 	// host are, to build the credential-store line -- so any repo name
 	// stands in here even though this run may touch several different
 	// repos through the same proxy.
-	if err := mcp.ConfigureGitCredentials(root, w.proxyURL+"/placeholder/placeholder.git", token); err != nil {
+	if err := mcp.ConfigureGitCredentials(root, w.proxyURL+"/placeholder/placeholder.git", token, mcp.GitIdentity{}); err != nil {
 		w.t.Fatalf("configuring git credentials for %s: %v", sandbox, err)
 	}
 	w.roots[sandbox] = root
@@ -554,7 +554,7 @@ func (s *credentialedSandboxes) Acquire(ctx context.Context, name string, shape 
 	// goroutine calls runtime.Goexit on the wrong one -- the test does not
 	// stop where it says it did, and the failure surfaces somewhere less
 	// useful. runOne already turns this error into a failed dispatch.
-	if err := sb.ConfigureGitCredentials(ctx, s.remote, "unused"); err != nil {
+	if err := sb.ConfigureGitCredentials(ctx, s.remote, "unused", mcp.GitIdentity{}); err != nil {
 		return nil, fmt.Errorf("configuring git credentials on %s: %w", name, err)
 	}
 	rooted, ok := sb.(interface{ Root() (string, error) })

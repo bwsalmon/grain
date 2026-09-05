@@ -665,6 +665,17 @@ var Tables = []string{
 	// otherwise runs on Pacific time. Empty is still read as that default
 	// (model.TimeZoneOrDefault) rather than as a zone of its own, so a
 	// row written by some other path stays on a defensible clock.
+	//
+	// agent_git_name and agent_git_email are Config.AgentGitName/
+	// AgentGitEmail's own columns -- the git identity every dispatched
+	// run's sandbox commits under -- DEFAULT '' both here and in
+	// Store.ensureConfigAgentGitIdentityColumns for an already-created
+	// grain_config. Empty is not an unusable identity but "grain's own"
+	// (mcp.DefaultGitIdentityName/DefaultGitIdentityEmail), which is
+	// exactly what every deployment committed as before these columns
+	// existed; the resolution happens where the .gitconfig is written
+	// rather than on read here, for the reason Config.AgentGitName's own
+	// doc comment gives.
 	`CREATE TABLE IF NOT EXISTS ` + "`grain_config`" + ` (
   ` + "`id`" + `                         INTEGER NOT NULL,
   ` + "`poll_interval_ms`" + `           INTEGER NOT NULL,
@@ -693,6 +704,8 @@ var Tables = []string{
   ` + "`environment_name`" + `             TEXT    NOT NULL DEFAULT '',
   ` + "`prompt_extension`" + `             TEXT    NOT NULL DEFAULT '',
   ` + "`time_zone`" + `                    TEXT    NOT NULL DEFAULT 'America/Los_Angeles',
+  ` + "`agent_git_name`" + `               TEXT    NOT NULL DEFAULT '',
+  ` + "`agent_git_email`" + `              TEXT    NOT NULL DEFAULT '',
   PRIMARY KEY (` + "`id`" + `)
 )`,
 

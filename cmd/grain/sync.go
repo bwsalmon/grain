@@ -220,6 +220,8 @@ var settingsDiffRows = []settingsDiffRow{
 	// line of output rather than breaking the two-column shape of every
 	// line around it.
 	{"promptExtension", "prompt extension", func(s ui.Settings) any { return s.PromptExtension }},
+	{"agentGitName", "agent git name", func(s ui.Settings) any { return s.AgentGitName }},
+	{"agentGitEmail", "agent git email", func(s ui.Settings) any { return s.AgentGitEmail }},
 	// The two lists are joined rather than printed as Go slices: this is
 	// output a workflow log is read in, and ["a" "b"] is not how anything
 	// else here names a set. Joining is also what they are compared on, so

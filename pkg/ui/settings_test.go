@@ -22,6 +22,7 @@ import (
 
 	"github.com/bwsalmon/grain/pkg/gitproxy"
 	"github.com/bwsalmon/grain/pkg/kontur"
+	"github.com/bwsalmon/grain/pkg/mcp"
 	"github.com/bwsalmon/grain/pkg/model"
 	"github.com/bwsalmon/grain/pkg/ui"
 )
@@ -288,6 +289,115 @@ func TestUpdateSettingsRejectsUnrenderableEnvironmentName(t *testing.T) {
 		t.Fatalf("UpdateSettings with a 32-rune multi-byte name: %v", err)
 	}
 }
+
+// TestUpdateSettingsRoundTripsAgentGitIdentity is grain/task-14's own
+// setting: the name and address every agent's commits are authored
+// under. Unset, both read back empty with grain's own reported beside
+// them, so a pane can show what is actually in effect; setting either
+// sticks; clearing one is a real value -- "put grain's own back" -- and
+// not a no-op.
+func TestUpdateSettingsRoundTripsAgentGitIdentity(t *testing.T) {
+	c, _, ctx := testClient(t)
+	if _, err := c.UpdateSettings(ctx, firstSettings()); err != nil {
+		t.Fatal(err)
+	}
+
+	read, err := c.GetSettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if read.AgentGitName != "" || read.AgentGitEmail != "" {
+		t.Fatalf("agent git identity = %q/%q with nothing set, want both empty",
+			read.AgentGitName, read.AgentGitEmail)
+	}
+	if read.AgentGitNameDefault != mcp.DefaultGitIdentityName ||
+		read.AgentGitEmailDefault != mcp.DefaultGitIdentityEmail {
+		t.Fatalf("reported defaults = %q/%q, want %q/%q",
+			read.AgentGitNameDefault, read.AgentGitEmailDefault,
+			mcp.DefaultGitIdentityName, mcp.DefaultGitIdentityEmail)
+	}
+
+	// Surrounding whitespace is trimmed on the way in, the same as
+	// environmentName above.
+	name, email := "  acme bot  ", "  bot@acme.example  "
+	if _, err := c.UpdateSettings(ctx, ui.UpdateSettingsRequest{
+		AgentGitName: &name, AgentGitEmail: &email,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	read, err = c.GetSettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if read.AgentGitName != "acme bot" || read.AgentGitEmail != "bot@acme.example" {
+		t.Fatalf("agent git identity = %q/%q after UpdateSettings, want %q/%q",
+			read.AgentGitName, read.AgentGitEmail, "acme bot", "bot@acme.example")
+	}
+
+	cleared := ""
+	if _, err := c.UpdateSettings(ctx, ui.UpdateSettingsRequest{AgentGitName: &cleared}); err != nil {
+		t.Fatal(err)
+	}
+	read, err = c.GetSettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if read.AgentGitName != "" {
+		t.Fatalf("AgentGitName = %q after clearing, want empty", read.AgentGitName)
+	}
+	if read.AgentGitEmail != "bot@acme.example" {
+		t.Fatalf("AgentGitEmail = %q after clearing only the name, want it untouched", read.AgentGitEmail)
+	}
+}
+
+// The bounds on what is otherwise free text. Both halves end up on a git
+// author line, which a line break or an angle bracket would stop being
+// one line git can parse back; the address additionally has no room for
+// a space, since git writes it between angle brackets and a space there
+// splits it.
+func TestUpdateSettingsRejectsAnUnwritableAgentGitIdentity(t *testing.T) {
+	c, _, ctx := testClient(t)
+	if _, err := c.UpdateSettings(ctx, firstSettings()); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		name string
+		req  ui.UpdateSettingsRequest
+	}{
+		{"name too long", ui.UpdateSettingsRequest{AgentGitName: strPtr(strings.Repeat("b", 129))}},
+		{"name with a newline", ui.UpdateSettingsRequest{AgentGitName: strPtr("acme\nhelper = evil")}},
+		{"name with an angle bracket", ui.UpdateSettingsRequest{AgentGitName: strPtr("acme <bot>")}},
+		// Embedded rather than trailing: a trailing one is trimmed on the
+		// way in like any other surrounding whitespace, and a value that
+		// trims to something writable is the value it trims to.
+		{"email with a newline", ui.UpdateSettingsRequest{AgentGitEmail: strPtr("bot@acme.example\nx@y.z")}},
+		{"email with a space", ui.UpdateSettingsRequest{AgentGitEmail: strPtr("bot @acme.example")}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := c.UpdateSettings(ctx, tc.req); err == nil {
+				t.Fatal("UpdateSettings = nil error, want a validation error")
+			}
+			read, err := c.GetSettings(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if read.AgentGitName != "" || read.AgentGitEmail != "" {
+				t.Fatalf("agent git identity = %q/%q after a refused save, want both empty",
+					read.AgentGitName, read.AgentGitEmail)
+			}
+		})
+	}
+
+	// The length bound is in runes, not bytes, for the same reason
+	// environmentName's is.
+	multibyte := strings.Repeat("é", 128)
+	if _, err := c.UpdateSettings(ctx, ui.UpdateSettingsRequest{AgentGitName: &multibyte}); err != nil {
+		t.Fatalf("UpdateSettings with a 128-rune multi-byte name: %v", err)
+	}
+}
+
+func strPtr(s string) *string { return &s }
 
 // TestUpdateSettingsRoundTripsTaskDefaults is bwsalmon/agents#612's own
 // pair of global defaults: unset, both read back true

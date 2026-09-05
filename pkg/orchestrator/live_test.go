@@ -15,6 +15,7 @@ import (
 
 	"github.com/bwsalmon/grain/pkg/agent"
 	"github.com/bwsalmon/grain/pkg/agent/antigravity"
+	"github.com/bwsalmon/grain/pkg/mcp"
 	"github.com/bwsalmon/grain/pkg/model"
 	"github.com/bwsalmon/grain/pkg/orchestrator"
 	"github.com/bwsalmon/grain/pkg/ui"
@@ -47,7 +48,7 @@ func (s credentialingSandboxes) Acquire(ctx context.Context, name string, shape 
 	if err != nil {
 		return nil, err
 	}
-	if err := sb.ConfigureGitCredentials(ctx, "http://placeholder.example/x/y.git", "unused"); err != nil {
+	if err := sb.ConfigureGitCredentials(ctx, "http://placeholder.example/x/y.git", "unused", mcp.GitIdentity{}); err != nil {
 		s.t.Fatalf("configuring git credentials on %s: %v", name, err)
 	}
 	return sb, nil

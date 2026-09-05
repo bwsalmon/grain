@@ -25,6 +25,8 @@ const settings = {
   sandboxCpusDefault: 2,
   sandboxMemoryMbDefault: 8192,
   sandboxDiskGbDefault: 30,
+  agentGitNameDefault: "grain agent",
+  agentGitEmailDefault: "grain-agent@localhost",
 };
 
 describe("SettingsOverlay", () => {
@@ -1183,6 +1185,92 @@ describe("SettingsOverlay", () => {
       expect(api).toHaveBeenCalledWith("/api/settings", {
         method: "PUT",
         body: JSON.stringify({ promptExtension: "" }),
+      });
+    });
+  });
+
+  // The git identity every agent's commits are authored under, on the
+  // same tab and for the same reason.
+  describe("commit identity", () => {
+    it("shows the deployment's own identity when it has one", async () => {
+      api.mockResolvedValueOnce({
+        ...settings,
+        agentGitName: "acme bot",
+        agentGitEmail: "bot@acme.example",
+      });
+      const user = userEvent.setup();
+      render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
+      await screen.findByDisplayValue("30s");
+
+      await user.click(screen.getByRole("tab", { name: "Agents" }));
+
+      expect(screen.getByLabelText(/Author name/)).toHaveValue("acme bot");
+      expect(screen.getByLabelText(/Author email/)).toHaveValue(
+        "bot@acme.example",
+      );
+    });
+
+    // A deployment that has chosen nothing leaves both boxes empty and
+    // names grain's own identity beside them: pre-filling the boxes with
+    // it would turn "never chosen" into a value saved back as a choice.
+    it("leaves the boxes empty and names grain's default beside them", async () => {
+      api.mockResolvedValueOnce(settings);
+      const user = userEvent.setup();
+      render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
+      await screen.findByDisplayValue("30s");
+
+      await user.click(screen.getByRole("tab", { name: "Agents" }));
+
+      expect(screen.getByLabelText(/Author name/)).toHaveValue("");
+      expect(
+        screen.getByText(/grain's own, grain agent\./),
+      ).toBeInTheDocument();
+      expect(
+        screen.getByText(/grain's own, grain-agent@localhost\./),
+      ).toBeInTheDocument();
+    });
+
+    it("sends both halves with the Agents tab's own save", async () => {
+      api.mockResolvedValueOnce(settings).mockResolvedValueOnce({});
+      const user = userEvent.setup();
+      render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
+      await screen.findByDisplayValue("30s");
+      await user.click(screen.getByRole("tab", { name: "Agents" }));
+
+      await user.type(screen.getByLabelText(/Author name/), "acme bot");
+      await user.type(
+        screen.getByLabelText(/Author email/),
+        "bot@acme.example",
+      );
+      await user.click(screen.getByRole("button", { name: "Save" }));
+
+      expect(api).toHaveBeenCalledWith("/api/settings", {
+        method: "PUT",
+        body: JSON.stringify({
+          agentGitName: "acme bot",
+          agentGitEmail: "bot@acme.example",
+        }),
+      });
+    });
+
+    // Clearing a box is how an operator asks for grain's own identity
+    // back, so it has to reach the PUT as "" rather than reading as
+    // unchanged.
+    it("sends an empty string when a configured name is cleared", async () => {
+      api
+        .mockResolvedValueOnce({ ...settings, agentGitName: "acme bot" })
+        .mockResolvedValueOnce({});
+      const user = userEvent.setup();
+      render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
+      await screen.findByDisplayValue("30s");
+      await user.click(screen.getByRole("tab", { name: "Agents" }));
+
+      await user.clear(screen.getByLabelText(/Author name/));
+      await user.click(screen.getByRole("button", { name: "Save" }));
+
+      expect(api).toHaveBeenCalledWith("/api/settings", {
+        method: "PUT",
+        body: JSON.stringify({ agentGitName: "" }),
       });
     });
   });

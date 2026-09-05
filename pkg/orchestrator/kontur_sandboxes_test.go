@@ -87,7 +87,8 @@ func TestKonturSandboxesConfigureGitCredentialsWritesToTheVMOverSSH(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := sb.ConfigureGitCredentials(context.Background(), "http://10.100.0.1:8080/owner/repo.git", "secret-token"); err != nil {
+	identity := mcp.GitIdentity{Name: "acme bot", Email: "bot@acme.example"}
+	if err := sb.ConfigureGitCredentials(context.Background(), "http://10.100.0.1:8080/owner/repo.git", "secret-token", identity); err != nil {
 		t.Fatal(err)
 	}
 
@@ -98,15 +99,24 @@ func TestKonturSandboxesConfigureGitCredentialsWritesToTheVMOverSSH(t *testing.T
 	if want := "http://sandbox:secret-token@10.100.0.1:8080\n"; string(data) != want {
 		t.Errorf(".git-credentials = %q, want %q", data, want)
 	}
-	if _, err := os.Stat(filepath.Join(home, ".gitconfig")); err != nil {
-		t.Errorf(".gitconfig was not written on the VM: %v", err)
+	// The identity, not just the file's existence: a deployment that has
+	// configured its committer has to get that committer inside the guest,
+	// which is the whole route this test is here to cover.
+	gitconfig, err := os.ReadFile(filepath.Join(home, ".gitconfig"))
+	if err != nil {
+		t.Fatalf(".gitconfig was not written on the VM: %v", err)
+	}
+	for _, want := range []string{"name = acme bot", "email = bot@acme.example"} {
+		if !strings.Contains(string(gitconfig), want) {
+			t.Errorf(".gitconfig = %q, want it to contain %q", gitconfig, want)
+		}
 	}
 
 	// A second call for the same slot must not create a second VM --
 	// ConfigureGitCredentials runs over the runner Acquire already
 	// resolved, so it needs no setup of its own; this just confirms it
 	// actually took effect end to end.
-	if err := sb.ConfigureGitCredentials(context.Background(), "http://10.100.0.1:8080/owner/repo.git", "second-token"); err != nil {
+	if err := sb.ConfigureGitCredentials(context.Background(), "http://10.100.0.1:8080/owner/repo.git", "second-token", identity); err != nil {
 		t.Fatal(err)
 	}
 }

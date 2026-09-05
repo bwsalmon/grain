@@ -121,7 +121,7 @@ func TestSandboxTokenMintedAfterGitProxyStartsAuthenticates(t *testing.T) {
 	}
 
 	root := t.TempDir()
-	if err := mcp.ConfigureGitCredentials(root, proxyURL+"/placeholder/placeholder.git", token); err != nil {
+	if err := mcp.ConfigureGitCredentials(root, proxyURL+"/placeholder/placeholder.git", token, mcp.GitIdentity{}); err != nil {
 		t.Fatal(err)
 	}
 

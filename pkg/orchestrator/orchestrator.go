@@ -126,8 +126,9 @@ type Sandbox interface {
 	// to.
 	Tools(ctx context.Context) ([]mcp.Tool, error)
 	// ConfigureGitCredentials points this sandbox's git at the proxy,
-	// using the bearer token minted for it.
-	ConfigureGitCredentials(ctx context.Context, remoteURL, token string) error
+	// using the bearer token minted for it, and gives it the identity the
+	// run's commits are authored under (Config.GitIdentity).
+	ConfigureGitCredentials(ctx context.Context, remoteURL, token string, identity mcp.GitIdentity) error
 	// Release destroys the sandbox. It is called once the run is done,
 	// success or failure alike, and is what makes the isolation between
 	// one task and the next a property of the lifecycle rather than
@@ -243,6 +244,20 @@ type Config struct {
 	// next occurrence of every schedule rather than waiting for a
 	// restart.
 	TimeZone string
+	// GitIdentity is the name and email every dispatched run's commits
+	// are authored under -- model.Config.AgentGitName/AgentGitEmail,
+	// written into each sandbox's own .gitconfig when its git credentials
+	// are configured (Sandbox.ConfigureGitCredentials). The zero value is
+	// grain's own default identity, resolved where that file is written
+	// (mcp.GitIdentity.OrDefault), so a caller that configures nothing
+	// still dispatches runs that can commit.
+	//
+	// Refreshed from grain_config every cycle, like MaxAgentTurns,
+	// PromptExtension and TimeZone above, so a deployment that renames its
+	// committer sees the new name on the next run dispatched rather than
+	// after a restart. A run already in flight keeps the identity its
+	// sandbox was prepared with: it is written once, before the checkout.
+	GitIdentity mcp.GitIdentity
 	// GitRemoteBase is the base URL of this deployment's git proxy
 	// (cmd/grain/daemon.go's startGitProxy), which RunDispatch turns into
 	// a task's own clone URL to prepare its sandbox's checkout with --
@@ -626,8 +641,8 @@ func (s *hostSandbox) Tools(ctx context.Context) ([]mcp.Tool, error) {
 // ConfigureGitCredentials points this run's git at the proxy -- an
 // ordinary file write under its directory, where KonturSandboxes' own
 // method of the same name has to reach into a VM's guest to do it.
-func (s *hostSandbox) ConfigureGitCredentials(ctx context.Context, remoteURL, token string) error {
-	return mcp.ConfigureGitCredentials(s.root, remoteURL, token)
+func (s *hostSandbox) ConfigureGitCredentials(ctx context.Context, remoteURL, token string, identity mcp.GitIdentity) error {
+	return mcp.ConfigureGitCredentials(s.root, remoteURL, token, identity)
 }
 
 // Rebuild implements SandboxRebuilder: remove this run's directory and
