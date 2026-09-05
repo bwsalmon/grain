@@ -249,6 +249,14 @@ type Settings struct {
 	GeminiAPIKeySet     bool `json:"geminiApiKeySet"`
 	ClaudeOAuthTokenSet bool `json:"claudeOAuthTokenSet"`
 	OpenAIAPIKeySet     bool `json:"openaiApiKeySet"`
+	// AgentKeyChecksEnabled is whether this deployment can go and ask the
+	// vendor whether one of those credentials still works
+	// (Config.AgentKeyChecks, POST /api/agent-keys/{framework}/check) --
+	// CapabilityStatus.Checkable's own role for the Capabilities tab,
+	// reported once here because the answer is the same for all three
+	// frameworks. False means no pane should offer a button that could
+	// only ever 404.
+	AgentKeyChecksEnabled bool `json:"agentKeyChecksEnabled"`
 	// RestartRequired names every setting on this pane that a running
 	// daemon cannot adopt on its own, by the JSON field it is called
 	// above -- restartOnlySettings' own list. Constant, reported even on
@@ -411,6 +419,7 @@ func (c *Client) settingsFrom(cfg model.Config, repoConfigs []model.RepoConfig) 
 		GeminiAPIKeySet:               geminiKeySet,
 		ClaudeOAuthTokenSet:           claudeTokenSet,
 		OpenAIAPIKeySet:               openaiKeySet,
+		AgentKeyChecksEnabled:         c.Config.AgentKeyChecks != nil,
 		RestartRequired:               restartRequiredKeys(),
 		PendingRestart:                c.pendingRestart(cfg),
 	}
@@ -477,8 +486,13 @@ func (c *Client) GetSettings(ctx context.Context) (Settings, error) {
 			GeminiAPIKeySet:        geminiKeySet,
 			ClaudeOAuthTokenSet:    claudeTokenSet,
 			OpenAIAPIKeySet:        openaiKeySet,
-			ApprovedByDefault:      def.ApprovedByDefault,
-			AutoMergeByDefault:     def.AutoMergeByDefault,
+			// Offered before anything has been saved for the same reason
+			// presence is: a deployment that has never had its settings
+			// saved is exactly where a credential is being pasted in for
+			// the first time, which is when testing it is worth most.
+			AgentKeyChecksEnabled: c.Config.AgentKeyChecks != nil,
+			ApprovedByDefault:     def.ApprovedByDefault,
+			AutoMergeByDefault:    def.AutoMergeByDefault,
 			// Same reading as the two above: what a pane showing an
 			// unconfigured deployment should say the clock is, is the
 			// clock a firing would actually be timed against.

@@ -127,6 +127,9 @@ func (s *Server) routes() {
 	s.route("GET /api/agent-keys", s.handleListAgentKeys)
 	s.route("PUT /api/agent-keys/{framework}", s.handleSetAgentKey)
 	s.route("DELETE /api/agent-keys/{framework}", s.handleDeleteAgentKey)
+	// The one route in this family that asks the vendor rather than the
+	// store: whether the credential set above is still one that works.
+	s.route("POST /api/agent-keys/{framework}/check", s.handleCheckAgentKey)
 
 	s.route("GET /api/github-tokens", s.handleListGitHubTokens)
 	s.route("PUT /api/github-tokens/{name}", s.handleSetGitHubToken)
