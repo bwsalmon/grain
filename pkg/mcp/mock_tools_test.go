@@ -163,26 +163,36 @@ func toolNamed(t *testing.T, tools []Tool, name string) Tool {
 	return Tool{}
 }
 
-// TestAddReviewCommentSaysItGoesNowhere is the other half, and the
-// inverse problem: this one is registered on every run, promises a draft
-// review a human will open, and is relayed by nothing at all
-// (ProcessResult's own doc comment). Until a review dispatch exists to
-// attach one to, both its texts have to say where the feedback really
-// lands and name the tool that does reach a human, so a run can spend
-// its turns on the one that works.
-func TestAddReviewCommentSaysItGoesNowhere(t *testing.T) {
+// TestAddReviewCommentSaysWhereTheFeedbackLands is the same regression
+// from the other side. This hatch spent as long saying that nothing
+// relayed it -- true while no dispatch had a pull request to attach a
+// draft review to, and false the moment one did
+// (orchestrator.relayReviewFeedback). A run that believes the old
+// sentence spends its findings on comment_on_issue instead, which puts
+// line-level feedback in a paragraph on the wrong task.
+//
+// Both destinations are pinned, because a run cannot tell from here which
+// one it gets: the review case, which is what the tool is for, and the
+// fallback for a run that is not reviewing anything, which is what keeps
+// the promise true on every other dispatch.
+func TestAddReviewCommentSaysWhereTheFeedbackLands(t *testing.T) {
 	text := escapeHatchText(t)["add_review_comment"]
 	for _, where := range []struct{ what, s string }{
 		{"description", text.description},
 		{"confirmation", text.confirmation},
 	} {
-		if !strings.Contains(strings.ToLower(where.s), "nothing relays") {
-			t.Errorf("add_review_comment's %s = %q, want it to say nothing relays these",
+		lower := strings.ToLower(where.s)
+		if strings.Contains(lower, "nothing relays") {
+			t.Errorf("add_review_comment's %s = %q, want it to stop saying nothing relays these",
 				where.what, where.s)
 		}
-		if !strings.Contains(where.s, "comment_on_issue") {
-			t.Errorf("add_review_comment's %s = %q, want it to point at comment_on_issue",
+		if !strings.Contains(lower, "draft review") {
+			t.Errorf("add_review_comment's %s = %q, want it to name the draft review these become",
 				where.what, where.s)
+		}
+		if !strings.Contains(lower, "conversation") {
+			t.Errorf("add_review_comment's %s = %q, want it to say where a run that is "+
+				"reviewing nothing has them relayed instead", where.what, where.s)
 		}
 	}
 }

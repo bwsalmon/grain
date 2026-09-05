@@ -48,10 +48,11 @@ import (
 // required property of the tool of that name, or the relay silently
 // stops working.
 var escapeHatchArguments = map[string][]string{
-	"ask_question":     {"question"},
-	"comment_on_issue": {"comment"},
-	"request_secret":   {"secret", "reason"},
-	"propose_task":     {"title", "body"},
+	"ask_question":       {"question"},
+	"comment_on_issue":   {"comment"},
+	"request_secret":     {"secret", "reason"},
+	"propose_task":       {"title", "body"},
+	"add_review_comment": {"body"},
 }
 
 func TestEscapeHatchArgumentsAreTheOnesProcessResultReads(t *testing.T) {
@@ -138,6 +139,23 @@ func TestEscapeHatchArgumentsAreTheOnesProcessResultReads(t *testing.T) {
 				}
 				if !strings.Contains(proposal.Body, args["body"].(string)) {
 					t.Errorf("body = %q, want the proposed one (%q) in it", proposal.Body, args["body"])
+				}
+			},
+		},
+		{
+			// path and line are optional, so what this builds is a
+			// finding tied to no line -- and the task it is made against
+			// reviews nothing, so the effect owed is the fallback:
+			// relayed into that task's own conversation. The draft review
+			// a review task's own calls become is
+			// reviewfeedback_test.go's subject; what is pinned here is
+			// only that finish.go still reads the key pkg/mcp requires.
+			tool: "add_review_comment",
+			effect: func(t *testing.T, ctx context.Context, store *model.Store, task model.Task, args map[string]any) {
+				comments := commentBodies(t, ctx, store, task.ID)
+				if len(comments) != 1 || !strings.Contains(comments[0], args["body"].(string)) {
+					t.Fatalf("conversation = %q, want the run's finding (%q) in it",
+						comments, args["body"])
 				}
 			},
 		},
