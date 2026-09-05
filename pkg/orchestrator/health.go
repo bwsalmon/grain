@@ -68,7 +68,57 @@ type SandboxHealth struct {
 	// through a build is often a guest that has simply filled its root
 	// filesystem, which nothing in this pane could previously show.
 	DiskUsedMB, DiskTotalMB int
+	// NestedVirt is whether this sandbox can itself run virtual machines
+	// -- one of the NestedVirt* constants below, or empty when the
+	// backend has no way to answer (HostSandboxes, whose "sandbox" is a
+	// directory on the host and so has whatever the host has).
+	//
+	// A kontur sandbox is a cloud-hypervisor guest, so a VM started
+	// inside one is a nested VM and needs three things at once: the
+	// machine underneath to be running KVM with nesting enabled
+	// (sysstat.NestedVirtualization reports that half, on the host
+	// section of the same pane), cloud-hypervisor to pass the CPU's
+	// virtualization flag through to the guest, and the guest to have
+	// loaded its own kvm module and let the account tools run as open
+	// /dev/kvm. Only the last of those is visible from inside the
+	// sandbox, and it is the one that is visible from *exactly* here --
+	// which is why this is a per-sandbox reading rather than a
+	// deployment-wide setting the pane could show without asking.
+	NestedVirt string
 }
+
+// The values SandboxHealth.NestedVirt takes, in the order they narrow:
+// each one is the answer when everything the next one asks about is
+// already true.
+//
+// They are deliberately four values rather than a boolean, because the
+// three failures want different actions from an operator and read
+// identically as "false": a guest with no CPU flag needs the host's own
+// KVM nesting turned on (or a cloud-hypervisor that stops masking it), a
+// guest with no /dev/kvm needs its kvm module loaded, and a guest whose
+// device is there but unreadable needs the exec account in the "kvm"
+// group -- which is what scripts/kontur/guest-setup.sh grants, and the
+// state every sandbox built before it did was in.
+const (
+	// NestedVirtReady: /dev/kvm is present in the guest and the account
+	// this sandbox's tools run as can open it for reading and writing,
+	// which is all a VMM inside the sandbox needs from the kernel.
+	NestedVirtReady = "ready"
+	// NestedVirtDenied: /dev/kvm is there but that account cannot open
+	// it -- the device is root:kvm 0660, so this means "not in the kvm
+	// group".
+	NestedVirtDenied = "denied"
+	// NestedVirtNoDevice: the guest's CPU offers vmx/svm but there is no
+	// /dev/kvm, i.e. nothing loaded kvm_intel/kvm_amd. udev autoloads
+	// them off the CPU's own feature bits on a systemd guest, so this is
+	// mostly a guest image built without them.
+	NestedVirtNoDevice = "no-device"
+	// NestedVirtUnsupported: no vmx/svm in the guest's /proc/cpuinfo at
+	// all. The flag is masked by the layer below rather than by anything
+	// in the guest -- an unnested host kernel, or a cloud-hypervisor
+	// asked for "--cpus nested=off".
+	NestedVirtUnsupported = "unsupported"
+)
 
 // Health implements the same shape KonturSandboxes.Health does: one entry
 // per sandbox currently held by a live run, in name order. A
@@ -107,8 +157,9 @@ const healthTimeout = 5 * time.Second
 
 // Health implements the same shape HostSandboxes.Health does: one entry
 // per VM currently held by a live run, each with a best-effort live
-// /proc/loadavg, /proc/meminfo and `df` reading pulled out of the guest
-// over the same transport that run's own tools use. Unlike Acquire, this never
+// /proc/loadavg, /proc/meminfo, `df` and nested-virtualization reading
+// pulled out of the guest over the same transport that run's own tools
+// use. Unlike Acquire, this never
 // waits out a VM's multi-minute boot -- a sandbox not reachable within
 // healthTimeout gets Error set instead, which is exactly the condition
 // this pane exists to surface (bwsalmon/agents#536), not one this method
@@ -182,17 +233,17 @@ func (k *KonturSandboxes) sandboxHealth(ctx context.Context, sandbox, name strin
 	// parseDiskStats' own "the line whose last field is /" reliable
 	// against a long device name that plain `df` would wrap.
 	//
-	// The `&&` and the `|| true` are what keep the exit status meaning
-	// what it did before this line grew a second command: the two /proc
-	// files are what says the guest is answering at all, so their status
-	// is the one reported, while a `df` that fails (a busybox build
-	// without -P, say) leaves the disk figure at 0/0 -- "unavailable",
-	// which the pane already has a shape for -- rather than turning a
-	// perfectly reachable sandbox into an errored row. The order matters
-	// too: parseProcStats reads /proc/loadavg off the first line, so the
-	// `cat` has to come first regardless.
+	// The `|| exit` and the `|| true` are what keep the exit status
+	// meaning what it did before this line grew a second and a third
+	// command: the two /proc files are what says the guest is answering
+	// at all, so their status is the one reported, while a `df` that
+	// fails (a busybox build without -P, say) leaves the disk figure at
+	// 0/0 -- "unavailable", which the pane already has a shape for --
+	// rather than turning a perfectly reachable sandbox into an errored
+	// row. The order matters too: parseProcStats reads /proc/loadavg off
+	// the first line, so the `cat` has to come first regardless.
 	stdout, stderr, exitCode := runner.Run(ctx,
-		[]string{"sh", "-c", "cat /proc/loadavg /proc/meminfo && { df -Pk / || true; }"}, "")
+		[]string{"sh", "-c", guestStatsCommand}, "")
 	if exitCode != 0 {
 		if stderr == "" {
 			stderr = fmt.Sprintf("exited %d with no output", exitCode)
@@ -204,8 +255,44 @@ func (k *KonturSandboxes) sandboxHealth(ctx context.Context, sandbox, name strin
 	health.Ready = true
 	health.LoadAverage, health.MemoryUsedMB, health.MemoryTotalMB = parseProcStats(stdout)
 	health.DiskUsedMB, health.DiskTotalMB = parseDiskStats(stdout)
+	health.NestedVirt = parseNestedVirt(stdout)
 	return health
 }
+
+// nestedVirtPrefix is what the guest prints its nested-virtualization
+// answer behind, so parseNestedVirt can find that line among the /proc
+// files and the `df` sharing the same stream. Nothing else in that
+// output starts a line with it.
+const nestedVirtPrefix = "nested-virt:"
+
+// nestedVirtProbe is the guest-side half of SandboxHealth.NestedVirt: it
+// prints one "nested-virt: <state>" line, using the same four spellings
+// the NestedVirt* constants hold.
+//
+// It asks the questions in the order those constants narrow, and it asks
+// them *as the account tools run as* rather than about the system in the
+// abstract: `[ -r ] && [ -w ]` is access(2) with this session's own
+// credentials, which is the whole question for a VMM the agent itself
+// would start. A `stat` of the device's mode would answer a different and
+// less useful one, since /dev/kvm is root:kvm 0660 in every guest whether
+// or not the exec account is in that group.
+//
+// /proc/cpuinfo is only consulted once /dev/kvm has been ruled out, to
+// tell "the kernel module is not loaded" from "this CPU was never offered
+// the feature" -- the two need different fixes, in different places (see
+// the NestedVirt* constants).
+const nestedVirtProbe = "if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then echo '" + nestedVirtPrefix + " " + NestedVirtReady + "'; " +
+	"elif [ -e /dev/kvm ]; then echo '" + nestedVirtPrefix + " " + NestedVirtDenied + "'; " +
+	"elif grep -qE '^flags.*[ ](vmx|svm)([ ]|$)' /proc/cpuinfo; then echo '" + nestedVirtPrefix + " " + NestedVirtNoDevice + "'; " +
+	"else echo '" + nestedVirtPrefix + " " + NestedVirtUnsupported + "'; fi"
+
+// guestStatsCommand is the single shell command sandboxHealth runs in
+// the guest for every figure this pane shows -- see its own comment on
+// why one command rather than three, and on which part of it decides the
+// exit status.
+const guestStatsCommand = "cat /proc/loadavg /proc/meminfo || exit $?; " +
+	"{ df -Pk / || true; }; " +
+	"{ " + nestedVirtProbe + "; } || true"
 
 // parseProcStats picks the three /proc/loadavg fields and MemTotal/
 // MemAvailable out of "cat /proc/loadavg /proc/meminfo"'s combined
@@ -264,6 +351,33 @@ func parseProcStats(output string) (loadAverage string, usedMB, totalMB int) {
 // SandboxHealth.DiskUsedMB documents as "unavailable" and the pane shows
 // as a dash, rather than an error that would take a perfectly healthy
 // sandbox's whole row down with it.
+// parseNestedVirt picks the nested-virtualization line out of the same
+// combined output parseProcStats and parseDiskStats read -- the
+// nestedVirtProbe half of it (see sandboxHealth, which asks for all
+// three in one command).
+//
+// Found by its prefix rather than by position, for the same reason
+// parseDiskStats finds its row by shape: the line lands after however
+// many lines /proc/meminfo and `df` happened to produce. An answer that
+// is not one of the four known states, or no such line at all -- an
+// older guest, or a `grep`-less one -- reads as empty, which
+// SandboxHealth.NestedVirt documents as "no reading" and the pane shows
+// as a dash, rather than as a definite "unsupported" this did not
+// actually establish.
+func parseNestedVirt(output string) string {
+	for _, line := range strings.Split(output, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 2 || fields[0] != nestedVirtPrefix {
+			continue
+		}
+		switch fields[1] {
+		case NestedVirtReady, NestedVirtDenied, NestedVirtNoDevice, NestedVirtUnsupported:
+			return fields[1]
+		}
+	}
+	return ""
+}
+
 func parseDiskStats(output string) (usedMB, totalMB int) {
 	for _, line := range strings.Split(output, "\n") {
 		fields := strings.Fields(line)

@@ -33,9 +33,46 @@ describe("StateRepoPanel", () => {
     // hold is the one this deployment encrypts to -- and the private half
     // is named as a path, never rendered.
     expect(screen.getByText("grain-secret-pub-v1:AAAA")).toBeInTheDocument();
+    // Named more than once on a local-only deployment: once as the file
+    // to back up, and once in the warning that says nothing else here is.
     expect(
-      screen.getByText(/\/var\/lib\/grain\/secrets\/secrets.key/),
+      screen.getAllByText(/\/var\/lib\/grain\/secrets\/secrets.key/).length,
+    ).toBeGreaterThan(0);
+  });
+
+  // The condition an operator who never opens a terminal would otherwise
+  // never learn about: state that lives on exactly one disk, with the
+  // secrets key that nothing can regenerate sitting beside it. `grain
+  // state status` has always said this; this pane says it too now.
+  it("warns that a local-only deployment is backed up nowhere", async () => {
+    api.mockResolvedValueOnce(local);
+    render(<StateRepoPanel showError={() => {}} />);
+
+    expect(await screen.findByText(/Nothing here is backed up/)).toBeVisible();
+    // Both ways out are named, because they fix different halves: a
+    // remote carries the commits off this host, and a copy of the key
+    // file is the only thing that can open the secrets beside them.
+    expect(
+      screen.getByText("grain state adopt -remote URL"),
     ).toBeInTheDocument();
+    expect(screen.getByText("GRAIN_SECRETS_KEY")).toBeInTheDocument();
+    expect(
+      screen.getAllByText("/var/lib/grain/secrets/secrets.key").length,
+    ).toBeGreaterThan(0);
+  });
+
+  it("says nothing about backups once there is a remote", async () => {
+    api.mockResolvedValueOnce({
+      ...local,
+      mode: "remote",
+      remote: "https://example.invalid/x.git",
+    });
+    render(<StateRepoPanel showError={() => {}} />);
+
+    await screen.findByText("https://example.invalid/x.git");
+    expect(
+      screen.queryByText(/Nothing here is backed up/),
+    ).not.toBeInTheDocument();
   });
 
   it("says so, and offers nothing, when this UI manages no repository", async () => {
