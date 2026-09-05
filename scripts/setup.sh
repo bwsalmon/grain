@@ -1955,12 +1955,22 @@ format_target_repo_if_empty() {
   local url="${proto}://x-access-token:${token}@${GRAIN_GITHUB_HOST}/${GRAIN_TARGET_REPO}.git"
 
   log "Checking whether $GRAIN_TARGET_REPO has any commits yet"
+  # The single quotes are the point, not an oversight (SC2016): what is
+  # between them is the *container's* sh script, and $GRAIN_TARGET_URL is
+  # for that sh to expand out of its own environment. Expanding it here
+  # would interpolate the token into an argv this host can read in `ps`,
+  # which is exactly what the --env above exists to avoid.
+  # shellcheck disable=SC2016
   if [ -n "$(image_run --network host --env "GRAIN_TARGET_URL=$url" \
        --entrypoint sh -- -c 'git ls-remote "$GRAIN_TARGET_URL"' 2>/dev/null)" ]; then
     return
   fi
 
   log "  it's empty -- pushing one empty commit to $GRAIN_TARGET_BRANCH so grain has something to branch from"
+  # Same as above: this whole block is the container's script, and its
+  # $1, $branch, $tmp and $GRAIN_TARGET_URL all belong to the sh that
+  # runs it. Nothing in it may be expanded here (SC2016).
+  # shellcheck disable=SC2016
   image_run --network host --env "GRAIN_TARGET_URL=$url" --entrypoint sh -- -c '
     set -e
     branch="$1"

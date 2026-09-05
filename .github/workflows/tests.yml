@@ -357,6 +357,67 @@ jobs:
       - name: Lint workflows
         run: actionlint -color .github/workflows/*.yml
 
+  # The job above reads the shell written inline in a `run:` block, and it
+  # cannot read one word further: a step that says `bash
+  # scripts/gce-vm-smoke.sh` is a single opaque word to actionlint. So the
+  # 4,300 lines under scripts/ were the same blind spot the job above was
+  # added to close, one level down -- and they are where these workflows
+  # keep the logic they do not write inline.
+  #
+  # It lands on the same files, too. gcp-smoke.yml's two legs are almost
+  # entirely scripts/gce-vm-smoke.sh and scripts/gke-cluster-smoke.sh,
+  # which only ever run nightly on main against a real GCP project, so an
+  # unquoted expansion in either first reports itself as a red 04:41 UTC
+  # run some days after the commit that broke it. scripts/setup.sh is
+  # worse in a different way: no workflow runs it at all, because it runs
+  # on the target machine at install time, in front of an operator.
+  #
+  # Default severity, deliberately. SC2086 -- the unquoted expansion this
+  # job mostly exists to catch -- is only "info", so anything stricter
+  # than the default would run clean over these files while missing the
+  # very thing. Findings that are wrong about a script are suppressed in
+  # that script, on the line, with the reason written beside them; there
+  # is no blanket `-e` here, and `shellcheck -o all` is not enabled
+  # because everything it adds over the default set is house style
+  # (braces around every expansion, `[[` over `[`) rather than a bug.
+  #
+  # A job of its own rather than a step in the one above so that a red
+  # tick names what it is about: "workflows" is the wrong thing to read
+  # over a finding in scripts/setup.sh.
+  shellcheck:
+    name: scripts
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # `git ls-files` rather than a `scripts/*.sh` glob, because that
+      # glob reads as covering scripts/ and does not: it silently misses
+      # scripts/kontur/build-guest.sh and scripts/kontur/guest-setup.sh,
+      # the 1,100 lines that build the sandbox guest image. Git's
+      # pathspec wildcards cross `/`, so the one pattern matches at any
+      # depth and a script added in a new subdirectory is checked the day
+      # it lands rather than whenever someone next remembers this line.
+      # The count is asserted for the reason the job above asserts
+      # shellcheck is installed: a lint that matched nothing exits 0 and
+      # looks exactly like a lint that passed.
+      #
+      # shellcheck itself needs no such assertion here -- unlike
+      # actionlint, which skips its shell checks silently when shellcheck
+      # is missing, this step invokes it directly, so a runner without it
+      # fails with "command not found".
+      - name: Lint scripts
+        run: |
+          set -euo pipefail
+          shellcheck --version
+          mapfile -t scripts < <(git ls-files -- 'scripts/*.sh')
+          if [ "${#scripts[@]}" -eq 0 ]; then
+            echo "::error::no shell scripts matched under scripts/; this job is checking nothing" >&2
+            exit 1
+          fi
+          printf 'checking %s\n' "${scripts[@]}"
+          shellcheck --color=always "${scripts[@]}"
+
   # terraform/gcp had no machine check of any kind until this job.
   # Nothing else in this workflow reads a .tf file, so a typo'd variable
   # reference or an unformatted block could sit on main indefinitely and
