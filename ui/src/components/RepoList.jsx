@@ -8,14 +8,47 @@ import {
   Typography,
 } from "@mui/material";
 import api from "../api.js";
-import { STATE_LABELS, STATE_ORDER, repoRows } from "../state.js";
+import {
+  ACTIVITY_RANK,
+  STATE_LABELS,
+  STATE_ORDER,
+  repoActivity,
+  repoRows,
+} from "../state.js";
+import { useListOrder } from "../listOrder.js";
 import {
   ListEmpty,
   ListHeader,
   ListSearchField,
+  ListSortSelect,
   ListToolbar,
+  ReorderableList,
 } from "./ListPrimitives.jsx";
 import ItemGlyph from "./ItemGlyph.jsx";
+
+// SORTS is this page's own toolbar Select, TaskList's own shape
+// (taskFilters.js) with "custom" standing where the task list's
+// "Backlog order" does: a repo has no backlog position, so the order a
+// drag stores here is this browser's own display order and nothing more
+// (listOrder.js). It is still the default, because a list nobody has
+// dragged is in the alphabetical order it always was -- applyOrder falls
+// back to exactly the comparator "Name (A–Z)" uses -- so the only thing
+// the default costs is the handles that make the order draggable.
+const byName = (a, b) => a.repo.localeCompare(b.repo);
+const SORTS = {
+  custom: { label: "Custom order", cmp: byName },
+  name: { label: "Name (A–Z)", cmp: byName },
+  active: {
+    label: "Active first",
+    cmp: (a, b) =>
+      ACTIVITY_RANK[repoActivity(a).key] - ACTIVITY_RANK[repoActivity(b).key] ||
+      byName(a, b),
+  },
+  tasks: {
+    label: "Most tasks",
+    cmp: (a, b) => b.total - a.total || byName(a, b),
+  },
+};
 
 // RepoList is the repo index: one row per known repo -- every
 // config.targetRepos entry, plus any repo tasks target that isn't one,
@@ -71,10 +104,16 @@ export default function RepoList({
 }) {
   const [newRepo, setNewRepo] = useState("");
   const [search, setSearch] = useState("");
+  const [sortBy, setSortBy] = useState("custom");
   const repos = repoRows(config, tasks);
+  // Every repo, not just the ones the search leaves showing -- what a
+  // drag stores has to know where the hidden rows sit too (listOrder.js).
+  const [ordered, move] = useListOrder("repos", repos, (r) => r.repo, byName);
 
   const q = search.trim().toLowerCase();
-  const visible = repos.filter(
+  const sorted =
+    sortBy === "custom" ? ordered : [...repos].sort(SORTS[sortBy].cmp);
+  const visible = sorted.filter(
     (r) => q === "" || r.repo.toLowerCase().includes(q),
   );
   const targetRepos = config?.targetRepos || [];
@@ -187,10 +226,21 @@ export default function RepoList({
             value={search}
             onChange={setSearch}
           />
+          <ListSortSelect
+            id="repo-sort"
+            value={sortBy}
+            onChange={setSortBy}
+            options={SORTS}
+          />
         </ListToolbar>
       )}
-      <ul className="repo-list">
-        {visible.map((r) => {
+      <ReorderableList
+        className="repo-list"
+        items={visible}
+        idOf={(r) => r.repo}
+        reorder={sortBy === "custom" ? move : null}
+      >
+        {(r, { handle, dragging }) => {
           // A row with no tasks, off the allowlist, is on this page only
           // because the repo carries configuration of its own -- a
           // default capability set, standing instructions, or both
@@ -199,52 +249,71 @@ export default function RepoList({
           // for -- and its page is the only way to reach what put it
           // here.
           const defaultsOnly = r.defaults && !r.configured && r.total === 0;
+          const activity = repoActivity(r);
           return (
-            <li key={r.repo}>
-              <div className="repo-list-row" onClick={() => onOpenRepo(r.repo)}>
-                <span className="repo-list-name">{r.repo}</span>
-                <span className="chips">
-                  {/* Each chip here counts a repo's tasks in one state, not one
+            <div
+              className={`repo-list-row${dragging ? " task-row-dragging" : ""}`}
+              onClick={() => onOpenRepo(r.repo)}
+            >
+              {handle}
+              {/* The row's own status, ahead of the name, where a task
+                  row carries its state badge -- so the two lists' rows
+                  start the same way and a repo with something happening
+                  in it is visible without reading its counts
+                  (grain/task-327). The same .badge figure the count
+                  chips after it use, in the icon-only column width
+                  .badge-icon fixes, and the same argument as those
+                  chips for why "running" is the plain CSS spin rather
+                  than StateDot's grain mark: this is an aggregate, not
+                  one task's live status. */}
+              <span
+                className={`badge badge-icon badge-${activity.state} repo-status repo-status-${activity.key}`}
+                title={activity.title}
+                aria-label={activity.title}
+                role="img"
+              />
+              <span className="repo-list-name">{r.repo}</span>
+              <span className="chips">
+                {/* Each chip here counts a repo's tasks in one state, not one
                       task's own status, so "running" keeps the plain CSS spin
                       (style.css's .badge-running) rather than StateDot's grain
                       mark (bwsalmon/agents#586) -- there is no single task for
                       the mark to represent. */}
-                  {STATE_ORDER.filter((s) => r.counts[s]).map((s) => (
-                    <Chip
-                      key={s}
-                      size="small"
-                      className={`badge badge-${s}`}
-                      label={`${STATE_LABELS[s]} ${r.counts[s]}`}
-                    />
-                  ))}
-                  {r.blocked > 0 && (
-                    <Chip
-                      size="small"
-                      color="error"
-                      label={`Blocked ${r.blocked}`}
-                    />
-                  )}
-                  {defaultsOnly && (
-                    <Chip
-                      size="small"
-                      variant="outlined"
-                      label="Defaults only"
-                      title="No tasks, and not on this deployment's target repos -- listed here because it has configuration of its own, which its own page edits."
-                    />
-                  )}
-                </span>
-                <Typography
-                  variant="caption"
-                  color="text.secondary"
-                  whiteSpace="nowrap"
-                >
-                  {r.total} task{r.total === 1 ? "" : "s"}
-                </Typography>
-              </div>
-            </li>
+                {STATE_ORDER.filter((s) => r.counts[s]).map((s) => (
+                  <Chip
+                    key={s}
+                    size="small"
+                    className={`badge badge-${s}`}
+                    label={`${STATE_LABELS[s]} ${r.counts[s]}`}
+                  />
+                ))}
+                {r.blocked > 0 && (
+                  <Chip
+                    size="small"
+                    color="error"
+                    label={`Blocked ${r.blocked}`}
+                  />
+                )}
+                {defaultsOnly && (
+                  <Chip
+                    size="small"
+                    variant="outlined"
+                    label="Defaults only"
+                    title="No tasks, and not on this deployment's target repos -- listed here because it has configuration of its own, which its own page edits."
+                  />
+                )}
+              </span>
+              <Typography
+                variant="caption"
+                color="text.secondary"
+                whiteSpace="nowrap"
+              >
+                {r.total} task{r.total === 1 ? "" : "s"}
+              </Typography>
+            </div>
           );
-        })}
-      </ul>
+        }}
+      </ReorderableList>
       {repos.length === 0 && (
         <ListEmpty>
           No repos yet -- add one above, or file a task with a target repo.

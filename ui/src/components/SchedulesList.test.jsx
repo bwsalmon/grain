@@ -1,7 +1,7 @@
 import { useState } from "react";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import SchedulesList from "./SchedulesList.jsx";
 import api from "../api.js";
 
@@ -49,8 +49,88 @@ function ControlledSchedulesList(props) {
 const lastBody = () => JSON.parse(api.mock.lastCall[1].body);
 
 describe("SchedulesList", () => {
+  // The row order is this browser's own now (listOrder.js), so one
+  // test's drag must not be the next test's starting order.
+  beforeEach(() => {
+    localStorage.clear();
+  });
+
   afterEach(() => {
     api.mockReset();
+  });
+
+  // grain/task-327: the rows can be dragged into an order of this
+  // browser's own -- a display order, stored here and nowhere else, so
+  // nothing is posted to the API when one moves.
+  describe("custom order", () => {
+    const later = {
+      ...schedule,
+      id: "sched-2",
+      title: "Weekly cleanup",
+      nextRunAt: "2026-08-28T00:00:00Z",
+    };
+    const titlesInOrder = () =>
+      [...document.querySelectorAll(".schedule-title")].map(
+        (e) => e.textContent,
+      );
+    const rowFor = (title) => screen.getByText(title).closest("li");
+    const renderBoth = () =>
+      render(
+        <ControlledSchedulesList
+          schedules={[schedule, later]}
+          tasks={[]}
+          onRefresh={noop}
+          showError={noop}
+        />,
+      );
+
+    it("opens in title order, before anything has been dragged", () => {
+      renderBoth();
+      expect(titlesInOrder()).toEqual([
+        "Nightly dependency bump",
+        "Weekly cleanup",
+      ]);
+    });
+
+    it("keeps a dragged row where it was dropped, across a remount", () => {
+      const { unmount } = renderBoth();
+
+      fireEvent.dragStart(rowFor("Weekly cleanup"));
+      fireEvent.dragOver(rowFor("Nightly dependency bump"));
+      fireEvent.drop(rowFor("Nightly dependency bump"));
+
+      expect(titlesInOrder()).toEqual([
+        "Weekly cleanup",
+        "Nightly dependency bump",
+      ]);
+      expect(api).not.toHaveBeenCalled();
+
+      unmount();
+      renderBoth();
+      expect(titlesInOrder()).toEqual([
+        "Weekly cleanup",
+        "Nightly dependency bump",
+      ]);
+    });
+
+    // Every other order is one this page computes, so there is nowhere
+    // for a drop to land: the handles go with the gesture.
+    it("withdraws the handles when the list is sorted some other way", async () => {
+      const user = userEvent.setup();
+      renderBoth();
+
+      expect(document.querySelectorAll(".task-drag-handle")).toHaveLength(2);
+
+      await user.click(screen.getByLabelText("Sort"));
+      await user.click(await screen.findByRole("option", { name: "Next run" }));
+
+      expect(document.querySelectorAll(".task-drag-handle")).toHaveLength(0);
+      // Whatever fires soonest, first.
+      expect(titlesInOrder()).toEqual([
+        "Weekly cleanup",
+        "Nightly dependency bump",
+      ]);
+    });
   });
 
   it("lists the schedules it is given, showing just their key details", () => {

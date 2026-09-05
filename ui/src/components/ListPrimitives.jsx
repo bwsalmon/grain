@@ -1,3 +1,4 @@
+import { useState } from "react";
 import {
   FormControl,
   InputLabel,
@@ -6,6 +7,7 @@ import {
   TextField,
   Typography,
 } from "@mui/material";
+import DragIndicatorIcon from "@mui/icons-material/DragIndicator";
 
 // ListHeader/ListToolbar/ListEmpty are the pieces TaskList, RepoList,
 // TemplatesList, and SchedulesList already agreed to share by convention
@@ -14,6 +16,12 @@ import {
 // markup). Pulling them out here means a fifth list page -- or a future
 // edit to one of these four -- gets the shared shape by construction
 // instead of by copying the right CSS class names onto the right divs.
+//
+// The fifth page (SuitesList) took the toolbar too in grain/task-327,
+// which is also where ReorderableList at the bottom of this file comes
+// from: the four non-task pages had no order of their own to offer, so
+// their rows carried no drag handle and no sort menu and read as blank
+// beside the task rows next door.
 //
 // Deliberately not included: the row itself. TaskRow stays exported from
 // TaskList.jsx for any view that wants a task row identical to that
@@ -126,4 +134,102 @@ export function ListFilterSelect({
 
 export function ListEmpty({ children }) {
   return <p className="empty">{children}</p>;
+}
+
+// ReorderableList is TaskList's own drag-to-reorder gesture -- a handle
+// on every row, a rule drawn where the drop would land, a zone under the
+// last row for "put it at the end" -- for the four list pages whose
+// order is a display order rather than a backlog (listOrder.js,
+// grain/task-327). It owns the <ul>, the <li>s and the drag state; the
+// caller renders whatever its own row is, which is the part no two of
+// these pages agree on.
+//
+// `reorder` is null on a list that is not currently in its custom order:
+// no handles, nothing draggable, no drop zone. Same rule TaskList
+// applies to the backlog (taskFilters.js's SORTS) -- while a list is
+// sorted by name or by date, a drop has nowhere meaningful to land, so
+// the gesture is withdrawn rather than left to silently rewrite an order
+// the view no longer shows.
+//
+// The row is a render prop rather than a component prop so the handle
+// can go *inside* it: the handle belongs in the row's own flex line,
+// ahead of the name, and only the caller knows where that is.
+export function ReorderableList({ className, items, idOf, reorder, children }) {
+  // dragId is the row being dragged right now, or null. overId is
+  // purely the drop-target highlight -- "__end__" for the trailing zone
+  // -- and never drives the actual move, which only happens in onDrop.
+  const [dragId, setDragId] = useState(null);
+  const [overId, setOverId] = useState(null);
+  const enabled = !!reorder;
+
+  const stop = () => {
+    setDragId(null);
+    setOverId(null);
+  };
+  const drop = (beforeId) => {
+    if (dragId !== null && dragId !== beforeId) reorder(dragId, beforeId);
+    stop();
+  };
+
+  // One handle element for every row: it carries no per-row state, and
+  // the click it swallows is the row's own onClick (which on all four of
+  // these pages opens the thing the row names) rather than the drag.
+  const handle = enabled ? (
+    <DragIndicatorIcon
+      className="task-drag-handle"
+      fontSize="small"
+      titleAccess="Drag to reorder"
+      onClick={(e) => e.stopPropagation()}
+    />
+  ) : null;
+
+  return (
+    <ul className={className}>
+      {items.map((item) => {
+        const id = idOf(item);
+        const over = dragId !== null && dragId !== id && overId === id;
+        return (
+          <li
+            key={id}
+            className={over ? "task-drop-target" : undefined}
+            draggable={enabled}
+            onDragStart={enabled ? () => setDragId(id) : undefined}
+            onDragEnd={enabled ? stop : undefined}
+            onDragOver={
+              enabled
+                ? (e) => {
+                    if (dragId === null || dragId === id) return;
+                    e.preventDefault();
+                    setOverId(id);
+                  }
+                : undefined
+            }
+            onDrop={
+              enabled
+                ? (e) => {
+                    e.preventDefault();
+                    drop(id);
+                  }
+                : undefined
+            }
+          >
+            {children(item, { handle, dragging: dragId === id })}
+          </li>
+        );
+      })}
+      {enabled && dragId !== null && (
+        <li
+          className={`task-drop-end${overId === "__end__" ? " task-drop-target" : ""}`}
+          onDragOver={(e) => {
+            e.preventDefault();
+            setOverId("__end__");
+          }}
+          onDrop={(e) => {
+            e.preventDefault();
+            drop(null);
+          }}
+        />
+      )}
+    </ul>
+  );
 }

@@ -11,6 +11,7 @@ import {
   lastBaseForRepo,
   orphanedPullRequest,
   relativeAge,
+  repoActivity,
   repoRows,
   runActivity,
   stateLabel,
@@ -451,6 +452,50 @@ describe("repoRows", () => {
 
   it("returns an empty list when nothing is configured or targeted yet", () => {
     expect(repoRows(null, [])).toEqual([]);
+  });
+});
+
+// The dot the repos list draws ahead of a repo's name (grain/task-327).
+describe("repoActivity", () => {
+  const row = (counts) => ({
+    repo: "acme/widgets",
+    counts,
+    total: Object.values(counts).reduce((a, b) => a + b, 0),
+    blocked: 0,
+  });
+
+  it("calls a repo with a run in flight active, counting the runs", () => {
+    expect(repoActivity(row({ running: 2, queued: 1 }))).toMatchObject({
+      key: "running",
+      state: "running",
+      title: "Active -- 2 tasks running now",
+    });
+  });
+
+  it("calls a repo with work but nothing running open", () => {
+    expect(repoActivity(row({ queued: 1, closed: 3 }))).toMatchObject({
+      key: "open",
+      state: "queued",
+      title: "1 open task, none running right now",
+    });
+  });
+
+  // "Queued for merge" reads like an ending and is not one: the task is
+  // waiting on the merge queue and can still come back needing a human.
+  it("counts a task waiting on the merge queue as open work", () => {
+    expect(repoActivity(row({ completed: 1 })).key).toBe("open");
+  });
+
+  it("calls a repo whose every task is closed idle", () => {
+    expect(repoActivity(row({ closed: 2 }))).toMatchObject({
+      key: "idle",
+      state: "closed",
+      title: "Idle -- every task here is closed",
+    });
+  });
+
+  it("calls a repo with no tasks at all idle, and says which kind", () => {
+    expect(repoActivity(row({})).title).toBe("Idle -- no tasks here yet");
   });
 });
 

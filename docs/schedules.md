@@ -774,3 +774,38 @@ will fire once a bound template is chosen; `SuiteOverlay`'s picker
 labels a bound item with its repo; and `RepoReleases`' qualification
 picker leaves out templates bound elsewhere, matching what the API will
 accept.
+
+## Update: the non-task list pages get an order of their own (grain/task-327)
+
+The two sections above hand the schedules and templates pages
+`TaskList.jsx`'s toolbar but not its rows: no drag handle, because
+neither list has a backlog to reorder, and so also no "Select all" row
+under the toolbar to space the first row away from it. Beside the task
+list the result read as unfinished -- rows crammed against the
+filter/sort panel, and nothing at the left of a row where a task row
+carries its state and its handle. The repos page had the same two gaps
+plus no sort menu at all, and the suites page had no toolbar whatsoever.
+
+So all four get a *display* order, `ui/src/listOrder.js`: a list of ids
+per page in `localStorage` (`grain.list-order.<page>`), the same
+browser-local treatment the board's columns and the theme mode already
+get, and deliberately nothing the daemon ever sees -- dragging a repo to
+the top does not change what runs next, it changes where the row is for
+the person who dragged it. It is each page's default sort ("Custom
+order", the slot `TaskList`'s "Backlog order" occupies), falling back to
+the alphabetical comparator each list already sorted by for every item
+nobody has dragged, so a list nobody has touched looks exactly as it did
+-- with handles on it. Picking any other order withdraws the handles,
+the rule `TaskList` already applies to the backlog: there is nowhere for
+a drop to land in an order the page computes.
+
+`ReorderableList` in `ListPrimitives.jsx` is the gesture itself (the
+`<ul>`, the `<li>`s, the drop highlight and the trailing "drop at the
+end" zone), with each page rendering its own row through a render prop
+so the handle sits inside the row's own flex line. `--list-rows-gap` in
+`style.css` is the missing "Select all" row's vertical space handed back
+to the four lists as a margin. And the repos list gains a status dot
+ahead of each name (`state.js`'s `repoActivity`): running when an agent
+is working there this moment, an open ring when work is outstanding but
+none of it moving, grey when every task there is closed -- so a repo
+with something happening in it is visible without reading its counts.

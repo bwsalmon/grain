@@ -1,7 +1,7 @@
 import { useState } from "react";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import TemplatesList from "./TemplatesList.jsx";
 import api from "../api.js";
 
@@ -47,8 +47,79 @@ function ControlledTemplatesList(props) {
 }
 
 describe("TemplatesList", () => {
+  // The row order is this browser's own now (listOrder.js), so one
+  // test's drag must not be the next test's starting order.
+  beforeEach(() => {
+    localStorage.clear();
+  });
+
   afterEach(() => {
     api.mockReset();
+  });
+
+  // grain/task-327: the rows can be dragged into an order of this
+  // browser's own -- a display order, stored here and nowhere else, so
+  // nothing is posted to the API when one moves.
+  describe("custom order", () => {
+    const namesInOrder = () =>
+      [...document.querySelectorAll(".template-name")].map(
+        (e) => e.textContent,
+      );
+    const rowFor = (name) => screen.getByText(name).closest("li");
+    const renderBoth = () =>
+      render(
+        <ControlledTemplatesList
+          templates={[template, otherTemplate]}
+          onRefresh={noop}
+          showError={noop}
+        />,
+      );
+
+    it("opens in name order, before anything has been dragged", () => {
+      renderBoth();
+      expect(namesInOrder()).toEqual(["Dependency bump", "Security patch"]);
+    });
+
+    it("keeps a dragged row where it was dropped, across a remount", () => {
+      const { unmount } = renderBoth();
+
+      fireEvent.dragStart(rowFor("Security patch"));
+      fireEvent.dragOver(rowFor("Dependency bump"));
+      fireEvent.drop(rowFor("Dependency bump"));
+
+      expect(namesInOrder()).toEqual(["Security patch", "Dependency bump"]);
+      expect(api).not.toHaveBeenCalled();
+
+      unmount();
+      renderBoth();
+      expect(namesInOrder()).toEqual(["Security patch", "Dependency bump"]);
+    });
+
+    // Every other order is one this page computes, so there is nowhere
+    // for a drop to land: the handles go with the gesture.
+    it("withdraws the handles when the list is sorted some other way", async () => {
+      const user = userEvent.setup();
+      renderBoth();
+
+      expect(document.querySelectorAll(".task-drag-handle")).toHaveLength(2);
+
+      await user.click(screen.getByLabelText("Sort"));
+      await user.click(
+        await screen.findByRole("option", { name: "Newest first" }),
+      );
+
+      expect(document.querySelectorAll(".task-drag-handle")).toHaveLength(0);
+      expect(namesInOrder()).toEqual(["Security patch", "Dependency bump"]);
+    });
+
+    it("clicking the drag handle does not open the template", async () => {
+      const user = userEvent.setup();
+      renderBoth();
+
+      await user.click(document.querySelector(".task-drag-handle"));
+
+      expect(screen.queryByLabelText(/Name/)).not.toBeInTheDocument();
+    });
   });
 
   it("lists the templates it is given, showing just their key details", () => {
