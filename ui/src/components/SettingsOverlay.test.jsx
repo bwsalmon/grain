@@ -13,6 +13,8 @@ const settings = {
   maxWorkers: 2,
   maxMergers: 1,
   geminiModel: "gemini-2.5-pro",
+  geminiEffort: "high",
+  geminiEfforts: ["low", "medium", "high"],
   claudeModel: "claude-sonnet-5",
   maxAgentTurns: 40,
   githubHost: "github.com",
@@ -75,6 +77,29 @@ describe("SettingsOverlay", () => {
     expect(screen.getByDisplayValue("claude-sonnet-5")).toBeInTheDocument();
     expect(screen.getByDisplayValue("40")).toBeInTheDocument();
     expect(screen.getByRole("radio", { name: "Antigravity" })).toBeChecked();
+  });
+
+  // agy is given a model and a reasoning effort as two values, so the
+  // effort is a field of its own -- offered from the vocabulary the
+  // server reports rather than typed, since anything else fails the run
+  // it reaches before that run starts.
+  it("offers the reasoning effort agy takes beside the Gemini model", async () => {
+    api.mockResolvedValueOnce(settings).mockResolvedValueOnce({});
+    const user = userEvent.setup();
+    render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
+    await screen.findByDisplayValue("30s");
+    await user.click(screen.getByRole("tab", { name: "Agents" }));
+
+    const picker = screen.getByLabelText(/Gemini reasoning effort/);
+    expect(picker).toHaveTextContent("high");
+    await user.click(picker);
+    await user.click(screen.getByRole("option", { name: "low" }));
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(api).toHaveBeenLastCalledWith("/api/settings", {
+      method: "PUT",
+      body: JSON.stringify({ geminiEffort: "low" }),
+    });
   });
 
   it("keeps agent framework, model and keys off the General tab", async () => {

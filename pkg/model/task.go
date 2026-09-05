@@ -889,7 +889,19 @@ type Run struct {
 	// opposite things, and only the timestamp tells them apart.
 	Activity   string
 	ActivityAt *time.Time
-	Leases     []Lease
+	// AgentStartedAt is when this run's agent got its first turn
+	// (task_run.agent_started_at), and nil for a run still in setup and
+	// for one that never reached its agent at all -- a sandbox that would
+	// not build, a checkout that would not clone.
+	//
+	// It is carried alongside Activity because it is what says whose
+	// phrase that is: the row-level form of the distinction
+	// RunActivity.BySetup draws for a live run. A note standing on a run
+	// with no AgentStartedAt is one grain stamped during setup, and on a
+	// *finished* run it is the only record of how far setup got before it
+	// broke (ui.Attempt.SetupNote, which is exactly that pairing).
+	AgentStartedAt *time.Time
+	Leases         []Lease
 }
 
 // RunActivity is Run.Activity and Run.ActivityAt on their own -- what a

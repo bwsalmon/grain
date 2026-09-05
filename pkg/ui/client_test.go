@@ -1374,6 +1374,75 @@ func TestGetTaskListsEveryAttemptOldestFirst(t *testing.T) {
 	}
 }
 
+// An attempt that broke before its agent ever started carries the phrase
+// grain stopped on -- "cloning acme/widgets" -- so the attempts timeline
+// can say how far setup actually got. Store.TaskActivity reads live runs
+// only, by design, so that phrase was written and never read by anybody:
+// the person looking at a setup-failed attempt had its detail ("this
+// run's sandbox could not be prepared: ...") and nothing else.
+//
+// An attempt whose agent did start carries nothing here, however loudly
+// it was narrating itself when it stopped: what update_status last said
+// is the agent's account of its own work, not a diagnosis of the attempt,
+// and Attempt's own doc comment gives the reasoning.
+func TestGetTaskCarriesTheSetupPhraseOfAnAttemptThatNeverReachedItsAgent(t *testing.T) {
+	c, store, ctx := testClient(t)
+	task := create(t, c, ctx)
+
+	if err := store.StartRun(ctx, model.Run{
+		ID: "r1", TaskID: task.ID, Sandbox: "s1",
+		Attempt: 1, StartedAt: baseTime,
+	}, model.Limits{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.SetTaskActivity(ctx, task.ID, "cloning acme/widgets", baseTime.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.FinishRun(ctx, "r1", baseTime.Add(2*time.Minute), "setup-failed",
+		"this run's sandbox could not be prepared: no such repo"); err != nil {
+		t.Fatal(err)
+	}
+
+	// The second attempt reached its agent, said something through
+	// update_status, and then failed on its own account.
+	if err := store.StartRun(ctx, model.Run{
+		ID: "r2", TaskID: task.ID, Sandbox: "s2",
+		Attempt: 2, StartedAt: baseTime.Add(time.Hour),
+	}, model.Limits{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetRunAgentStarted(ctx, "r2", baseTime.Add(time.Hour+time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.SetTaskActivity(ctx, task.ID, "waiting for CI on the second push",
+		baseTime.Add(time.Hour+2*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.FinishRun(ctx, "r2", baseTime.Add(2*time.Hour), "failed",
+		"exceeded max turns"); err != nil {
+		t.Fatal(err)
+	}
+
+	detail, err := c.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(detail.Attempts) != 2 {
+		t.Fatalf("attempts = %+v, want 2", detail.Attempts)
+	}
+	brokeInSetup, reachedItsAgent := detail.Attempts[0], detail.Attempts[1]
+	if brokeInSetup.SetupNote != "cloning acme/widgets" {
+		t.Errorf("setup-failed attempt's SetupNote = %q, want the phrase it broke on", brokeInSetup.SetupNote)
+	}
+	if brokeInSetup.SetupNoteAt == nil || !brokeInSetup.SetupNoteAt.Equal(baseTime.Add(time.Minute)) {
+		t.Errorf("SetupNoteAt = %v, want %v -- when grain said it", brokeInSetup.SetupNoteAt, baseTime.Add(time.Minute))
+	}
+	if reachedItsAgent.SetupNote != "" || reachedItsAgent.SetupNoteAt != nil {
+		t.Errorf("attempt whose agent ran = %+v, want no setup note: those words are the agent's own",
+			reachedItsAgent)
+	}
+}
+
 // TestGetTaskHidesFailedAttemptsOnceTheTaskHasCompleted covers
 // bwsalmon/agents#514, the sibling of the bug model.Transitions' own
 // guard already fixed for bwsalmon/agents#502. orchestrator.

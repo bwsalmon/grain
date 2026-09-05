@@ -100,6 +100,28 @@ type Config struct {
 	// (cmd/grain/daemon.go's dispatchConfig, alongside AgentFramework
 	// above), so a model changed here is the one the next run calls.
 	GeminiModel string
+	// GeminiEffort is the reasoning effort agent/antigravity's agy is
+	// asked for beside GeminiModel -- "low", "medium" or "high" (agy's
+	// own --effort vocabulary, antigravity.Efforts).
+	//
+	// A model selection is two values to agy, not one: it refuses a bare
+	// family name without an effort ("--model gemini-3.1-pro requires
+	// --effort") and refuses an effort that disagrees with a catalog name
+	// that already carries one ("gemini-3.1-pro-high conflicts with
+	// --effort=low"). agent/antigravity.DefaultModel has the whole
+	// measured table, and Framework.Run drops the flag for a model of the
+	// second kind, which is what keeps a deployment that stored
+	// "gemini-3.1-pro-high" before this column existed running unchanged.
+	//
+	// Which efforts a given model has is the model's own business -- 3.1
+	// Pro takes low and high and refuses medium, the Flash models take
+	// all three -- so nothing here can check this pairs with GeminiModel;
+	// agy refuses the pair before the run starts if it does not.
+	//
+	// Empty, which is what every row written before this column reads
+	// back as, names no effort at all: cmd/grain/daemon.go fills it from
+	// -gemini-effort's own default the way it fills CodexModel.
+	GeminiEffort string
 	// ClaudeModel is agent/claude's own counterpart to GeminiModel: the
 	// model the real `claude` CLI is asked for, required the same way and
 	// for the same reason (ui.UpdateSettings). Read by whichever

@@ -32,6 +32,7 @@ locals {
     agy_path                  = var.agy_path
     codex_path                = var.codex_path
     gemini_model              = var.gemini_model
+    gemini_effort             = var.gemini_effort
     claude_model              = var.claude_model
     codex_model               = var.codex_model
     max_agent_turns           = var.max_agent_turns

@@ -1591,6 +1591,20 @@ fieldset legend {
   color: var(--text-tertiary);
   font-size: 0.8rem;
 }
+/* The phrase grain stopped on while setting a failed attempt up
+   (DetailOverlay.jsx's setupBreadcrumb). Italic and quiet like the live
+   status it is the past tense of, with the same upright "grain" mark
+   beside it saying whose sentence it is. */
+.timeline-setup-note {
+  display: flex;
+  align-items: baseline;
+  gap: 0.3rem;
+  color: var(--text-tertiary);
+  font-size: 0.8rem;
+  font-style: italic;
+  margin-top: 0.15rem;
+  word-break: break-word;
+}
 .timeline-detail {
   color: var(--text-secondary);
   font-size: 0.8rem;

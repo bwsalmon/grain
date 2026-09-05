@@ -1467,6 +1467,108 @@ describe("DetailOverlay", () => {
     expect(item.querySelector(".badge")).toHaveClass("badge-failed");
   });
 
+  // The detail of a setup failure says only that the sandbox could not be
+  // prepared; how far grain actually got before it broke lives in the
+  // phrase it stopped on (ui.Attempt.SetupNote), which nothing showed
+  // anybody until now -- Store.TaskActivity reads live runs only.
+  it("says how far setup got on an attempt that never reached its agent", () => {
+    render(
+      <DetailOverlay
+        task={{
+          ...baseTask,
+          attempts: [
+            {
+              number: 1,
+              startedAt: "2026-08-28T12:00:00Z",
+              finishedAt: "2026-08-28T12:02:00Z",
+              outcome: "setup-failed",
+              detail:
+                "this run's sandbox could not be prepared: guest never became reachable",
+              setupNote: "cloning acme/widgets",
+              setupNoteAt: "2026-08-28T12:01:00Z",
+            },
+          ],
+        }}
+        tasks={[]}
+        config={config}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={vi.fn()}
+      />,
+    );
+
+    const item = screen.getByText("Setup failed").closest(".timeline-item");
+    const note = item.querySelector(".timeline-setup-note");
+    expect(note).toHaveTextContent("gave up while: cloning acme/widgets");
+    // Whose sentence it is, said out loud rather than left to the
+    // wording -- the same mark the live phrase carries on a task row.
+    expect(note.querySelector(".task-activity-by")).toHaveTextContent("grain");
+  });
+
+  // Nobody gave up on a run somebody cancelled: the verb follows the
+  // outcome so the breadcrumb does not read as a verdict on a run that
+  // was simply stopped.
+  it("says a cancelled attempt stopped rather than gave up", () => {
+    render(
+      <DetailOverlay
+        task={{
+          ...baseTask,
+          attempts: [
+            {
+              number: 1,
+              startedAt: "2026-08-28T12:00:00Z",
+              finishedAt: "2026-08-28T12:02:00Z",
+              outcome: "cancelled",
+              setupNote: "building a sandbox",
+            },
+          ],
+        }}
+        tasks={[]}
+        config={config}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={vi.fn()}
+      />,
+    );
+
+    expect(
+      screen.getByText(/stopped while: building a sandbox/),
+    ).toBeInTheDocument();
+  });
+
+  // A run still in setup is narrated as something happening now, at the
+  // top of this same page. Repeating it on the attempt in the past tense
+  // would say it had already given up.
+  it("leaves the setup phrase off an attempt that is still running", () => {
+    render(
+      <DetailOverlay
+        task={{
+          ...baseTask,
+          state: "running",
+          activity: "building a sandbox",
+          activityBySetup: true,
+          attempts: [
+            {
+              number: 1,
+              startedAt: "2026-08-28T12:00:00Z",
+              setupNote: "building a sandbox",
+            },
+          ],
+        }}
+        tasks={[]}
+        config={config}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByText(/gave up while/)).not.toBeInTheDocument();
+    expect(
+      document.querySelector(".timeline-setup-note"),
+    ).not.toBeInTheDocument();
+  });
+
   it("labels an attempt whose process died mid-run", () => {
     render(
       <DetailOverlay

@@ -24,7 +24,7 @@ import api from "../api.js";
 import AgentKeysSection, { AGENT_KEY_SECRETS } from "./AgentKeysSection.jsx";
 import StateRepoPanel from "./StateRepoPanel.jsx";
 import CapabilitiesPanel from "./CapabilitiesPanel.jsx";
-import GeminiModelField from "./GeminiModelField.jsx";
+import GeminiModelFields from "./GeminiModelFields.jsx";
 import GitHubTokensSection from "./GitHubTokensSection.jsx";
 import Overlay from "./Overlay.jsx";
 import SecretsPanel from "./SecretsPanel.jsx";
@@ -266,6 +266,10 @@ export default function SettingsOverlay({ onClose, onSaved, showError }) {
     const geminiModel = form.elements.geminiModel.value.trim();
     if (geminiModel !== (settings.geminiModel || ""))
       payload.geminiModel = geminiModel;
+
+    const geminiEffort = form.elements.geminiEffort.value.trim();
+    if (geminiEffort !== (settings.geminiEffort || ""))
+      payload.geminiEffort = geminiEffort;
 
     const claudeModel = form.elements.claudeModel.value.trim();
     if (claudeModel !== (settings.claudeModel || ""))
@@ -674,11 +678,20 @@ export default function SettingsOverlay({ onClose, onSaved, showError }) {
               credential below.
             </Typography>
             <AgentKeysSection settings={settings} showError={showError} />
-            {/* A picker over what this deployment's own agy says it can
-                run, not a fixed list and not a plain text box -- see
-                GeminiModelField, which stays typable through every way
-                that catalog can fail to load. */}
-            <GeminiModelField defaultValue={settings.geminiModel || ""} />
+            {/* The model and the effort agy is given, both offered from
+                what this deployment's own agy says it can run rather
+                than from a list written out here (GeminiModelFields):
+                the names from `agy models`, the efforts a chosen model
+                was actually listed under, narrowed from the vocabulary
+                the server validates a save against
+                (Settings.geminiEfforts). The model stays typable through
+                every way that catalog can fail to load, which is the
+                whole reason it is an autocomplete and not a Select. */}
+            <GeminiModelFields
+              defaultModel={settings.geminiModel || ""}
+              defaultEffort={settings.geminiEffort || ""}
+              efforts={settings.geminiEfforts || []}
+            />
             <TextField
               name="claudeModel"
               label="Claude model"

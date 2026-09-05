@@ -52,22 +52,24 @@ type Model struct {
 // it will accept for --model, and the reasoning-effort vocabulary its own
 // --effort flag documents.
 //
-// Efforts is reported even though grain never passes --effort (the effort
-// is part of the model name, per DefaultModel): it is what a picker uses
-// to say which efforts a family offers, and the vocabulary a future agy
-// that renamed its suffixes would be read through.
+// Efforts is that vocabulary as the binary states it rather than as
+// Efforts() hard-codes it -- the wider of the two answers a picker can
+// give, and the one a future agy that added or renamed a word would be
+// read through. Which efforts a *given* model has is a narrower question
+// that neither answers, and the ids do: gemini-3.1-pro is listed high and
+// low and never medium, which is exactly the pairing agy refuses at the
+// start of a run.
 type ModelCatalog struct {
 	Models  []Model
 	Efforts []string
 }
 
-// FallbackEfforts is the effort vocabulary a catalog falls back to when
-// agy's own --help no longer spells one out -- what 1.1.26 documents
-// ("Reasoning effort for the current CLI session (low|medium|high)") and
-// what every model name in its catalog is suffixed with. A guess only in
-// the sense that it is not this binary's own answer; it is never allowed
-// to override one that parsed.
-var FallbackEfforts = []string{"low", "medium", "high"}
+// Efforts() is what a catalog falls back to when agy's own --help no
+// longer spells the vocabulary out: the same three words this package
+// already validates a stored effort against, which is what 1.1.26
+// documents and what every model name in its catalog is suffixed with. A
+// guess only in the sense that it is not this binary's own answer, and it
+// never overrides one that parsed.
 
 // Catalog asks the agy binary at agyPath what models it can run.
 //
@@ -134,9 +136,9 @@ func catalog(ctx context.Context, p probe, apiKey string) (ModelCatalog, error) 
 
 	// Efforts first, and never fatally: the vocabulary is what names the
 	// suffixes on the models, and a --help that stopped documenting it
-	// leaves FallbackEfforts rather than failing a listing that is
-	// otherwise perfectly good.
-	efforts := FallbackEfforts
+	// leaves Efforts() rather than failing a listing that is otherwise
+	// perfectly good.
+	efforts := Efforts()
 	if help, err := p.run(ctx, env, "--help"); err == nil || help != "" {
 		if parsed := parseEfforts(help); len(parsed) > 0 {
 			efforts = parsed

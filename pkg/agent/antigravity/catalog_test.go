@@ -149,8 +149,8 @@ func TestCatalogFallsBackToKnownEfforts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("catalog: %v", err)
 	}
-	if !slices.Equal(got.Efforts, FallbackEfforts) {
-		t.Errorf("Efforts = %v, want the fallback %v", got.Efforts, FallbackEfforts)
+	if !slices.Equal(got.Efforts, Efforts()) {
+		t.Errorf("Efforts = %v, want the fallback %v", got.Efforts, Efforts())
 	}
 	if got.Models[0].Effort != "high" {
 		t.Errorf("Models[0] = %+v, want an effort read off the name", got.Models[0])
@@ -180,7 +180,7 @@ func TestCatalogReportsAnUnreadableListing(t *testing.T) {
 func TestParseModelsSkipsWhatIsNotAModel(t *testing.T) {
 	// A label-less listing is read as ids, so dropping the display
 	// column would not cost a deployment its picker.
-	got := parseModels("Fetching available models...\n\ngemini-3.1-pro-high\nWarning: something happened\n", FallbackEfforts)
+	got := parseModels("Fetching available models...\n\ngemini-3.1-pro-high\nWarning: something happened\n", Efforts())
 	want := []Model{{ID: "gemini-3.1-pro-high", Effort: "high", Family: "gemini-3.1-pro"}}
 	if !slices.Equal(got, want) {
 		t.Errorf("parseModels = %+v, want %+v", got, want)
