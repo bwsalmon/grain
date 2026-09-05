@@ -98,8 +98,11 @@ const (
 // garbled phrase and nothing more -- which is what lets it be a plain
 // file rather than a channel needing a protocol.
 //
-// A tool in the guest image writes it atomically; a setup script with no
-// such tool can echo into it, and the file is the contract either way.
+// "grainctl activity" writes it atomically; a setup script with nothing
+// but a shell can echo into it, and the file is the contract either way.
+// Which is why that verb takes no credential and no address: it is local,
+// and a deployment that configured none of grainctl's controller verbs
+// still has it.
 const GuestActivityFile = "/run/grain/activity"
 
 // FileTerminationLog is where a grain writes its final Result on the way

@@ -123,8 +123,8 @@ The shim reads the guest for `health.guest` on its heartbeat; picking up
 one more path on that call costs nothing and inherits that cadence. It is
 advisory by construction — last writer wins, a torn read is a garbled
 phrase — which is what lets it be a plain file rather than a channel with
-a protocol. A tool in the guest image writes it atomically; a setup script
-with nothing but a shell can `echo` into it, and the file is the contract
+a protocol. `grainctl activity` writes it atomically; a setup script with
+nothing but a shell can `echo` into it, and the file is the contract
 either way.
 
 It is deliberately **outside `/grain`**: that tree is mounted inward and is
@@ -712,6 +712,56 @@ Two costs, paid only by deployments that select NAT:
 **NAT does not exist in kontur today** — `internal/cli/vm.go:245` rejects
 `-net nat` outright. See "Asks of kontur".
 
+## Three binaries, one per trust zone
+
+The split falls out of the credential boundary rather than being chosen
+against it: each binary runs in exactly one of the three places, and the
+places are the same ones every other decision here turns on.
+
+| binary | runs | does | reaches |
+| --- | --- | --- | --- |
+| **controller** (`drift`?) | the operator's host | UI, work selection, dispatch, git proxy, the `grainctl` endpoint, and today's operator verbs — `state`, `secrets`, `repo`, `sync`, `list`, `pause`, `metrics`, the image builders | the container runtime; GitHub |
+| **`grain`** | the container, as PID 1 | boots the VMM, applies placements, runs setup, starts the agent, serves the six sandbox tools, writes records to stdout | the guest, over vsock |
+| **`grainctl`** | the guest | what the agent runs with `run_command`: `activity` locally, and the controller verbs — `open-pull-request`, `wait-for-checks`, `ask-question` | the controller, with a placed credential |
+
+Ships alongside, not grain's: `kontur` in the container image
+(`COPY --from=kontur`, since kontur's own final stage is `FROM scratch`),
+and `kontur-agent` in the guest disk image. So the container holds `grain`
++ `kontur` + the agent CLIs, and the guest holds `kontur-agent` +
+`grainctl`.
+
+**This resolves the guest-writer question** (open item 9, now closed): one
+guest CLI means `activity` is a verb of `grainctl` rather than a second
+binary. The consequence to build against is that **`grainctl` must run
+with no credential present** — `grainctl activity` writes
+`/run/grain/activity` and needs neither an address nor a token, so the
+credential is per-verb rather than a startup requirement. A `grainctl`
+that refused to start without one would make the local verb depend on a
+deployment having configured the remote ones.
+
+### Two naming hazards, both cheap now and expensive later
+
+**`grain` currently means the controller.** `cmd/grain` is the daemon
+today — `grain daemon`, `grain state`, `grain secrets` — and under this
+layout `grain` becomes the in-container shim, which is a different program
+with a different audience. Every script, unit file, runbook and habit that
+says `grain daemon` breaks, and breaks by *running something else* rather
+than by failing to resolve. Worth either keeping the controller called
+`grain` and naming the shim something else, or making the rename loudly —
+`grain daemon` exiting with "this is now `drift daemon`" rather than
+silently not being the thing.
+
+**`grainctl` reads like an operator CLI**, by analogy with `konturctl`,
+which is exactly what it is not: `konturctl` is what a human runs to manage
+VMs, and `grainctl` is what an *agent* runs from inside a sandbox. The
+operator equivalent lives in the controller binary. Same suffix, opposite
+audience, and the one that a newcomer will guess wrong is the one holding
+a credential.
+
+`drift` itself is apt for a level-triggered reconciler — drift is the thing
+`Reconcile` exists to correct — with the mild oddity that the binary is
+named for the condition rather than the cure.
+
 ## Costs and open items
 
 1. **The trajectory rides the container log stream**, so it needs tagged
@@ -719,11 +769,13 @@ Two costs, paid only by deployments that select NAT:
    persist what it reads. It also puts prompts and model output wherever
    that deployment ships container logs — a per-deployment decision rather
    than a detail.
-2. **grain needs its own image.** kontur's final stage is `FROM scratch`
-   with `ENTRYPOINT ["/usr/local/bin/kontur"]` — a node-based CLI cannot
-   run there. grain ships a sandbox image: a real base, `COPY --from=kontur`
-   for the binaries and guest artifacts, the agent CLIs, and `grain run` as
-   entrypoint. kontur keeps its scratch image.
+2. **grain needs its own images — two of them.** kontur's final stage is
+   `FROM scratch` with `ENTRYPOINT ["/usr/local/bin/kontur"]`, so a
+   node-based CLI cannot run there; kontur keeps its scratch image. grain
+   ships a **container image** — a real base, `COPY --from=kontur`, the
+   agent CLIs, and `grain run` as entrypoint — and adds `grainctl` to the
+   **guest disk image** beside `kontur-agent`. Two artifacts on two sides
+   of the vsock boundary, matching the binary split.
 3. **Verify kontur tolerates not being PID 1.** Its run mode currently boots
    the VMM as PID 1; as a child of the shim, signal forwarding and zombie
    reaping become the shim's job.
@@ -746,12 +798,11 @@ Two costs, paid only by deployments that select NAT:
    `grainctl` exists finishes without opening a pull request and reports
    success. Naming it belongs in the prompt or the setup script, per
    framework, and is part of the work rather than documentation.
-9. **The guest-side activity writer is a choice not yet made**: its own
-   small binary in the guest disk image, or a verb of `grainctl`. They
-   need different things — `grainctl` needs a placed credential and an
-   address, this needs neither — which argues for two; one binary is one
-   thing to ship. `/run/grain/activity` is the contract, so either can be
-   chosen later without the design moving.
+9. **The rename is the risky part of the binary split** ("Three binaries,
+   one per trust zone"). `grain` means the controller today and would mean
+   the shim after, so an unmigrated `grain daemon` runs the wrong program
+   rather than failing. Decide whether the controller keeps the name or
+   the old entrypoint exits loudly.
 
 ### Asks of kontur
 
@@ -778,12 +829,18 @@ path and the agent's location, not of the task model.
    and the decision table against the existing suite.
 3. The controller loop — `Tick` over `List` + `Reconcile`, alongside the
    existing dispatch path behind a flag.
-4. `grainctl` and the controller-side listener it calls: the scope check
+4. **Split the binary.** Today's `cmd/grain` is the controller and nothing
+   else; the shim and the guest CLI are both new. Doing the rename here,
+   before there are two more things called `grain`, is what keeps item 9
+   from being discovered by an operator. `mcpserver.go` is deleted rather
+   than moved.
+5. `grainctl` and the controller-side listener it calls: the scope check
    (item 7 above), then the verbs that today are MCP tools reaching the
    daemon. Shares `gitproxy`'s token store and `startGitProxy`'s
-   advertise-host handling.
-5. kontur's NAT mode (the blocking ask), then `grain run` and the sandbox
-   image. Steps 1–4 do not wait on it.
-6. `KonturGrains`.
-7. Delete: `recreate.go`, `orphan.go`, `recover.go`, `InFlight`, `runOne`,
+   advertise-host handling. `grainctl activity` lands here too and depends
+   on none of it.
+6. kontur's NAT mode (the blocking ask), then `grain run` and the two
+   images. Steps 1–5 do not wait on it.
+7. `KonturGrains`.
+8. Delete: `recreate.go`, `orphan.go`, `recover.go`, `InFlight`, `runOne`,
    `RunDispatch`'s sandbox half, `pkg/ui/sandbox_recreate.go`.

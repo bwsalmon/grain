@@ -520,11 +520,14 @@ a guest-writable path inside it would let the sandbox appear to have
 authored a prompt, a credential or a setup script. `/run/grain/activity`
 keeps the two directions separate, and a test holds the line.
 
-**Left open**: whether the guest-side writer is its own small binary or a
-verb of `grainctl`. They want different things — `grainctl` needs a placed
-credential and an address, this needs neither — which argues for two, but
-one binary in the guest image is one thing to ship. The file is the
-contract, so either can be chosen later without the design moving.
+**Settled since**: the writer is a verb of `grainctl` rather than a second
+binary, because the guest gets one CLI ("Three binaries, one per trust
+zone" in `grain.md`). The objection that argued for two — `grainctl` needs
+a placed credential and an address, this needs neither — becomes a
+constraint on `grainctl` instead: the credential is per-verb, so
+`grainctl activity` runs in a deployment that configured no controller
+verbs at all. The file stays the contract, so a setup script with nothing
+but a shell can still `echo` into it.
 
 ## Can stdout and stderr be told apart?
 
