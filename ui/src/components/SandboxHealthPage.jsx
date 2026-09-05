@@ -51,6 +51,50 @@ function formatDisk(usedMB, totalMB) {
   return `${(usedMB / 1024).toFixed(1)} / ${(totalMB / 1024).toFixed(1)} GB`;
 }
 
+// NESTED_VIRT is how each state orchestrator.SandboxHealth.NestedVirt
+// reports for a sandbox is shown: a short label and the chip colour that
+// goes with it, plus the sentence explaining what to do about it, which
+// the cell carries as its title so the table stays a table.
+//
+// The labels deliberately avoid the word "ready", which the Status column
+// beside this one already uses for something else -- a sandbox is
+// "ready" when its guest answers at all, and that says nothing about
+// whether a VM can be started inside it.
+const NESTED_VIRT = {
+  ready: {
+    label: "yes",
+    color: "success",
+    title: "/dev/kvm is present and this sandbox's account can open it",
+  },
+  denied: {
+    label: "no access",
+    color: "warning",
+    title:
+      "/dev/kvm is there but the account tools run as cannot open it -- a guest image built before scripts/kontur/guest-setup.sh put that account in the kvm group",
+  },
+  "no-device": {
+    label: "no /dev/kvm",
+    color: "warning",
+    title:
+      "the guest's CPU offers virtualization but nothing loaded its kvm_intel/kvm_amd module",
+  },
+  unsupported: {
+    label: "no",
+    color: "default",
+    title:
+      "no vmx/svm flag in the guest's CPU: the host below is not running KVM with nesting enabled, or this VM was configured without it",
+  },
+};
+
+// HOST_NESTED_VIRT is the same for the host's own half of the question
+// (sysstat.NestedVirtualization): whether the machine this daemon runs
+// on will let the VMs it boots run VMs of their own.
+const HOST_NESTED_VIRT = {
+  enabled: "enabled",
+  disabled: "disabled",
+  unavailable: "unavailable",
+};
+
 // pushSample appends a value to a capped history array, dropping the
 // oldest sample once HISTORY_LENGTH is exceeded. null/undefined/NaN mean
 // "no reading this poll" (a sandbox that errored, or host stats that
@@ -268,6 +312,23 @@ export default function SandboxHealthPage({ showError }) {
                 {" · "}
                 Memory:{" "}
                 {formatMemory(data.host.memoryUsedMB, data.host.memoryTotalMB)}
+                {data.host.nestedVirt && (
+                  <>
+                    {" · "}
+                    {/* The precondition for a sandbox running VMs of its
+                        own, shown here because it is a fact about this
+                        machine rather than about any one sandbox -- and
+                        because it is what tells a sandbox reporting no
+                        CPU virtualization flag from one whose guest is
+                        simply missing the device. */}
+                    Nested virtualization:{" "}
+                    {HOST_NESTED_VIRT[data.host.nestedVirt] ||
+                      data.host.nestedVirt}
+                    {data.host.nestedVirtDetail
+                      ? ` (${data.host.nestedVirtDetail})`
+                      : ""}
+                  </>
+                )}
               </Typography>
               <div
                 style={{
@@ -335,6 +396,7 @@ export default function SandboxHealthPage({ showError }) {
                   <TableCell>Memory trend</TableCell>
                   <TableCell>Disk</TableCell>
                   <TableCell>Disk trend</TableCell>
+                  <TableCell>Nested virt</TableCell>
                 </TableRow>
               </TableHead>
               <TableBody>
@@ -381,6 +443,24 @@ export default function SandboxHealthPage({ showError }) {
                           height={24}
                           color="#2e7d32"
                         />
+                      </TableCell>
+                      {/* Whether a task in this sandbox could start a VM
+                          of its own. A dash rather than "no" when the
+                          backend gave no reading at all (a host
+                          sandbox, or a guest too old to answer): the two
+                          are different, and only one of them is a
+                          finding. */}
+                      <TableCell>
+                        {NESTED_VIRT[s.nestedVirt] ? (
+                          <Chip
+                            size="small"
+                            color={NESTED_VIRT[s.nestedVirt].color}
+                            label={NESTED_VIRT[s.nestedVirt].label}
+                            title={NESTED_VIRT[s.nestedVirt].title}
+                          />
+                        ) : (
+                          "—"
+                        )}
                       </TableCell>
                     </TableRow>
                   );
