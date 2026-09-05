@@ -5,7 +5,7 @@ import MetricsPage from "./MetricsPage.jsx";
 // MetricsOverlay is the throughput and latency report's own sidebar
 // destination (grain/task-173), at /metrics.
 //
-// It was the fourth tab of DebugOverlay.jsx until now, on the reasoning
+// It was the fourth tab of SystemOverlay.jsx until now, on the reasoning
 // that it is the same kind of thing Logs, Sandbox health and Top are: a
 // read-only, deployment-wide view rather than a knob. That much is still
 // true, but it is not the same *question*. The other three are opened
@@ -13,13 +13,14 @@ import MetricsPage from "./MetricsPage.jsx";
 // is loaded, an agent is failing -- and read for as long as that lasts.
 // This one is opened because nothing is wrong: how much did we get
 // through this week, where is a task's wall-clock time going, is the
-// backlog growing. Filing that under the word "debug", two clicks and a
-// tab strip deep, told an operator to open it at the wrong times and
+// backlog growing. Filing that under the word "debug" -- what that
+// pane was called then -- two clicks and a tab strip deep, told an
+// operator to open it at the wrong times and
 // priced it wrong for the times it is actually for.
 //
-// So it takes a nav entry beside Settings and Debug, and MetricsPage
+// So it takes a nav entry beside Settings and System, and MetricsPage
 // itself no longer prints its own "Metrics" heading -- the pane header
-// below is what names it now, the same way Settings' and Debug's own
+// below is what names it now, the same way Settings' and System's own
 // headers name theirs.
 //
 // onOpenTask is the one link out of the report: the backlog names the
@@ -28,7 +29,7 @@ import MetricsPage from "./MetricsPage.jsx";
 // would put the task behind the one it was opened from.
 //
 // pane, and nothing capping the width inside it, for the reason
-// DebugOverlay gives: the latency and tool-use tables are more columns
+// SystemOverlay gives: the latency and tool-use tables are more columns
 // across than a centered dialog has room for.
 export default function MetricsOverlay({ onClose, onOpenTask, showError }) {
   const header = (

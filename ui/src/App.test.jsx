@@ -1046,7 +1046,7 @@ describe("App", () => {
 
   it.each([
     ["Settings", "Settings"],
-    ["Debug", "Debug"],
+    ["System", "System"],
     ["Metrics", "Metrics"],
   ])("opens the %s overlay from the sidebar", async (button, heading) => {
     setupApi();
@@ -1103,8 +1103,8 @@ describe("App", () => {
   });
 
   // bwsalmon/agents#640: Logs and Sandbox health live together on their
-  // own "Debug" sidebar entry, not inside Settings.
-  it("shows Logs and Sandbox health on the Debug overlay, not as their own sidebar entries", async () => {
+  // own "System" sidebar entry, not inside Settings.
+  it("shows Logs and Sandbox health on the System overlay, not as their own sidebar entries", async () => {
     setupApi();
     const user = userEvent.setup();
     render(<App />);
@@ -1117,7 +1117,7 @@ describe("App", () => {
       screen.queryByRole("button", { name: "Sandbox health" }),
     ).not.toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "Debug" }));
+    await user.click(screen.getByRole("button", { name: "System" }));
 
     expect(
       await screen.findByText(/no log sources configured/i),
@@ -1126,7 +1126,7 @@ describe("App", () => {
     // Sandbox health is a tab of that overlay, not a second pane rendered
     // beside Logs (bwsalmon/agents#640 split them) -- only the active
     // tab's panel is mounted, so reaching it means clicking it, the same
-    // way DebugOverlay.test.jsx's own "shows Sandbox health on its own
+    // way SystemOverlay.test.jsx's own "shows Sandbox health on its own
     // tab" does.
     await user.click(screen.getByRole("tab", { name: "Sandbox health" }));
 
@@ -1136,16 +1136,16 @@ describe("App", () => {
   });
 
   // grain/task-173: Metrics is a sidebar entry of its own rather than a
-  // tab of the Debug pane -- a throughput report is what somebody opens
+  // tab of the System pane -- a throughput report is what somebody opens
   // when nothing is wrong, which is the opposite of what the rest of
   // that pane is for.
-  it("opens Metrics from its own sidebar entry, not from a tab of the Debug pane", async () => {
+  it("opens Metrics from its own sidebar entry, not from a tab of the System pane", async () => {
     setupApi();
     const user = userEvent.setup();
     render(<App />);
     await screen.findByText("Fix bug");
 
-    await user.click(screen.getByRole("button", { name: "Debug" }));
+    await user.click(screen.getByRole("button", { name: "System" }));
     expect(
       await screen.findByText(/no log sources configured/i),
     ).toBeInTheDocument();

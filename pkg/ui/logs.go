@@ -9,8 +9,8 @@ import (
 	"strconv"
 )
 
-// LogSource is one named stream of recent log lines a debugging page can
-// show, oldest first -- journalctl for the daemon's own unit, a plain
+// LogSource is one named stream of recent log lines the UI's System
+// pane can show, oldest first -- journalctl for the daemon's own unit, a plain
 // file for the git proxy's audit log, or anything else a deployment
 // wants to surface, each behind whatever mechanism actually fits it
 // (see pkg/systemlog).
@@ -29,8 +29,8 @@ const maxLogLines = 5000
 
 // logSourcesResponse is GET /api/logs' whole body. Enabled is false,
 // with no sources listed, when this deployment's UI has no log sources
-// configured -- the frontend uses that to hide the debugging page's log
-// pane entirely, the same convention upgradeStatusResponse's own Enabled
+// configured -- the frontend uses that to hide the System pane's own
+// Logs tab entirely, the same convention upgradeStatusResponse's own Enabled
 // already establishes.
 type logSourcesResponse struct {
 	Enabled bool     `json:"enabled"`

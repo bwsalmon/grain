@@ -48,10 +48,10 @@ import { capabilityRows } from "../state.js";
 //
 // Logs, Sandbox health and the reboot control used to join them here as
 // a single Debug tab (bwsalmon/agents#623), but moved back out to their
-// own sidebar entry/overlay, DebugOverlay.jsx (bwsalmon/agents#640): live
-// diagnostics for a deployment gone wrong turned out to want quicker
-// reach than a tab buried inside Settings, unlike the configuration the
-// tabs below actually are.
+// own sidebar entry/overlay, SystemOverlay.jsx (bwsalmon/agents#640):
+// live diagnostics for a deployment gone wrong turned out to want
+// quicker reach than a tab buried inside Settings, unlike the
+// configuration the tabs below actually are.
 //
 // The catch-all "General" tab this pane started with grew past the point
 // a single scroll of unrelated fields was still readable, so it is split

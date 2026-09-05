@@ -7,7 +7,7 @@ import api from "../api.js";
 vi.mock("../api.js", () => ({ default: vi.fn() }));
 
 // grain/task-173: the throughput and latency report was the fourth tab
-// of DebugOverlay and is its own sidebar destination now. This covers
+// of SystemOverlay and is its own sidebar destination now. This covers
 // the wrapper only -- that the report is in a pane with a header naming
 // it, and that the one link out of it reaches App. MetricsPage.test.jsx
 // covers what the report itself does with the numbers.

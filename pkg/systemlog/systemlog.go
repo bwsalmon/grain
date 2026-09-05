@@ -3,7 +3,7 @@
 // (Journalctl), the kernel's own ring buffer under the daemon (Dmesg),
 // and a plain append-only file such as the git proxy's audit log
 // (File) -- bwsalmon/agents#444's "core system logs" for the UI's
-// debugging page.
+// System pane.
 package systemlog
 
 import (
@@ -34,7 +34,7 @@ func (j Journalctl) Tail(ctx context.Context, lines int) ([]string, error) {
 }
 
 // Dmesg tails the kernel's own log for the machine the daemon runs on --
-// the Debug pane's answer to the failures no userspace log can describe,
+// the System pane's answer to the failures no userspace log can describe,
 // because the process they happened to is the one that stopped writing:
 // an OOM kill of an agent CLI mid-run, a disk erroring under a sandbox's
 // checkout, a network interface dropping the git proxy's traffic. Sandbox

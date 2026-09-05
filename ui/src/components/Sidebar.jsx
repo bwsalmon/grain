@@ -31,18 +31,21 @@ import ItemGlyph from "./ItemGlyph.jsx";
 // entries/a "danger zone" on the general tab -- bwsalmon/agents#457,
 // bwsalmon/agents#536, bwsalmon/agents#395) went through Settings' own
 // Debug tab for a while too (bwsalmon/agents#623), but moved back out
-// to a "Debug" entry of its own here, under Settings (bwsalmon/
-// agents#640) -- diagnosing a deployment gone wrong wants faster reach
-// than a tab buried inside Settings' configuration form.
+// to an entry of its own here, under Settings (bwsalmon/agents#640) --
+// diagnosing a deployment gone wrong wants faster reach than a tab
+// buried inside Settings' configuration form. That entry is called
+// "System" (grain/task-12): it is the machine this deployment runs on,
+// which an operator looks at to see what it is doing and not only when
+// they have already decided something is broken.
 //
 // Metrics (GET /api/metrics) was a fourth tab in there and is a third
 // footer entry now (grain/task-173): the throughput and latency report
 // is the standing question "how is this deployment doing", asked when
-// nothing is wrong at all, and it was the only thing behind Debug's tab
-// strip that was not about something being wrong right now. Two clicks
-// and a tab strip is the wrong price for a report somebody reads
-// weekly, and burying it under the word "debug" said the wrong thing
-// about when to open it.
+// nothing is wrong at all, and it was the only thing behind that pane's
+// tab strip that was not about something being wrong right now. Two
+// clicks and a tab strip is the wrong price for a report somebody reads
+// weekly, and burying it under the word "debug" -- what that pane was
+// called then -- said the wrong thing about when to open it.
 //
 // All three footer entries open a full pane beside this rail rather
 // than a dialog over the middle of the screen (grain/task-115), which is
@@ -101,10 +104,10 @@ export default function Sidebar({
   stateFilter,
   onSetFilter,
   showSettings = false,
-  showDebug = false,
+  showSystem = false,
   showMetrics = false,
   onOpenSettings,
-  onOpenDebug,
+  onOpenSystem,
   onOpenMetrics,
   onOpenNewTask,
 }) {
@@ -378,16 +381,16 @@ export default function Sidebar({
           />
         </ListItemButton>
         <ListItemButton
-          selected={showDebug}
-          onClick={onOpenDebug}
+          selected={showSystem}
+          onClick={onOpenSystem}
           sx={{ borderRadius: 1.5, py: 0.6, px: 0.9 }}
         >
           <ListItemText
-            primary="Debug"
+            primary="System"
             primaryTypographyProps={{
               fontSize: "0.85rem",
               fontWeight: 500,
-              color: showDebug ? "text.primary" : "text.secondary",
+              color: showSystem ? "text.primary" : "text.secondary",
             }}
           />
         </ListItemButton>

@@ -44,14 +44,14 @@ const maxTopLines = 500
 // hostTopResponse is GET /api/host/top's whole body. Enabled is false,
 // with no lines, when this deployment's UI has no Config.HostTop -- the
 // same nil-means-unavailable convention logSourcesResponse and
-// sandboxHealthResponse already give the other panels of the Debug
+// sandboxHealthResponse already give the other panels of the System
 // overlay this one is a tab of.
 type hostTopResponse struct {
 	Enabled bool     `json:"enabled"`
 	Lines   []string `json:"lines,omitempty"`
 }
 
-// handleGetHostTop is the Debug overlay's Top tab: what is actually
+// handleGetHostTop is the System overlay's Top tab: what is actually
 // running on the machine this daemon runs on, right now. GET
 // /api/sandboxes' own host section already says how loaded that machine
 // is; this says by what, which is the question an operator asks next and

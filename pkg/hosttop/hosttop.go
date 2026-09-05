@@ -1,6 +1,6 @@
 // Package hosttop reads a `top` snapshot of the processes running
 // alongside this deployment's own daemon -- cmd/grain/daemon.go's
-// ui.Config.HostTop, behind the Debug overlay's Top tab.
+// ui.Config.HostTop, behind the System overlay's Top tab.
 //
 // It is the per-process half of what pkg/sysstat already reports in
 // aggregate. Sandbox health answers "is this machine starved" with a load
@@ -84,7 +84,7 @@ func Read(ctx context.Context, lines int) ([]string, error) {
 // header line, so the last one of those starts the sample worth keeping;
 // output with no such line at all (a procps build that words its header
 // differently) is returned whole rather than emptied, since some output
-// is a better answer for a debugging pane than none.
+// is a better answer for the pane reading it than none.
 func lastSample(all []string) []string {
 	for i := len(all) - 1; i >= 0; i-- {
 		if strings.HasPrefix(all[i], "top - ") {

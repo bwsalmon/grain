@@ -10,9 +10,10 @@ import (
 )
 
 // SandboxHealth is one live sandbox's status, as HostSandboxes' and
-// KonturSandboxes' own Health methods report it (bwsalmon/agents#536: a
-// debugging pane needs to see which sandbox a stuck or failing run is
-// actually sitting on, and whether that sandbox itself looks healthy).
+// KonturSandboxes' own Health methods report it (bwsalmon/agents#536:
+// the UI's System pane needs to see which sandbox a stuck or failing
+// run is actually sitting on, and whether that sandbox itself looks
+// healthy).
 // cmd/grain/daemon.go is the only place this type and ui.SandboxSnapshot
 // are ever both in scope -- see that file's own sandboxHealthAdapter doc
 // comment for why this package does not import ui to spare a caller that
@@ -99,7 +100,7 @@ func (h *HostSandboxes) Health(ctx context.Context) []SandboxHealth {
 // VM's endpoint to resolve and answer SSH. Deliberately far shorter than
 // cfg.readyTimeout (2 minutes by default): that timeout exists to give a
 // VM this process just created real wall-clock time to boot before
-// Acquire gives up on it, but a debugging pane asking "is this sandbox
+// Acquire gives up on it, but a pane asking "is this sandbox
 // healthy right now" wants a VM that is actually down reported as such
 // quickly, not held up for the same boot-time grace period.
 const healthTimeout = 5 * time.Second
