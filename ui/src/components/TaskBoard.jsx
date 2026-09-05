@@ -485,6 +485,9 @@ export function BoardCard({
           />
         )}
         {t.repo && <Chip size="small" label={t.repo} />}
+        {t.base && t.base !== "main" && (
+          <Chip size="small" variant="outlined" label={t.base} />
+        )}
         {(t.capabilities || []).map((id) => (
           <Chip key={id} size="small" label={capabilityName(config, id)} />
         ))}
