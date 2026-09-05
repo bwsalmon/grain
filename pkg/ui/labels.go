@@ -335,6 +335,31 @@ type Config struct {
 	// Logs above already gives the System pane it now sits alongside
 	// (bwsalmon/agents#536).
 	Sandboxes SandboxHealth
+	// SandboxShapeIgnored says that the sandbox backend this deployment
+	// actually runs has no shape to apply, so the three deployment-wide
+	// sandbox-shape settings (Settings.SandboxCPUs and friends) are
+	// stored and shown but size nothing -- true under
+	// orchestrator.HostSandboxes, whose sandbox is a directory on the
+	// daemon's own machine ("a host-directory sandbox has no shape of
+	// its own", HostSandboxes.Acquire), and false under
+	// orchestrator.KonturSandboxes, which is the backend cmd/grain/
+	// daemon.go's own defaultShaper path hands a changed shape to.
+	//
+	// Reported onward as Settings.SandboxShapeIgnored so the pane and
+	// `grain settings` can say so beside the numbers. An operator
+	// reading "2 vCPUs, 2048 MiB" on a host-sandbox deployment otherwise
+	// reasonably concludes runs are capped there when they are capped at
+	// nothing at all -- the one silent gap left by a backend that is
+	// otherwise careful to *refuse* a per-task shape rather than ignore
+	// it (grain/task-9).
+	//
+	// false is the "say nothing" default, which is what a UI with no
+	// backend to speak for (`grain demo`'s throwaway UI, any UI not
+	// colocated with an orchestrator) should do -- the same
+	// zero-value-means-unavailable reading Sandboxes above has, except
+	// that here the unavailable answer is silence rather than a pane
+	// reporting itself off.
+	SandboxShapeIgnored bool
 	// HostStats, when set, is what GET /api/sandboxes' own host section
 	// calls to report this deployment's daemon's own CPU-load/memory
 	// pressure -- pkg/sysstat.Read wrapped to return HostPressure, in a
@@ -407,6 +432,25 @@ type Config struct {
 	// ReconcilerDown always reports false, the same nil-means-
 	// unavailable-feature default AutoMergeDegraded above gives.
 	ReconcilerDown func() bool
+	// HostSandboxes reports that this deployment dispatches into plain
+	// directories on the daemon's own machine (orchestrator.HostSandboxes)
+	// rather than into a VM per run (orchestrator.KonturSandboxes) -- so
+	// a run has this host's filesystem, network and credentials, and
+	// nothing between an agent and the machine grain itself is on.
+	//
+	// GET /api/config reports it and the frontend draws a standing
+	// banner from it (grain/task-15). Not a warning about something that
+	// has gone wrong, unlike ReconcilerDown above: it is a true and
+	// permanent fact about the deployment, which is exactly why it needs
+	// saying -- host sandboxing used to be what a deployment got by
+	// leaving a flag off, and nothing on screen distinguished it from an
+	// isolated one.
+	//
+	// A plain bool rather than one of the funcs around it: the backend is
+	// chosen once, at startup, and no setting the UI can write moves it.
+	// false is the safe reading for a UI wired to no daemon at all
+	// (`grain demo`), which dispatches nothing and so sandboxes nothing.
+	HostSandboxes bool
 	// RunningConfig, when set, reports the store-backed configuration the
 	// daemon this UI runs inside actually has in effect right now -- what
 	// it read at startup, plus every later change it was able to apply

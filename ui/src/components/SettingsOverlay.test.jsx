@@ -416,6 +416,38 @@ describe("SettingsOverlay", () => {
     });
   });
 
+  // grain/task-9: a deployment whose sandbox backend has no shape at all
+  // (host-directory sandboxing, sandboxShapeIgnored) says so on the tab
+  // that shows the numbers. Without it the pane reads as a deployment
+  // capping every run at 2 vCPUs and 2 GiB when it caps them at nothing.
+  it("says the sandbox shape is not in effect when the backend has none", async () => {
+    api.mockResolvedValueOnce({
+      ...settings,
+      sandboxCpus: 2,
+      sandboxShapeIgnored: true,
+    });
+    const user = userEvent.setup();
+    render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
+    await screen.findByDisplayValue("30s");
+    await user.click(screen.getByRole("tab", { name: "Sandbox" }));
+
+    expect(screen.getByText(/Not in effect on this deployment/)).toBeVisible();
+    // Still shown, and still editable: the value is stored either way,
+    // and setting one before switching a deployment over is reasonable.
+    expect(screen.getByLabelText(/Sandbox vCPUs/)).toHaveValue(2);
+    expect(screen.getByLabelText(/Sandbox vCPUs/)).toBeEnabled();
+  });
+
+  it("says nothing about shapes not applying when the backend has one", async () => {
+    api.mockResolvedValueOnce(settings);
+    const user = userEvent.setup();
+    render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
+    await screen.findByDisplayValue("30s");
+    await user.click(screen.getByRole("tab", { name: "Sandbox" }));
+
+    expect(screen.queryByText(/Not in effect on this deployment/)).toBeNull();
+  });
+
   // bwsalmon/agents#610: an unset override shows grain's own default as a
   // placeholder -- fainter than a real value -- rather than a literal 0 that
   // reads as a deliberately zeroed-out sandbox.

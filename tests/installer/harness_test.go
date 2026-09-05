@@ -30,10 +30,12 @@
 //	root                  via passwordless sudo; setup.sh refuses otherwise.
 //	systemd + docker      the two things the deployment is made of.
 //
-// Kontur sandboxing stays off (GRAIN_KONTUR_ENABLE=0). It is the one part
-// of a deploy that needs nested virtualisation and a multi-minute
-// debootstrap, and the failures this file exists to catch are all in the
-// path every deployment takes.
+// Kontur sandboxing stays off (GRAIN_KONTUR_ENABLE=0, plus the
+// GRAIN_HOST_SANDBOXES=1 that setup.sh now requires before it will
+// install an unisolated deployment). It is the one part of a deploy that
+// needs nested virtualisation and a multi-minute debootstrap, and the
+// failures this file exists to catch are all in the path every
+// deployment takes.
 package installer
 
 import (

@@ -108,7 +108,10 @@ type Settings struct {
 	// Meaningless, and simply unused,
 	// under a deployment running the default local-directory sandboxing
 	// (no -kontur-sandboxes); GetSettings still reports whatever is
-	// stored either way, the same as every other kontur* setting here.
+	// stored either way, the same as every other kontur* setting here --
+	// and reports SandboxShapeIgnored below alongside them, so that
+	// "unused here" is something the pane showing the numbers can say
+	// rather than something an operator has to already know.
 	SandboxCPUs     int `json:"sandboxCpus"`
 	SandboxMemoryMB int `json:"sandboxMemoryMb"`
 	SandboxDiskGB   int `json:"sandboxDiskGb"`
@@ -129,6 +132,26 @@ type Settings struct {
 	SandboxCPUsDefault     int `json:"sandboxCpusDefault"`
 	SandboxMemoryMBDefault int `json:"sandboxMemoryMbDefault"`
 	SandboxDiskGBDefault   int `json:"sandboxDiskGbDefault"`
+	// SandboxShapeIgnored is true when the three numbers above shape
+	// nothing on this deployment, because the sandbox backend it runs has
+	// no shape at all -- Config.SandboxShapeIgnored's own doc comment for
+	// which backend that is and how the daemon decides. A pane (and
+	// `grain settings`) says so beside the numbers rather than showing
+	// them bare: an unannotated "2 vCPUs / 2048 MiB" reads as the cap
+	// runs are held to, and under host-directory sandboxing there is no
+	// cap (grain/task-9).
+	//
+	// The values themselves are still reported, and still editable: they
+	// are stored either way, exactly like every other kontur-only
+	// setting here, and an operator setting a shape up before switching
+	// a deployment to -kontur-sandboxes is doing something reasonable.
+	//
+	// omitempty, and false meaning "nothing to say": a UI that cannot
+	// speak for a backend leaves this out, and so does an older daemon
+	// that predates the field -- both of which should read as the
+	// unannotated pane there has always been rather than as a claim that
+	// the shape applies.
+	SandboxShapeIgnored bool `json:"sandboxShapeIgnored,omitempty"`
 	// ShowClosedByDefault is model.Config's own field of the same name
 	// (bwsalmon/agents#537): the deployment-wide default for whether a
 	// task list's own "Show closed tasks" toggle starts checked. Also
@@ -472,6 +495,7 @@ func (c *Client) settingsFrom(cfg model.Config, repoConfigs []model.RepoConfig) 
 		SandboxCPUsDefault:            kontur.DefaultCPUs,
 		SandboxMemoryMBDefault:        kontur.DefaultMemoryMB,
 		SandboxDiskGBDefault:          kontur.DefaultDiskGB,
+		SandboxShapeIgnored:           c.Config.SandboxShapeIgnored,
 		ShowClosedByDefault:           cfg.ShowClosedByDefault,
 		EnvironmentName:               cfg.EnvironmentName,
 		TimeZone:                      model.TimeZoneOrDefault(cfg.TimeZone),
@@ -553,11 +577,18 @@ func (c *Client) GetSettings(ctx context.Context) (Settings, error) {
 			SandboxDiskGBDefault:   kontur.DefaultDiskGB,
 			AgentGitNameDefault:    mcp.DefaultGitIdentityName,
 			AgentGitEmailDefault:   mcp.DefaultGitIdentityEmail,
-			Capabilities:           c.capabilityStatuses(model.Config{}, repoConfigs),
-			AgentKeysEnabled:       c.Config.Secrets != nil,
-			GeminiAPIKeySet:        geminiKeySet,
-			ClaudeOAuthTokenSet:    claudeTokenSet,
-			OpenAIAPIKeySet:        openaiKeySet,
+			// Reported before anything has been saved for the same
+			// reason RestartRequired below is: the annotation is a fact
+			// about this deployment's backend, not about its stored row,
+			// and it belongs on the field the first time it is looked at
+			// -- which on a fresh deployment is exactly when someone is
+			// deciding what to type into it.
+			SandboxShapeIgnored: c.Config.SandboxShapeIgnored,
+			Capabilities:        c.capabilityStatuses(model.Config{}, repoConfigs),
+			AgentKeysEnabled:    c.Config.Secrets != nil,
+			GeminiAPIKeySet:     geminiKeySet,
+			ClaudeOAuthTokenSet: claudeTokenSet,
+			OpenAIAPIKeySet:     openaiKeySet,
 			// Offered before anything has been saved for the same reason
 			// presence is: a deployment that has never had its settings
 			// saved is exactly where a credential is being pasted in for

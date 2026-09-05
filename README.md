@@ -2950,6 +2950,31 @@ are unchanged. `style.css` still owns what MUI has no primitive for: the
 state dot/badge, the sidebar's brand mark, and layout for the task list
 and detail panel.
 
+**A phone gets a shell that fits it; a tablet gets the one above
+(grain/task-19).** Every view here is built around a permanent 232px nav
+rail standing beside a pane, which a tablet has the width for and a
+phone does not: on a 390px screen the rail is more than half the window,
+a task row truncates everything after its title, and a board column is a
+third of a screen wide. `ui/src/phone.js` asks the one question — under
+600px wide, or short and landscape, which is a phone turned sideways and
+never a tablet — and both the layout and the stylesheet answer it the
+same way, because `App.jsx` publishes the answer as `data-phone` on
+`<html>` exactly as `AppThemeProvider` publishes the resolved light/dark
+mode. That is what keeps `style.css` from carrying a second copy of the
+media query, and it reaches the overlay panes, which MUI renders into a
+portal outside the shell. What a phone gets is not a second UI: the same
+`Sidebar` element moves, whole, into `PhoneNav`'s drawer behind a top bar
+(and the drawer closes on any tap inside it, since every control in the
+rail is a navigation), panes take the full width, centered dialogs go
+full screen, and `style.css`'s phone block brings the page gutters in,
+wraps a task row's chips onto lines of their own, widens a board column
+to the screen and stacks the task detail's two columns.
+`ui/e2e/phone.spec.js` is where that is checked, because it is the only
+suite with a layout engine in it — jsdom can say which elements rendered
+and nothing about how wide they came out — and it asserts the tablet half
+of the bargain too: at 820px the rail is still beside the page and a pane
+still starts exactly where the rail ends.
+
 **Agent prose is rendered as the markdown it is written in
 (grain/task-93).** Every framework grain dispatches answers in markdown
 by default, so a relayed question or a `comment_on_issue` note arrives
@@ -3544,6 +3569,18 @@ Three answers, offered in the UI's Settings pane (its State tab) and by
 contents replace this installation's database, or an empty repository
 grain seeds from what it has. The last two are one operation, because
 adopting cannot tell them apart up front and does not need to.
+
+Local only is a real answer and the one a fresh install already has, but
+it is also the only one with no copy of anything anywhere else, so the
+pane warns rather than merely reporting it: every commit in the
+repository -- tasks, settings, capabilities, repo configuration -- is on
+one disk, and so is the secrets key beside it that nothing can
+regenerate. The warning names both moves out, because they cover
+different halves: adopt a remote, and keep a copy of the key file off
+this host (`GRAIN_SECRETS_KEY` on a later deploy, or the import field in
+the pane). `grain state status` has said this at a terminal for as long
+as it has existed, and an operator who runs a deployment through the UI
+never sees a terminal.
 
 An empty repository is worth formatting before it is adopted:
 `grain state format`, in a clone of it, writes the README, the
@@ -7124,3 +7161,172 @@ contract every other optional panel here follows. A host deployed before
 any of this existed is in exactly that state until `sudo ./setup.sh` is
 re-run, and `pkg/rootshell`'s timeout message names the units to install
 rather than only reporting that nothing answered.
+
+## Nested virtualization, and saying whether a sandbox has it
+
+A sandbox is a cloud-hypervisor guest, so a VM started *inside* one is a
+nested VM: `kind create cluster`, a docker runtime that wants `/dev/kvm`,
+a second cloud-hypervisor for a task working on kontur itself. The
+question "can a dispatched task do that here?" had no answer anywhere in
+this repository, and it is a question with three separate ways of being
+no, in three different layers, each of which looks identical from inside
+a task.
+
+The three, top to bottom:
+
+- **The host's KVM has to have nesting on.** `kvm_intel` and `kvm_amd`
+  both default to `nested=Y`, so a physical machine has this without
+  anyone asking. A cloud VM has it only if its own hypervisor gave this
+  kernel hardware virtualization to pass on — `terraform/gcp`'s
+  `enable_nested_virtualization` is what buys that, and buys it once:
+  a GCE VM's guests do not in turn get VMX to hand to *their* guests.
+- **cloud-hypervisor has to leave `vmx`/`svm` in the guest's CPUID.** It
+  does. `--cpus nested=` defaults to *on* in v53.0, the version
+  `third_party/kontur`'s `Dockerfile` pins, and `nested=off` is the
+  setting that masks the flag (`arch/src/x86_64`'s `configure_vcpu`).
+  Nothing here passes it, so nothing had to change to get this — and
+  nothing in the vendored kontur had to be patched, which is the outcome
+  `third_party/kontur/VENDORED.md` asks for.
+- **The guest has to load its `kvm` module and let the sandbox account
+  open `/dev/kvm`.** udev autoloads `kvm_intel`/`kvm_amd` off the CPU's
+  own feature bits, so the module half happens by itself. The device it
+  creates is `root:kvm 0660`, and the `debian` account every tool call
+  arrives as was in no such group.
+
+That last one was the only thing actually wrong, and it was wrong
+invisibly: a real sandbox on the physical deployment has `vmx` in
+`/proc/cpuinfo`, has `kvm_intel` loaded, and will run a VM built with
+`KVM_CREATE_VM`/`KVM_CREATE_VCPU`/`KVM_RUN` as root — while refusing the
+same device to the account the agent is. `scripts/kontur/guest-setup.sh`
+adds that account to the `kvm` group, so the next guest image CI
+publishes has nested virtualization usable rather than merely present.
+
+The rest of the change is the reporting, because a guest image is built
+and published on its own schedule: a deployment can be running the old
+image or the new one, and the sandbox health pane is where an operator
+finds out which. `KonturSandboxes.Health` asks the guest one more
+question inside the single command it already runs there — no extra
+round trip against its 5-second budget — and reports one of four states
+rather than a boolean, because the three failures want different fixes:
+
+| state | means | fix |
+| --- | --- | --- |
+| `ready` | `/dev/kvm` is there and the sandbox account can open it | — |
+| `denied` | the device is there, the account cannot open it | a guest image from before the `kvm` group grant |
+| `no-device` | the CPU offers `vmx`/`svm`, nothing loaded the module | a guest image without `kvm_intel`/`kvm_amd` |
+| `unsupported` | no `vmx`/`svm` in the guest's CPU at all | the layer below: the host's own nesting |
+
+The host's own half is read separately — `pkg/sysstat`'s
+`NestedVirtualization`, straight off
+`/sys/module/kvm_{intel,amd}/parameters/nested` — and shown on the same
+pane beside the load average, because it is what tells an `unsupported`
+sandbox from a host that was never going to give it one. `scripts/setup.sh`'s
+`ensure_kontur_nested_virt` logs the same reading at install time and, on
+a host where something turned nesting off, writes the modprobe drop-in
+that turns it back on, reloading the module only if nothing is using it
+— never pulling KVM out from under a running sandbox, since that script
+is the updater as well as the installer.
+
+## A sandbox shape the backend ignores says so
+
+`grain settings` and the Settings pane's Sandbox tab print three numbers
+on every deployment — `sandbox cpus`, `sandbox memory mb`, `sandbox disk
+gb` — because they are stored on every deployment. Only one kind of
+deployment builds anything to them. Without `-kontur-sandboxes` a run
+gets an `orchestrator.HostSandboxes` directory on the daemon's own
+machine: `liveConfig.refresh` offers a changed shape to whatever
+implements `defaultShaper`, that backend deliberately does not, and the
+three settings size nothing. Read from inside such a sandbox, `cpu.max`
+and `memory.max` are both `max` and `nproc` reports every core the host
+has.
+
+Shown unannotated, that is worse than showing nothing. "2 vCPUs, 2048
+MiB" is a sentence about a cap, and it was describing a deployment whose
+runs have no cap at all — an operator reading the pane would have
+concluded the opposite of the truth, and would have gone looking for the
+throttle when a run ate the machine. The per-task half of the same
+setting was already honest about it: `HostSandboxes.Acquire` *refuses* a
+non-zero shape rather than ignoring it, naming both what was asked for
+and why a host directory has none of its own. The deployment-wide
+default was the one number still being dropped in silence.
+
+`ui.Config.SandboxShapeIgnored`, reported onward as
+`ui.Settings.SandboxShapeIgnored`, is that fact where the numbers are
+shown: the Sandbox tab carries a warning above the three fields, and
+`grain settings` ends each of the three lines with `-- not in effect:
+host-directory sandboxes have no shape`. Per line rather than once
+underneath them, since whoever is misled here reads one line and stops.
+
+The daemon works it out from the backend it built rather than from the
+flag that chose it — `sandboxShapeIgnored` asks whether `sandboxes` is a
+`defaultShaper`, which is exactly the test `refresh` applies before
+handing a changed shape on — so what the pane calls "not in effect"
+cannot drift from what is really applied. A backend that grew a
+`SetDefaultShape` would stop being annotated on the same commit that
+made the annotation false.
+
+The fields stay editable and the values stay stored. They are what this
+deployment would build VMs at the day it is pointed at kontur, and
+configuring a shape ahead of that switch is a reasonable thing to do:
+what was wrong was the silence, not the numbers. `false` is the quiet
+answer, so a UI with no backend to speak for (`grain demo`'s throwaway
+one) and an older daemon that predates the field both render the pane
+exactly as it was.
+
+## Host mode is a choice now, and says so
+
+`scripts/setup.sh` used to install an unisolated deployment by default.
+`GRAIN_KONTUR_ENABLE` was off unless something turned it on, so the
+`sudo ./setup.sh` that file's own header recommends produced a daemon
+dispatching every agent into a plain directory on the host
+(`orchestrator.HostSandboxes`) — as `$GRAIN_USER`, with that host's
+filesystem, its network, its git proxy and whatever credentials either
+can reach, and with nothing it wrote thrown away at the end of the run.
+Nothing said so: not the installer's summary, not the daemon's journal,
+not a single screen of the UI, which drew a deployment giving every run
+a VM of its own and a deployment giving every run the machine grain
+itself is on exactly alike.
+
+Two ways to arrive there, and neither of them was a decision. The
+default was one. The other was the fallback every kontur prerequisite
+took when it was not ready — no `/dev/kvm`, a sandbox image that would
+not pull, no gateway address a guest could reach the git proxy through:
+each logged a line and set `GRAIN_KONTUR_ENABLE=0` for the rest of the
+run, on the "converge with what's ready, don't fail the whole install"
+principle `mint_gemini_operating_key` still follows for a missing Gemini
+key. That principle is right where what's ready is a subset of what was
+asked for. It is wrong here, because the thing it converges on is not a
+lesser deployment — it is a different security posture, reached because
+a registry was briefly unreachable, on a host nobody was watching.
+
+So the installer asks. `GRAIN_KONTUR_ENABLE` defaults to 1, and
+`GRAIN_HOST_SANDBOXES=1` is the only way to get host mode: without it,
+`setup.sh` exits before it touches this host at all rather than
+installing a shape nobody named, and a kontur prerequisite that is not
+ready fails the run instead of falling back (`kontur_unavailable`). With
+it, the fallback is exactly what it always was — an operator who has said
+host mode is acceptable is not told twice — and the installer's own
+readiness report ends by naming what that deployment is. `terraform/gcp`
+needs no new variable: `enable_kontur_sandboxes = false` is the asking,
+and `files/deploy.sh` passes the matching `GRAIN_HOST_SANDBOXES=1`
+through.
+
+The daemon and the UI say it too, because an install is a moment and a
+deployment is not. `grain daemon` logs a warning on every start when it
+builds `HostSandboxes`, and `-host-sandboxes` — a flag that selects
+nothing, since leaving both sandbox flags off already runs that backend —
+is how a unit file records that the shape was chosen, so the startup line
+can tell a choice from an accident. The UI carries
+`ui.Config.HostSandboxes` from the same field `run()` branches on, out
+through `GET /api/config`, onto a standing banner that stacks above the
+reconciler-down and agent-pause banners rather than taking turns with
+them: those two describe an incident that will end, and this describes
+what the deployment is for as long as it runs.
+
+What this deliberately does not do is make the daemon refuse to start in
+host mode without the flag. A deployment installed before any of this
+existed has a unit file with neither sandbox flag in it, and the UI's own
+Upgrade button replaces the binary without rewriting that unit — so a
+binary that insisted would turn an upgrade into an outage, at the moment
+nobody is watching a terminal. The installer is where the refusal
+belongs; the daemon's job is to be loud.

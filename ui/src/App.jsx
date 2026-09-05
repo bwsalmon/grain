@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import api from "./api.js";
 import { buildPath, parsePath } from "./paths.js";
+import { useIsPhone } from "./phone.js";
 import { NO_NARROWING } from "./taskFilters.js";
 import { TimeZoneProvider } from "./TimeZoneContext.jsx";
 import Sidebar from "./components/Sidebar.jsx";
+import PhoneNav from "./components/PhoneNav.jsx";
 import TaskList from "./components/TaskList.jsx";
 import TaskBoard from "./components/TaskBoard.jsx";
 import RepoList from "./components/RepoList.jsx";
@@ -20,8 +22,10 @@ import SystemOverlay from "./components/SystemOverlay.jsx";
 import MetricsOverlay from "./components/MetricsOverlay.jsx";
 import RepoReleases from "./components/RepoReleases.jsx";
 import LoadingScreen from "./components/LoadingScreen.jsx";
+import BannerStrip from "./components/BannerStrip.jsx";
 import ReconcilerDownBanner from "./components/ReconcilerDownBanner.jsx";
 import AgentPauseBanner from "./components/AgentPauseBanner.jsx";
+import HostSandboxesBanner from "./components/HostSandboxesBanner.jsx";
 
 // POLL_INTERVAL_MS is how long the UI can be out of date by.
 //
@@ -33,6 +37,25 @@ import AgentPauseBanner from "./components/AgentPauseBanner.jsx";
 const POLL_INTERVAL_MS = 3000;
 
 export default function App() {
+  // Which shell this browser gets. On anything from a tablet up the nav
+  // rail stands permanently beside the pane, which is the layout every
+  // view here is built around; on a phone there is no room for it, so
+  // the same rail moves into PhoneNav's drawer behind a top bar
+  // (phone.js explains where the line is drawn and why). Nothing below
+  // this line differs between the two -- the phone layout is the same
+  // views in a shell that fits, not a second UI.
+  const isPhone = useIsPhone();
+  // ...and the same answer, published on <html> for the stylesheet, the
+  // way AppThemeProvider publishes the resolved light/dark mode. The
+  // rules a phone needs are mostly plain CSS -- padding, wrapping, how
+  // wide a board column is -- and a second copy of phone.js's media
+  // query in style.css would be free to drift from the first. This
+  // attribute also reaches what a media query would reach anyway but a
+  // class on the shell below would not: the overlay panes, which MUI
+  // renders into a portal outside this tree.
+  useEffect(() => {
+    document.documentElement.dataset.phone = isPhone ? "true" : "false";
+  }, [isPhone]);
   const [config, setConfig] = useState(null);
   const [tasks, setTasks] = useState([]);
   const [schedules, setSchedules] = useState([]);
@@ -691,6 +714,34 @@ export default function App() {
   // rather than the browser's (grain/task-368) -- config is loaded
   // before the first paint, so nothing renders in one zone and corrects
   // itself into another.
+  const openNewTask = () => {
+    setNewTaskRepo(null);
+    setShowNewTask(true);
+  };
+
+  // The one nav there is, in both shells: on a phone PhoneNav puts this
+  // exact element inside its drawer rather than beside the page.
+  const sidebar = (
+    <Sidebar
+      config={config}
+      view={view}
+      onSetView={setViewAndCloseOpen}
+      tasks={tasks}
+      schedules={schedules}
+      templates={templates}
+      suites={suites}
+      stateFilter={stateFilter}
+      onSetFilter={setStateFilter}
+      showSettings={showSettings}
+      showSystem={showSystem}
+      showMetrics={showMetrics}
+      onOpenSettings={() => setShowSettings(true)}
+      onOpenSystem={() => setShowSystem(true)}
+      onOpenMetrics={() => setShowMetrics(true)}
+      onOpenNewTask={openNewTask}
+    />
+  );
+
   return (
     <TimeZoneProvider zone={config?.timeZone}>
       <div className="app-shell">
@@ -698,27 +749,17 @@ export default function App() {
           <LoadingScreen />
         ) : (
           <>
-            <Sidebar
-              config={config}
-              view={view}
-              onSetView={setViewAndCloseOpen}
-              tasks={tasks}
-              schedules={schedules}
-              templates={templates}
-              suites={suites}
-              stateFilter={stateFilter}
-              onSetFilter={setStateFilter}
-              showSettings={showSettings}
-              showSystem={showSystem}
-              showMetrics={showMetrics}
-              onOpenSettings={() => setShowSettings(true)}
-              onOpenSystem={() => setShowSystem(true)}
-              onOpenMetrics={() => setShowMetrics(true)}
-              onOpenNewTask={() => {
-                setNewTaskRepo(null);
-                setShowNewTask(true);
-              }}
-            />
+            {isPhone ? (
+              <PhoneNav
+                config={config}
+                running={tasks.some((t) => t.state === "running")}
+                onOpenNewTask={openNewTask}
+              >
+                {sidebar}
+              </PhoneNav>
+            ) : (
+              sidebar
+            )}
             {view === "repos" && openRepo !== null && releasesOpen ? (
               <RepoReleases
                 repo={openRepo}
@@ -804,19 +845,26 @@ export default function App() {
             )}
           </>
         )}
-        {/* One banner at a time: both are pinned to the same strip at the
-          top of the page, and a dead reconcile loop is the larger fact
-          -- a deployment that is not dispatching at all has no use for
-          being told why it is also not dispatching. */}
-        {config?.reconcilerDown ? (
-          <ReconcilerDownBanner />
-        ) : config?.agentPause?.paused ? (
-          <AgentPauseBanner
-            pause={config.agentPause}
-            onLifted={refreshConfig}
-            showError={showError}
-          />
-        ) : null}
+        <BannerStrip>
+          {/* Always shown when it is true, above whatever else is:
+            host sandboxing is a fact about the deployment rather than
+            an incident, so it outlasts the banners below it and must
+            not be hidden by one of them (grain/task-15). */}
+          {config?.hostSandboxes && <HostSandboxesBanner />}
+          {/* One of these two at a time, though: a dead reconcile loop
+            is the larger fact -- a deployment that is not dispatching
+            at all has no use for being told why it is also not
+            dispatching. */}
+          {config?.reconcilerDown ? (
+            <ReconcilerDownBanner />
+          ) : config?.agentPause?.paused ? (
+            <AgentPauseBanner
+              pause={config.agentPause}
+              onLifted={refreshConfig}
+              showError={showError}
+            />
+          ) : null}
+        </BannerStrip>
         {error !== null && <ErrorBanner message={error} />}
         {openTaskId !== null && detail !== null && (
           <DetailOverlay

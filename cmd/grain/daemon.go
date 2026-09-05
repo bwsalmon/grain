@@ -286,11 +286,28 @@ func daemon(args []string) {
 			"grain-shell.service (scripts/setup.sh writes $GRAIN_DATA_DIR/control here). "+
 			"Empty disables the root shell entirely.")
 
-	// Sandboxing defaults to orchestrator.HostSandboxes (execute on this
-	// host, no isolation) exactly as it always has -- see run()'s own
-	// comment on sandboxes below. -kontur-sandboxes is the opt in to
-	// orchestrator.KonturSandboxes instead: one real bwsalmon/kontur-
-	// managed VM per run, reached over SSH.
+	// Sandboxing still falls back to orchestrator.HostSandboxes (execute
+	// on this host, no isolation) when nothing else is selected -- see
+	// run()'s own comment on sandboxes below. -kontur-sandboxes is the
+	// opt in to orchestrator.KonturSandboxes instead: one real
+	// bwsalmon/kontur-managed VM per run, reached over SSH.
+	//
+	// -host-sandboxes is the opt in to the other one. It selects nothing
+	// this binary would not do anyway, and exists so that a deployment
+	// running agents directly on its host says so out loud: host
+	// sandboxing gives a dispatched agent the daemon's own machine, its
+	// filesystem and its network, which is fine for a laptop and is not
+	// a thing to arrive at by leaving a flag off in production
+	// (grain/task-15). scripts/setup.sh now refuses to install without
+	// it; here it only changes how loudly startup says what is running,
+	// because a daemon that exited on a unit file written before the
+	// flag existed would turn an upgrade into an outage.
+	hostSandboxes := fs.Bool("host-sandboxes", false,
+		"dispatch into plain directories on this host (orchestrator.HostSandboxes) with no isolation of any "+
+			"kind: a run gets this machine's filesystem, network and credentials, and anything it does to them "+
+			"outlives the run. Right for a single-operator machine, wrong for anything a stranger's task can "+
+			"reach -- pass -kontur-sandboxes instead for one VM per run. Selects what leaving both flags off "+
+			"already does; passing it is how a deployment records that it meant to")
 	konturSandboxes := fs.Bool("kontur-sandboxes", false,
 		"dispatch onto real bwsalmon/kontur-managed VMs (one per run, named orchestrator.VMNamePrefix+<run id>) "+
 			"over SSH, instead of local host directories. This was -kontur-vm-name-prefix, whose value both opted "+
@@ -382,6 +399,10 @@ func daemon(args []string) {
 		fmt.Fprintln(os.Stderr, "grain daemon: -sandbox-dir is required unless -kontur-sandboxes is set")
 		os.Exit(2)
 	}
+	if *hostSandboxes && *konturSandboxes {
+		fmt.Fprintln(os.Stderr, "grain daemon: -host-sandboxes and -kontur-sandboxes select different sandbox backends -- pass one or the other")
+		os.Exit(2)
+	}
 	if *geminiAPIKeyFile == "" {
 		fmt.Fprintln(os.Stderr, "grain daemon: -gemini-api-key-file is required")
 		os.Exit(2)
@@ -460,6 +481,7 @@ func daemon(args []string) {
 		upgradeImage: *upgradeImage, upgradeImageRefFile: *upgradeImageRefFile,
 		rebootCmd:           rebootCmd,
 		rootShellControlDir: *rootShellControlDir,
+		hostSandboxes:       *hostSandboxes,
 		konturSandboxes:     *konturSandboxes,
 		konturStateDir:      *konturStateDir,
 		konturSSHUser:       *konturSSHUser, konturWorkspace: *konturWorkspace,
@@ -578,6 +600,14 @@ type config struct {
 	// means this deployment has no root shell, the same "empty disables"
 	// shape upgradeSrcDir above uses.
 	rootShellControlDir string
+
+	// hostSandboxes records that this deployment asked for
+	// orchestrator.HostSandboxes rather than merely ending up on it --
+	// see -host-sandboxes' own flag doc comment. It selects nothing
+	// (leaving both sandbox flags off runs the same backend); all it
+	// changes is whether startup reports host sandboxing as a choice or
+	// as an unnoticed default.
+	hostSandboxes bool
 
 	// konturSandboxes selects orchestrator.KonturSandboxes over the
 	// default orchestrator.HostSandboxes when non-empty; the rest of the
@@ -735,6 +765,23 @@ func run(ctx context.Context, cfg config) error {
 			return fmt.Errorf("creating sandbox directory: %w", err)
 		}
 		sandboxes = orchestrator.NewHostSandboxes(cfg.sandboxDir)
+		// Said here, once, on every start: host sandboxing is not an
+		// isolation boundary at all -- a dispatched agent runs as this
+		// process's own account, on this filesystem, with this host's
+		// network and whatever credentials it can reach. That is a
+		// reasonable trade on a machine one operator owns and a bad one
+		// anywhere else, and until grain/task-15 it was what a
+		// deployment got by leaving a flag off, with nothing said about
+		// it anywhere an operator would look. The UI says the same
+		// thing where they *are* looking (ui.Config.HostSandboxes'
+		// standing banner); this is the half that reaches a journal.
+		log.Print("WARNING: host sandboxing -- dispatched agents run directly on this machine, " +
+			"with no isolation from its filesystem, network or credentials. Pass -kontur-sandboxes " +
+			"for one VM per run (scripts/setup.sh: GRAIN_KONTUR_ENABLE=1).")
+		if !cfg.hostSandboxes {
+			log.Print("WARNING: -host-sandboxes was not passed either: this deployment is on the " +
+				"unisolated backend by default rather than by choice. Pass it to say this is deliberate.")
+		}
 	}
 
 	// This deployment's GitHub credential ladder, read once here and
@@ -1781,6 +1828,22 @@ type defaultShaper interface {
 	SetDefaultShape(orchestrator.Shape)
 }
 
+// sandboxShapeIgnored reports whether this deployment's sandbox backend
+// drops the deployment-wide sandbox shape on the floor -- true for the
+// backend that is not a defaultShaper, which is exactly the test
+// refresh above applies before handing a changed shape on.
+//
+// Asked of the backend rather than of cfg.konturSandboxes so the answer
+// cannot drift from the code that actually applies the setting: whatever
+// refresh would skip is what the Settings pane annotates as not in
+// effect (ui.Config.SandboxShapeIgnored). A backend that grew a
+// SetDefaultShape tomorrow would stop being annotated on the same
+// commit that made the annotation false.
+func sandboxShapeIgnored(sandboxes orchestrator.Sandboxes) bool {
+	_, shaped := sandboxes.(defaultShaper)
+	return !shaped
+}
+
 // liveConfig is the store-backed configuration this process actually has
 // in effect: what loadConfig read at startup, plus every later change to
 // it that a *running* daemon can apply on its own.
@@ -2650,6 +2713,13 @@ func startUIServer(cfg config, store *model.Store, transcriptDir string, sandbox
 		// does not import pkg/orchestrator (see ui/sandbox_health.go's own
 		// doc comment). The sandbox health pane (bwsalmon/agents#536).
 		Sandboxes: sandboxHealthAdapter{sandboxes},
+		// Whether the three sandbox-shape settings on that same pane
+		// actually shape anything here, which is a property of the
+		// backend built above rather than of the row they are stored in
+		// (sandboxShapeIgnored's own doc comment). Under the default
+		// host-directory sandboxing they shape nothing at all, and
+		// saying so beside them is the whole of grain/task-9.
+		SandboxShapeIgnored: sandboxShapeIgnored(sandboxes),
 		// hostStats reads this same process's own machine, not any one
 		// sandbox -- see pkg/sysstat's own doc comment on why that's a
 		// separate reading from Sandboxes above. It takes a list of
@@ -2681,6 +2751,15 @@ func startUIServer(cfg config, store *model.Store, transcriptDir string, sandbox
 		// reconcilerDown (daemon.go), the same way AutoMergeDegraded above
 		// mirrors orchestrator.ChecksUnavailable -- bwsalmon/agents#576.
 		ReconcilerDown: func() bool { return reconcilerDown.Load() },
+		// Which sandbox backend run() actually built, for the standing
+		// banner that says this deployment is running dispatched agents
+		// on its own host with no isolation (ui.Config.HostSandboxes,
+		// grain/task-15). Read off the same field run() branches on, so
+		// the banner cannot disagree with the backend; a plain bool
+		// rather than one of the polled funcs above because the backend
+		// is fixed for the life of the process -- -kontur-sandboxes is
+		// not one of the settings liveConfig can change under it.
+		HostSandboxes: !cfg.konturSandboxes,
 		// RunningConfig is what this process actually has in effect right
 		// now (liveConfig's own doc comment), which the Settings pane
 		// compares the stored row against to say which of the two
@@ -2903,6 +2982,7 @@ func (a sandboxHealthAdapter) Health(ctx context.Context) []ui.SandboxSnapshot {
 			MemoryTotalMB: s.MemoryTotalMB,
 			DiskUsedMB:    s.DiskUsedMB,
 			DiskTotalMB:   s.DiskTotalMB,
+			NestedVirt:    s.NestedVirt,
 		}
 	}
 	return out
@@ -3268,13 +3348,21 @@ func hostStats(disks []hostDisk) (ui.HostPressure, error) {
 	if err != nil {
 		return ui.HostPressure{}, err
 	}
+	// Read on every poll rather than once at startup, unlike docker's
+	// data root above: this one genuinely changes while the daemon runs
+	// -- reloading kvm_intel with a different "nested" is the documented
+	// way to turn nesting on, and an operator who has just done it wants
+	// the pane to say so without restarting grain.
+	nestedVirt, nestedVirtDetail := sysstat.NestedVirtualization()
 	return ui.HostPressure{
-		LoadAverage1:  snap.LoadAverage1,
-		LoadAverage5:  snap.LoadAverage5,
-		LoadAverage15: snap.LoadAverage15,
-		MemoryUsedMB:  snap.MemUsedMB,
-		MemoryTotalMB: snap.MemTotalMB,
-		Disks:         diskUsage(disks),
+		LoadAverage1:     snap.LoadAverage1,
+		LoadAverage5:     snap.LoadAverage5,
+		LoadAverage15:    snap.LoadAverage15,
+		MemoryUsedMB:     snap.MemUsedMB,
+		MemoryTotalMB:    snap.MemTotalMB,
+		Disks:            diskUsage(disks),
+		NestedVirt:       nestedVirt,
+		NestedVirtDetail: nestedVirtDetail,
 	}, nil
 }
 

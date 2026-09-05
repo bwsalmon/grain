@@ -701,9 +701,16 @@ variable "enable_kontur_sandboxes" {
     On by default, and needs no other setup: left with kontur_oci_image
     at its empty default, scripts/setup.sh pulls the sandbox image this
     build of grain was built against and builds nothing at all. Set
-    kontur_oci_image to run a different one, or set this false to keep
-    dispatching into host directories the way every deployment before
-    bwsalmon/agents#504 did.
+    kontur_oci_image to run a different one.
+
+    Setting this false keeps dispatching into host directories the way
+    every deployment before bwsalmon/agents#504 did, and is the only way
+    to get that shape: it is what files/deploy.sh turns into setup.sh's
+    own GRAIN_HOST_SANDBOXES=1, without which that script refuses to
+    install an unisolated deployment at all (grain/task-15). Understand
+    what you are turning off before you do -- a run on such a deployment
+    has the daemon's own machine, its filesystem, its network and its
+    credentials, and nothing it changes is thrown away with the run.
 
     Needs enable_nested_virtualization too (on by default, and checked by
     instance.tf's own precondition) -- a kontur VM is a nested

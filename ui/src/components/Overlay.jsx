@@ -1,5 +1,6 @@
 import CloseIcon from "@mui/icons-material/Close";
 import { Button, Dialog, IconButton } from "@mui/material";
+import { useIsPhone } from "../phone.js";
 import { SIDEBAR_WIDTH } from "../theme.js";
 
 // Shared overlay chrome, now MUI's own Dialog: it already closes on a
@@ -52,6 +53,12 @@ export default function Overlay({
   header = null,
   children,
 }) {
+  // On a phone the rail is not beside the pane at all -- it is in
+  // PhoneNav's drawer -- so there is nothing to leave room for and the
+  // pane takes the whole width. Asked of phone.js rather than of the
+  // `sm` breakpoint below, which a phone held sideways is wide enough to
+  // clear while having no rail on screen to spare the width for.
+  const isPhone = useIsPhone();
   if (pane) {
     return (
       <Dialog
@@ -67,7 +74,9 @@ export default function Overlay({
           // the pane takes the width outright.
           "& .MuiDialog-container": { justifyContent: "flex-end" },
           "& .MuiDialog-paper": {
-            width: { xs: "100%", sm: `calc(100% - ${SIDEBAR_WIDTH}px)` },
+            width: isPhone
+              ? "100%"
+              : { xs: "100%", sm: `calc(100% - ${SIDEBAR_WIDTH}px)` },
             borderLeft: 1,
             borderColor: "divider",
           },
@@ -91,23 +100,52 @@ export default function Overlay({
       </Dialog>
     );
   }
+  // The centered box is a box on anything with room for one, and the
+  // whole screen on a phone: New task is a form of a dozen fields, and
+  // MUI's own centered shape would leave it a 32px margin on each side
+  // and the rest of the page showing uselessly behind it. Full screen it
+  // is the paper, not the document, that scrolls (scroll="paper"), so
+  // the body below has to be the part that moves.
+  const body = isPhone
+    ? {
+        padding: "1.25rem 1rem",
+        paddingBottom: "calc(1.25rem + env(safe-area-inset-bottom, 0px))",
+        flex: 1,
+        minHeight: 0,
+        overflowY: "auto",
+      }
+    : { padding: "1.5rem" };
   return (
     <Dialog
       open
       onClose={onClose}
       maxWidth={wide ? "md" : "sm"}
       fullWidth
-      scroll="body"
+      fullScreen={isPhone}
+      scroll={isPhone ? "paper" : "body"}
+      sx={
+        isPhone
+          ? { "& .MuiDialog-paper": { pt: "env(safe-area-inset-top, 0px)" } }
+          : undefined
+      }
     >
       <IconButton
         aria-label="Close dialog"
         onClick={onClose}
         size="small"
-        sx={{ position: "absolute", top: 8, right: 8, color: "text.secondary" }}
+        sx={{
+          position: "absolute",
+          // Absolute positioning ignores the paper's own padding, so the
+          // safe-area inset the paper takes above has to be added here
+          // too or the X lands under a notched phone's status bar.
+          top: isPhone ? "calc(8px + env(safe-area-inset-top, 0px))" : 8,
+          right: 8,
+          color: "text.secondary",
+        }}
       >
         <CloseIcon fontSize="small" />
       </IconButton>
-      <div style={{ padding: "1.5rem" }}>{children}</div>
+      <div style={body}>{children}</div>
     </Dialog>
   );
 }

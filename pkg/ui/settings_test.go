@@ -718,6 +718,62 @@ func TestGetSettingsReportsGrainsOwnSandboxDefaults(t *testing.T) {
 	}
 }
 
+// TestGetSettingsReportsWhenTheSandboxShapeIsIgnored is the annotation
+// the three numbers above are shown with on a deployment whose sandbox
+// backend has no shape at all (Config.SandboxShapeIgnored,
+// grain/task-9): a host-directory sandbox is sized by nothing, and a
+// pane showing "2 vCPUs / 2048 MiB" unqualified describes a cap that
+// does not exist.
+//
+// Reported on both paths, like the defaults above: a fresh deployment is
+// exactly where someone is deciding what to type into those boxes. And
+// reported *alongside* the stored values rather than instead of them --
+// they are still stored, still editable, and still what this deployment
+// would build VMs at if it were pointed at kontur.
+func TestGetSettingsReportsWhenTheSandboxShapeIsIgnored(t *testing.T) {
+	c, _, ctx := testClient(t)
+
+	// The default client speaks for no backend, and says nothing.
+	quiet, err := c.GetSettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if quiet.SandboxShapeIgnored {
+		t.Errorf("SandboxShapeIgnored = true with no backend to speak for, want false")
+	}
+
+	c.Config.SandboxShapeIgnored = true
+	fresh, err := c.GetSettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !fresh.SandboxShapeIgnored {
+		t.Errorf("SandboxShapeIgnored = false on a fresh store, want true")
+	}
+
+	if _, err := c.UpdateSettings(ctx, firstSettings()); err != nil {
+		t.Fatal(err)
+	}
+	cpus := 4
+	saved, err := c.UpdateSettings(ctx, ui.UpdateSettingsRequest{SandboxCPUs: &cpus})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !saved.SandboxShapeIgnored {
+		t.Errorf("SandboxShapeIgnored = false in an update response, want true")
+	}
+	if saved.SandboxCPUs != cpus {
+		t.Errorf("SandboxCPUs = %d, want the stored %d reported alongside the annotation", saved.SandboxCPUs, cpus)
+	}
+	read, err := c.GetSettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !read.SandboxShapeIgnored || read.SandboxCPUs != cpus {
+		t.Errorf("GetSettings = %d cpus, ignored %v, want %d and true", read.SandboxCPUs, read.SandboxShapeIgnored, cpus)
+	}
+}
+
 // TestUpdateSettingsRoundTripsAgentFramework is bwsalmon/agents#609's own
 // setting: unset it reads back "antigravity"
 // (model.AgentFrameworkAntigravity, the framework a deployment that has

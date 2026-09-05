@@ -9,6 +9,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import App from "./App.jsx";
 import api from "./api.js";
+import { PHONE_QUERY } from "./phone.js";
 
 vi.mock("./api.js", () => ({ default: vi.fn() }));
 
@@ -389,6 +390,54 @@ describe("App", () => {
     expect(
       screen.queryByText(/agent usage limit reached/i),
     ).not.toBeInTheDocument();
+  });
+
+  // grain/task-15: host sandboxing -- every run on the daemon's own
+  // machine, with no isolation from it -- used to be what a deployment
+  // got by leaving a flag off, and no screen here said so.
+  it("shows a banner when the deployment dispatches onto its own host", async () => {
+    setupApi();
+    const realImpl = api.getMockImplementation();
+    api.mockImplementation((path, opts) =>
+      path === "/api/config"
+        ? Promise.resolve({ ...config, hostSandboxes: true })
+        : realImpl(path, opts),
+    );
+
+    render(<App />);
+
+    expect(await screen.findByText(/host mode/i)).toBeInTheDocument();
+    expect(screen.getByText(/directly on the host/i)).toBeInTheDocument();
+  });
+
+  it("shows no host-mode banner on a sandboxed deployment", async () => {
+    setupApi();
+    render(<App />);
+
+    await screen.findByText("Fix bug");
+    expect(screen.queryByText(/host mode/i)).not.toBeInTheDocument();
+  });
+
+  // Unlike the two above, this one is not an incident that will pass: it
+  // is true for the life of the deployment, so it stacks with whatever
+  // else is wrong rather than losing to it.
+  it("keeps the host-mode banner up alongside a dead reconcile loop", async () => {
+    setupApi();
+    const realImpl = api.getMockImplementation();
+    api.mockImplementation((path, opts) =>
+      path === "/api/config"
+        ? Promise.resolve({
+            ...config,
+            hostSandboxes: true,
+            reconcilerDown: true,
+          })
+        : realImpl(path, opts),
+    );
+
+    render(<App />);
+
+    expect(await screen.findByText(/host mode/i)).toBeInTheDocument();
+    expect(screen.getByText(/reconcile loop has stopped/i)).toBeInTheDocument();
   });
 
   // The banner's own "Resume now" -- an operator who has just topped a
@@ -1304,6 +1353,63 @@ describe("App", () => {
 
       expect(await screen.findByText("Fix bug")).toBeInTheDocument();
       expect(window.location.pathname + window.location.search).toBe("/");
+    });
+  });
+
+  // The phone shell (src/phone.js, PhoneNav.jsx). jsdom has no
+  // matchMedia at all, so every test above this one gets `false` from
+  // useMediaQuery and renders the rail beside the page, which is the
+  // layout a tablet and a desktop both keep -- these two stub the answer
+  // to say which shell each viewport gets.
+  describe("on a phone", () => {
+    function stubViewport(isPhone) {
+      window.matchMedia = (query) => ({
+        matches: query === PHONE_QUERY && isPhone,
+        media: query,
+        addEventListener: () => {},
+        removeEventListener: () => {},
+        addListener: () => {},
+        removeListener: () => {},
+      });
+    }
+
+    afterEach(() => {
+      delete window.matchMedia;
+      delete document.documentElement.dataset.phone;
+    });
+
+    it("puts the nav rail in a drawer behind a top bar, and closes it again on a tap", async () => {
+      stubViewport(true);
+      setupApi();
+      render(<App />);
+      await screen.findByText("Fix bug");
+
+      // The task list is on screen as usual; the rail is not, and the
+      // stylesheet has been told which shell this is.
+      expect(document.documentElement.dataset.phone).toBe("true");
+      expect(screen.queryByText("Settings")).toBeNull();
+
+      fireEvent.click(screen.getByRole("button", { name: "Open navigation" }));
+      expect(await screen.findByText("Settings")).toBeInTheDocument();
+
+      // The same rail, doing the same thing it does beside the page --
+      // and getting out of the way once it has done it.
+      fireEvent.click(screen.getByText("Board"));
+      expect(await screen.findByText("Queued")).toBeInTheDocument();
+      await waitFor(() => expect(screen.queryByText("Settings")).toBeNull());
+    });
+
+    it("keeps the rail beside the page on anything wider", async () => {
+      stubViewport(false);
+      setupApi();
+      render(<App />);
+      await screen.findByText("Fix bug");
+
+      expect(document.documentElement.dataset.phone).toBe("false");
+      expect(screen.getByText("Settings")).toBeInTheDocument();
+      expect(
+        screen.queryByRole("button", { name: "Open navigation" }),
+      ).toBeNull();
     });
   });
 
