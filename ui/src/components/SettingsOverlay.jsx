@@ -862,6 +862,26 @@ export default function SettingsOverlay({ onClose, onSaved, showError }) {
         )}
         {tab === "sandbox" && (
           <form onSubmit={submitSandbox}>
+            {/* grain/task-9: on a deployment running the default
+              host-directory sandboxing, these three numbers are stored
+              and shape nothing -- the daemon only hands a shape to a
+              backend that has one, and a directory on the daemon's own
+              machine does not. Said once, above the fields, rather than
+              three times in three helper texts; the fields stay editable
+              because the values are real and are what this deployment
+              would build VMs at if it were pointed at kontur.
+              Deliberately a warning rather than an info note: an
+              operator reading "2 vCPUs" here concludes runs are capped
+              at 2 when nothing caps them at all. */}
+            {settings.sandboxShapeIgnored && (
+              <Alert severity="warning" sx={{ mb: 2 }}>
+                Not in effect on this deployment: its sandboxes are directories
+                on the daemon&apos;s own machine, and a host-directory sandbox
+                has no CPU, memory or disk shape of its own -- a run here uses
+                whatever the host has. These are still saved, and would size a
+                kontur-managed sandbox VM.
+              </Alert>
+            )}
             <TextField
               name="sandboxCpus"
               label="Sandbox vCPUs"

@@ -29,7 +29,11 @@ import { formatDateTime } from "../time.js";
 //   - local only, which needs nothing from anybody: grain inits a
 //     repository under its data directory and commits to it forever.
 //     This is what a fresh install already has, so this pane is never a
-//     wall an operator has to get past before grain works.
+//     wall an operator has to get past before grain works. It is also
+//     the one mode with no copy of anything anywhere else, which is why
+//     it draws a warning below rather than only a chip: `grain state
+//     status` has said so at a terminal since it existed, and an
+//     operator who runs everything through this UI never sees that.
 //   - an existing repository, whose contents replace this installation's
 //     database when it is adopted.
 //   - an empty repository, which grain seeds from the database it has.
@@ -145,6 +149,28 @@ export default function StateRepoPanel({ showError }) {
         working tree: {status.dir}
       </Typography>
 
+      {status.mode !== "remote" && (
+        <Alert severity="warning" sx={{ mt: 2 }}>
+          Nothing here is backed up. This deployment&apos;s state repository is
+          local only, so every commit in it &mdash; the tasks, the settings, the
+          capabilities and the repo configuration &mdash; exists on this
+          host&apos;s disk and nowhere else, and so does{" "}
+          <code>{status.secretsKeyFile || "the secrets key"}</code>, which is
+          the one thing a redeploy cannot rebuild: a host that mints a fresh key
+          cannot read a secrets file restored beside it. Losing this disk loses
+          all of it, irrecoverably.
+          <Box component="div" sx={{ mt: 1 }}>
+            There are two ways out, and they cover different halves of it. Give
+            grain a remote &mdash; paste a repository URL below, or run{" "}
+            <code>grain state adopt -remote URL</code> &mdash; and every commit
+            after that is pushed somewhere this host is not. Keep a copy of the
+            key file itself off this host as well, because it is deliberately
+            never committed: seed it back on a later deploy with{" "}
+            <code>GRAIN_SECRETS_KEY</code>, or paste it into &ldquo;Import a
+            private key&rdquo; below.
+          </Box>
+        </Alert>
+      )}
       {status.remoteAhead && (
         <Alert severity="info" sx={{ mt: 2 }}>
           This repository holds a commit grain has not been able to take up

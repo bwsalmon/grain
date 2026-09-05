@@ -136,6 +136,43 @@ chmod 0440 /etc/sudoers.d/90-debian
 # not run yet.
 install -d -m0700 -o debian -g debian /home/debian/.ssh
 
+# --- Nested virtualization: the "kvm" group, so this account can use
+# /dev/kvm.
+#
+# A sandbox is a cloud-hypervisor guest, and a VM started inside one is a
+# nested VM. Three things have to line up for that to work, and only this
+# one is the guest image's to arrange:
+#
+#   - the machine underneath has to be running KVM with nesting enabled.
+#     A physical host does by default (kvm_intel/kvm_amd both ship
+#     nested=Y); a cloud VM only does if its own hypervisor gave this
+#     kernel hardware virtualization to pass on.
+#   - cloud-hypervisor has to leave the CPU's vmx/svm flag in the guest's
+#     CPUID. It does: "--cpus nested=" defaults to on in the version
+#     third_party/kontur pins (v53.0), where nested=off is the setting
+#     that *masks* the flag. Nothing in this repository passes it, so
+#     nothing has to be changed to get this -- confirmed by reading a
+#     real sandbox's /proc/cpuinfo, which carries vmx.
+#   - the guest has to load kvm_intel/kvm_amd and let this account open
+#     /dev/kvm. udev autoloads the module off the CPU's own feature bits,
+#     so that half happens by itself; the device it creates is root:kvm
+#     0660, which is this line.
+#
+# Without it a sandbox has a working /dev/kvm that the account every tool
+# call runs as cannot open -- confirmed by hand inside a real sandbox,
+# where a VM created as root ran fine and `head -c 0 /dev/kvm` as "debian"
+# was refused. The sandbox health pane reports exactly this distinction
+# ("denied" rather than "ready"; orchestrator.SandboxHealth.NestedVirt),
+# so an image built before this line says so rather than looking the same
+# as one built after it.
+#
+# The group is created if it is not already there. systemd's own
+# sysusers definitions make it on any guest with systemd installed, which
+# this one has, but a group grant that depends on that having happened
+# would fail the whole build for a reason well away from where it reads.
+getent group kvm >/dev/null || groupadd --system kvm
+usermod -aG kvm debian
+
 # --- Docker's bridge subnet, written BEFORE docker is installed.
 #
 # Docker's own default, 172.17.0.0/16, is not a guest-image choice -- it
@@ -465,9 +502,12 @@ booted, provisioned by scripts/kontur/guest-setup.sh and committed. See that
 directory's README.md for the pipeline.
 
 Added on top of kontur's own guest image:
-- the "debian" account (passwordless sudo, docker group) -- the account
-  -kontur-ssh-user names. No key is baked in: kontur generates one per VM
-  boot and authorizes it for the account konturctl's -guest-user names
+- the "debian" account (passwordless sudo, docker and kvm groups) -- the
+  account -kontur-ssh-user names. No key is baked in: kontur generates one
+  per VM boot and authorizes it for the account konturctl's -guest-user
+  names. The kvm group is what makes nested virtualization usable from a
+  dispatched task: /dev/kvm is root:kvm 0660, and the sandbox health pane
+  reports whether this account can actually open it
 - a systemd unit (grain-growfs) that grows the root filesystem onto the
   whole virtual disk on each boot, so a VM created with
   `konturctl vm create -disk-size-mb` actually has that space rather than

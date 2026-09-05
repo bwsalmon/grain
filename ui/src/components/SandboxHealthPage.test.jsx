@@ -173,6 +173,63 @@ describe("SandboxHealthPage", () => {
     expect(screen.getByRole("cell", { name: "t2-r1" })).toBeInTheDocument();
   });
 
+  it("says whether each sandbox can run VMs of its own, and whether the host allows it", async () => {
+    api.mockResolvedValueOnce({
+      enabled: true,
+      sandboxes: [
+        {
+          sandbox: "t1-r1",
+          backend: "kontur",
+          name: "g-t1-r1",
+          ready: true,
+          nestedVirt: "ready",
+        },
+        {
+          sandbox: "t2-r1",
+          backend: "kontur",
+          name: "g-t2-r1",
+          ready: true,
+          // The state a sandbox built from a guest image older than the
+          // kvm group grant is in: the device is there, the account
+          // cannot open it.
+          nestedVirt: "denied",
+        },
+        {
+          sandbox: "t3-r1",
+          backend: "kontur",
+          name: "g-t3-r1",
+          ready: true,
+          nestedVirt: "unsupported",
+        },
+        // No reading at all -- a host sandbox, whose "sandbox" is a
+        // directory and so has whatever the host has.
+        { sandbox: "t4-r1", backend: "host", name: "/tmp/s0", ready: true },
+      ],
+      host: {
+        loadAverage1: 0.5,
+        loadAverage5: 0.4,
+        loadAverage15: 0.3,
+        memoryUsedMB: 512,
+        memoryTotalMB: 1024,
+        nestedVirt: "enabled",
+        nestedVirtDetail: "kvm_intel nested=Y",
+      },
+    });
+    render(<SandboxHealthPage showError={() => {}} />);
+
+    expect(
+      await screen.findByRole("columnheader", { name: "Nested virt" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("yes")).toBeInTheDocument();
+    expect(screen.getByText("no access")).toBeInTheDocument();
+    expect(screen.getByText("no")).toBeInTheDocument();
+    // The host's own half of the question, which is what says whether an
+    // "unsupported" sandbox is the machine's doing or the VM's.
+    expect(
+      screen.getByText(/Nested virtualization: enabled \(kvm_intel nested=Y\)/),
+    ).toBeInTheDocument();
+  });
+
   it("shows a host error without hiding the sandbox list", async () => {
     api.mockResolvedValueOnce({
       enabled: true,
