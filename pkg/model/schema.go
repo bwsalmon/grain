@@ -651,6 +651,20 @@ var Tables = []string{
 	// grain_config. Empty adds nothing to a prompt, which is what every
 	// deployment did before this column existed. TEXT with no length of
 	// its own: it is prose for an agent, the same as task.body beside it.
+	//
+	// time_zone is Config.TimeZone's own column -- the IANA zone this
+	// deployment keeps its wall clock in, which is what a daily, weekly
+	// or monthly schedule's time of day is read against and what the UI
+	// prints every timestamp in. DEFAULT 'America/Los_Angeles'
+	// (model.DefaultTimeZone) both here and in
+	// Store.ensureConfigTimeZoneColumn for an already-created
+	// grain_config: unlike every column above it, the default is not the
+	// empty string, because a deployment upgrading across this column was
+	// keeping its clock in UTC by accident rather than by choice, and
+	// grain/task-368 is the decision that a deployment nobody has told
+	// otherwise runs on Pacific time. Empty is still read as that default
+	// (model.TimeZoneOrDefault) rather than as a zone of its own, so a
+	// row written by some other path stays on a defensible clock.
 	`CREATE TABLE IF NOT EXISTS ` + "`grain_config`" + ` (
   ` + "`id`" + `                         INTEGER NOT NULL,
   ` + "`poll_interval_ms`" + `           INTEGER NOT NULL,
@@ -678,6 +692,7 @@ var Tables = []string{
   ` + "`default_capabilities`" + `         TEXT    NOT NULL DEFAULT '',
   ` + "`environment_name`" + `             TEXT    NOT NULL DEFAULT '',
   ` + "`prompt_extension`" + `             TEXT    NOT NULL DEFAULT '',
+  ` + "`time_zone`" + `                    TEXT    NOT NULL DEFAULT 'America/Los_Angeles',
   PRIMARY KEY (` + "`id`" + `)
 )`,
 

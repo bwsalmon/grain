@@ -243,8 +243,8 @@ func StaticFramework(f agent.Framework) func(context.Context, string) (agent.Fra
 // cancelled context means the daemon is shutting down rather than that
 // one reconciler has a problem the others might not.
 //
-// deps.MaxWorkers, deps.MaxMergers, deps.Config.MaxAgentTurns and
-// deps.Config.PromptExtension are
+// deps.MaxWorkers, deps.MaxMergers, deps.Config.MaxAgentTurns,
+// deps.Config.PromptExtension and deps.Config.TimeZone are
 // refreshed from deps.Store's own grain_config row (if any) before any
 // reconciler runs, so a change made through the store -- `grain
 // settings`, or the UI's Settings page -- takes effect on this cycle
@@ -298,6 +298,7 @@ func RunCycle(ctx context.Context, deps Deps, now time.Time) error {
 			deps.MaxWorkers, deps.MaxMergers = mc.MaxWorkers, mc.MaxMergers
 			deps.Config.MaxAgentTurns = mc.MaxAgentTurns
 			deps.Config.PromptExtension = mc.PromptExtension
+			deps.Config.TimeZone = mc.TimeZone
 		}
 	}
 	var errs []error

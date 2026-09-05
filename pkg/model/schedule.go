@@ -26,9 +26,14 @@ const (
 )
 
 // Recurrence is a schedule's cadence. TimeOfDay, Weekday and DayOfMonth
-// are always read against UTC -- docs/schedules.md's "no per-schedule
-// timezone" limit on the old plain-interval version applies again here,
-// just against a wall clock instead of a duration.
+// are read against the deployment's own wall clock -- the zone
+// Config.TimeZone names, handed to Next as a *time.Location by whoever
+// fires the schedule (orchestrator.reconcileSchedule). They were always
+// read against UTC until grain/task-368, which is docs/schedules.md's
+// "no per-schedule timezone" limit taken one step too far: there is
+// still no zone *per schedule*, and deliberately so, but a deployment
+// whose operator is in California should not have to write 17:00 to mean
+// nine in the morning.
 type Recurrence struct {
 	Kind RecurrenceKind
 
@@ -39,8 +44,9 @@ type Recurrence struct {
 	// granularity, and it is what bwsalmon/agents#464 itself asks for.
 	EveryNHours int
 
-	// TimeOfDay is minutes since UTC midnight (0-1439) -- only set when
-	// Kind is RecurrenceDaily, RecurrenceWeekly or RecurrenceMonthly.
+	// TimeOfDay is minutes since midnight (0-1439) on the deployment's
+	// own wall clock -- only set when Kind is RecurrenceDaily,
+	// RecurrenceWeekly or RecurrenceMonthly.
 	TimeOfDay int
 
 	// Weekday is only set when Kind is RecurrenceWeekly.
@@ -98,15 +104,27 @@ func validTimeOfDay(minutes int) error {
 // "NextRunAt.Add(Interval)" loop already had, generalized to cadences a
 // fixed duration cannot express (a calendar month is not a fixed number
 // of hours).
-func (r Recurrence) Next(after time.Time) time.Time {
-	after = after.UTC()
+//
+// loc is the wall clock the three calendar cadences are read against --
+// the deployment's own Config.Location(). Nil is UTC, which is what all
+// three meant before a deployment had a zone at all, so a caller with no
+// configuration to hand still gets a defined answer.
+// RecurrenceEveryNHours ignores it entirely: adding N hours to an
+// instant lands on the same instant in every zone, daylight saving
+// included, which is exactly the difference between "every 24 hours" and
+// "daily at 09:00".
+func (r Recurrence) Next(after time.Time, loc *time.Location) time.Time {
+	if loc == nil {
+		loc = time.UTC
+	}
+	after = after.In(loc)
 	switch r.Kind {
 	case RecurrenceDaily:
-		return nextDaily(after, r.TimeOfDay)
+		return nextDaily(after, r.TimeOfDay, loc)
 	case RecurrenceWeekly:
-		return nextWeekly(after, r.Weekday, r.TimeOfDay)
+		return nextWeekly(after, r.Weekday, r.TimeOfDay, loc)
 	case RecurrenceMonthly:
-		return nextMonthly(after, r.DayOfMonth, r.TimeOfDay)
+		return nextMonthly(after, r.DayOfMonth, r.TimeOfDay, loc)
 	case RecurrenceEveryNHours:
 		every := time.Duration(r.EveryNHours) * time.Hour
 		if every <= 0 {
@@ -120,33 +138,43 @@ func (r Recurrence) Next(after time.Time) time.Time {
 	}
 }
 
-func atTimeOfDay(day time.Time, timeOfDay int) time.Time {
+// atTimeOfDay is day's own date at timeOfDay, on loc's wall clock. On
+// the two days a year a zone with daylight saving has no such wall-clock
+// time, or two of them, time.Date resolves it the way it resolves every
+// other impossible or ambiguous date -- 02:30 on a spring-forward
+// morning comes out as 03:30 -- so a schedule set for an hour that does
+// not exist that day fires once, an hour late, rather than not at all.
+func atTimeOfDay(day time.Time, timeOfDay int, loc *time.Location) time.Time {
 	y, m, d := day.Date()
-	return time.Date(y, m, d, timeOfDay/60, timeOfDay%60, 0, 0, time.UTC)
+	return time.Date(y, m, d, timeOfDay/60, timeOfDay%60, 0, 0, loc)
 }
 
-func nextDaily(after time.Time, timeOfDay int) time.Time {
-	candidate := atTimeOfDay(after, timeOfDay)
+// nextDaily walks whole days on loc's calendar rather than adding 24
+// hours: AddDate keeps the wall-clock time it started from, so "daily at
+// 09:00" stays at 09:00 across the two days a year that are 23 or 25
+// hours long.
+func nextDaily(after time.Time, timeOfDay int, loc *time.Location) time.Time {
+	candidate := atTimeOfDay(after, timeOfDay, loc)
 	if !candidate.After(after) {
 		candidate = candidate.AddDate(0, 0, 1)
 	}
 	return candidate
 }
 
-func nextWeekly(after time.Time, weekday time.Weekday, timeOfDay int) time.Time {
-	candidate := atTimeOfDay(after, timeOfDay)
+func nextWeekly(after time.Time, weekday time.Weekday, timeOfDay int, loc *time.Location) time.Time {
+	candidate := atTimeOfDay(after, timeOfDay, loc)
 	for candidate.Weekday() != weekday || !candidate.After(after) {
 		candidate = candidate.AddDate(0, 0, 1)
 	}
 	return candidate
 }
 
-func nextMonthly(after time.Time, dayOfMonth, timeOfDay int) time.Time {
+func nextMonthly(after time.Time, dayOfMonth, timeOfDay int, loc *time.Location) time.Time {
 	y, m, _ := after.Date()
-	candidate := monthlyOccurrence(y, m, dayOfMonth, timeOfDay)
+	candidate := monthlyOccurrence(y, m, dayOfMonth, timeOfDay, loc)
 	if !candidate.After(after) {
 		y, m = addMonth(y, m)
-		candidate = monthlyOccurrence(y, m, dayOfMonth, timeOfDay)
+		candidate = monthlyOccurrence(y, m, dayOfMonth, timeOfDay, loc)
 	}
 	return candidate
 }
@@ -164,13 +192,13 @@ func addMonth(y int, m time.Month) (int, time.Month) {
 // at timeOfDay -- time.Date's own month-overflow semantics would instead
 // roll a too-large day into the following month, which is exactly the
 // drift clamping avoids.
-func monthlyOccurrence(y int, m time.Month, dayOfMonth, timeOfDay int) time.Time {
-	lastDay := time.Date(y, m+1, 0, 0, 0, 0, 0, time.UTC).Day()
+func monthlyOccurrence(y int, m time.Month, dayOfMonth, timeOfDay int, loc *time.Location) time.Time {
+	lastDay := time.Date(y, m+1, 0, 0, 0, 0, 0, loc).Day()
 	day := dayOfMonth
 	if day > lastDay {
 		day = lastDay
 	}
-	return time.Date(y, m, day, timeOfDay/60, timeOfDay%60, 0, 0, time.UTC)
+	return time.Date(y, m, day, timeOfDay/60, timeOfDay%60, 0, 0, loc)
 }
 
 // Schedule is what a human sets up once and grain refiles as a real

@@ -198,6 +198,7 @@ type settingsDiffRow struct {
 // something has to say what.
 var settingsDiffRows = []settingsDiffRow{
 	{"environmentName", "environment name", func(s ui.Settings) any { return s.EnvironmentName }},
+	{"timeZone", "time zone", func(s ui.Settings) any { return s.TimeZone }},
 	{"pollInterval", "poll interval", func(s ui.Settings) any { return s.PollInterval }},
 	{"maxWorkers", "max workers", func(s ui.Settings) any { return s.MaxWorkers }},
 	{"maxMergers", "max mergers", func(s ui.Settings) any { return s.MaxMergers }},

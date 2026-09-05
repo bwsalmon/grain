@@ -295,6 +295,29 @@ type Config struct {
 	// trims it so a stray space is not the difference between named and
 	// unnamed.
 	EnvironmentName string
+	// TimeZone is the wall clock this deployment keeps: an IANA zone
+	// name ("America/Los_Angeles"), or empty for DefaultTimeZone --
+	// timezone.go has the whole reading of it, and Location() is how it
+	// is used.
+	//
+	// A daemon runs in a container with no zone of its own, so before
+	// this existed everything grain computed against a wall clock was
+	// computed against UTC: a schedule set for "daily at 09:00" fired at
+	// 01:00 or 02:00 where its operator was, and every timestamp the UI
+	// printed was in whatever zone the browser happened to be in --
+	// which is not the same clock the daemon was firing against, so the
+	// two could not be compared. This is the one answer both halves now
+	// read (orchestrator.reconcileSchedule for when a schedule fires,
+	// GET /api/config for what the UI prints), so the deployment has a
+	// single clock instead of one per reader.
+	//
+	// Changing it retimes the *next* occurrence of every wall-clock
+	// schedule rather than rewriting the ones already computed: a
+	// schedule's NextRunAt is a stored instant, and advanceSchedule
+	// re-derives the one after it in whatever zone is configured when it
+	// fires. So a deployment that moves zone fires one more time on the
+	// old clock and settles onto the new one after that.
+	TimeZone string
 	// DefaultCapabilities is the set of capability ids a new task is
 	// filed holding, by id -- the deployment-wide answer to "what should
 	// every task here start out able to do", and the reason gcp-key need
@@ -354,7 +377,7 @@ type Config struct {
 }
 
 // DefaultConfig is the configuration a deployment that has never chosen
-// one runs: every field's own zero value, except the three whose default
+// one runs: every field's own zero value, except the four whose default
 // is not it.
 //
 // Every path that builds a Config with nothing stored behind it starts
@@ -371,6 +394,7 @@ func DefaultConfig() Config {
 		ApprovedByDefault:  true,
 		AutoMergeByDefault: true,
 		MaxMergers:         DefaultMaxMergers,
+		TimeZone:           DefaultTimeZone,
 	}
 }
 

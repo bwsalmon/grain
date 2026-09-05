@@ -179,6 +179,75 @@ func TestUpdateSettingsRoundTripsEnvironmentName(t *testing.T) {
 	}
 }
 
+// TestUpdateSettingsRoundTripsTimeZone is grain/task-368's clock: a
+// deployment that has never chosen one reads back model.DefaultTimeZone
+// rather than the empty string it stores, choosing another sticks, and
+// clearing the field puts the default back rather than leaving the
+// deployment with no zone at all.
+func TestUpdateSettingsRoundTripsTimeZone(t *testing.T) {
+	c, _, ctx := testClient(t)
+	if _, err := c.UpdateSettings(ctx, firstSettings()); err != nil {
+		t.Fatal(err)
+	}
+
+	read, err := c.GetSettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if read.TimeZone != model.DefaultTimeZone {
+		t.Fatalf("TimeZone = %q with nothing set, want %q", read.TimeZone, model.DefaultTimeZone)
+	}
+
+	// Trimmed on the way in, the same as environmentName above.
+	zone := "  Europe/Berlin  "
+	if _, err := c.UpdateSettings(ctx, ui.UpdateSettingsRequest{TimeZone: &zone}); err != nil {
+		t.Fatal(err)
+	}
+	read, err = c.GetSettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if read.TimeZone != "Europe/Berlin" {
+		t.Fatalf("TimeZone = %q after UpdateSettings, want %q", read.TimeZone, "Europe/Berlin")
+	}
+
+	cleared := ""
+	if _, err := c.UpdateSettings(ctx, ui.UpdateSettingsRequest{TimeZone: &cleared}); err != nil {
+		t.Fatal(err)
+	}
+	read, err = c.GetSettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if read.TimeZone != model.DefaultTimeZone {
+		t.Fatalf("TimeZone = %q after clearing, want %q", read.TimeZone, model.DefaultTimeZone)
+	}
+}
+
+// A zone name nothing resolves is refused while whoever typed it is
+// still looking at it, rather than stored and silently fallen back from
+// -- a deployment whose pane says one clock and whose schedules fire on
+// another is exactly what this setting exists to end.
+func TestUpdateSettingsRejectsAnUnknownTimeZone(t *testing.T) {
+	c, _, ctx := testClient(t)
+	if _, err := c.UpdateSettings(ctx, firstSettings()); err != nil {
+		t.Fatal(err)
+	}
+	for _, bad := range []string{"Mars/Olympus_Mons", "PST", "Local"} {
+		zone := bad
+		if _, err := c.UpdateSettings(ctx, ui.UpdateSettingsRequest{TimeZone: &zone}); err == nil {
+			t.Errorf("UpdateSettings accepted timeZone %q, want a validation error", bad)
+		}
+		read, err := c.GetSettings(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if read.TimeZone != model.DefaultTimeZone {
+			t.Fatalf("TimeZone = %q after a refused save, want %q", read.TimeZone, model.DefaultTimeZone)
+		}
+	}
+}
+
 // TestUpdateSettingsRejectsUnrenderableEnvironmentName pins the two
 // bounds on what is otherwise free text: it is rendered as a badge in
 // the sidebar and appended to the tab title, so a pasted paragraph or an

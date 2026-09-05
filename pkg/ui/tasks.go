@@ -514,6 +514,20 @@ type configResponse struct {
 	// unlike ui.Settings there is nothing here to merge a cleared value
 	// over -- App.jsx replaces this response wholesale on every poll.
 	EnvironmentName string `json:"environmentName,omitempty"`
+	// TimeZone mirrors model.Config.TimeZone -- the IANA zone this
+	// deployment keeps its wall clock in -- read from the store the same
+	// way EnvironmentName above is, and never empty: a deployment with
+	// no row yet, or a row written before the column existed, reports
+	// model.DefaultTimeZone.
+	//
+	// It rides on this response rather than on GET /api/settings alone
+	// for a stronger reason than the name above it: every timestamp the
+	// frontend prints is formatted in this zone (ui/src/time.js), on
+	// every view, from the first paint. Reading it from Settings would
+	// mean every screen showed the browser's own zone until somebody
+	// opened Settings -- which is the bug this setting exists to fix,
+	// only intermittently.
+	TimeZone string `json:"timeZone"`
 	// Version is which build of grain is answering -- the commit this
 	// binary was stamped with and when it was made (version.go, over
 	// pkg/version). It rides here for the same reason EnvironmentName
@@ -687,9 +701,11 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	// config is the built-in default, not the zero value beside it.
 	def := model.DefaultConfig()
 	resp.ApprovedByDefault, resp.AutoMergeByDefault = def.ApprovedByDefault, def.AutoMergeByDefault
+	resp.TimeZone = def.TimeZone
 	if cfg != nil {
 		resp.ShowClosedByDefault = cfg.ShowClosedByDefault
 		resp.EnvironmentName = cfg.EnvironmentName
+		resp.TimeZone = model.TimeZoneOrDefault(cfg.TimeZone)
 		resp.ApprovedByDefault = cfg.ApprovedByDefault
 		resp.AutoMergeByDefault = cfg.AutoMergeByDefault
 		resp.NewestFirst = cfg.NewestFirst

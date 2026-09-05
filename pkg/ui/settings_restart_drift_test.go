@@ -58,6 +58,7 @@ var settingsAppliedLive = map[string]string{
 	"approvedByDefault":      "pkg/ui, which reads grain_config per request",
 	"autoMergeByDefault":     "pkg/ui, which reads grain_config per request",
 	"environmentName":        "pkg/ui, which reads grain_config per request (GET /api/config's own copy)",
+	"timeZone":               "orchestrator.RunCycle's own per-cycle re-read (when a wall-clock schedule fires), and pkg/ui per request (GET /api/config's own copy, which is what the frontend formats every timestamp against)",
 }
 
 func TestEverySettingIsEitherAppliedLiveOrRestartOnly(t *testing.T) {
