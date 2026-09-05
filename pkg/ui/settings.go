@@ -85,6 +85,11 @@ type Settings struct {
 	// empty when Config.Credentials is nil (nothing to check against),
 	// which reads from JSON exactly like "no gaps found" -- there is
 	// nothing actionable to tell those two cases apart on.
+	//
+	// Rendered on Settings -> GitHub (grain/task-16), beside the ladder
+	// form that closes such a gap: this is the only place that knows
+	// both halves of the question, since /api/github-tokens reports the
+	// ladder and nothing about which repos a task may target.
 	TargetReposMissingCredentials []string `json:"targetReposMissingCredentials,omitempty"`
 	// NewestFirst is model.Config's own field of the same name
 	// (bwsalmon/agents#476): false, the default, files a new task at the

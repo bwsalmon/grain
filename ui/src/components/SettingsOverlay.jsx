@@ -841,8 +841,23 @@ export default function SettingsOverlay({ onClose, onSaved, showError }) {
               not deployment settings saved with that button -- each one
               is written the moment it is added (grain/task-137), the
               same way the agent credentials on the Agents tab are, and a
-              stray Enter in one of its fields must not save this tab. */}
-            <GitHubTokensSection showError={showError} />
+              stray Enter in one of its fields must not save this tab.
+
+              targetReposMissingCredentials is passed down rather than
+              fetched there: that section reads /api/github-tokens, which
+              knows the ladder but not the target repo allowlist, and the
+              gap between the two is only computed here
+              (ui.Settings.TargetReposMissingCredentials). It is re-read
+              after every credential change (reloadSettings), since the
+              form that closes such a gap is the very one it is shown
+              beside. */}
+            <GitHubTokensSection
+              showError={showError}
+              targetReposMissingCredentials={
+                settings.targetReposMissingCredentials
+              }
+              onLadderChanged={reloadSettings}
+            />
           </>
         )}
         {tab === "sandbox" && (
