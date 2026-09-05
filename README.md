@@ -3948,6 +3948,44 @@ against — `ui.UpdateSettings` only trims it (so a stray space is not the
 difference between named and unnamed) and bounds it to 32 runes with no
 line breaks, which is what it takes for a badge to stay a badge.
 
+### What time it is here
+
+`model.Config.TimeZone` (grain/task-368) is the wall clock a deployment
+keeps — an IANA zone name, defaulting to `America/Los_Angeles` and
+backfilled to it for a deployment upgrading across the column. Before it
+existed there was no such answer: the daemon runs in a container with no
+zone of its own, so every wall-clock computation was done against UTC. A
+schedule set for "daily at 09:00" fired at two in the morning where its
+operator is, and every timestamp the UI printed was in whatever zone the
+*browser* was in — a different clock from the one the daemon was firing
+against, so the two could not be compared.
+
+Both halves read the one setting now. `model.Recurrence.Next` takes a
+`*time.Location`, which `orchestrator.reconcileSchedule` resolves once
+per cycle from the `grain_config` row `RunCycle` already refreshes — so
+changing the zone retimes the next occurrence of every schedule rather
+than waiting for a restart. A zone name rather than a fixed offset,
+because the point is that a schedule keeps its wall-clock time across
+daylight saving instead of sliding an hour: `nextDaily` walks whole days
+on that calendar (`AddDate`, which preserves the time of day) rather
+than adding 24 hours. `RecurrenceEveryNHours` is the deliberate
+exception — a duration between instants is the same duration in every
+zone, which is exactly how "every 24 hours" differs from "daily at
+09:00". `pkg/model` imports `time/tzdata`, so a zone resolves the same
+inside a slimmed container image as on a laptop.
+
+The frontend reads it off `GET /api/config` (like `environmentName`
+above, and for a stronger reason: every screen prints times from the
+first paint), hands it down through `TimeZoneContext`, and formats every
+absolute time through `ui/src/time.js` against it. Settings' General tab
+is where it is chosen, from `Intl.supportedValuesOf("timeZone")`, and the
+schedule form's time field is labelled with the zone and its current
+abbreviation rather than the flat "UTC" it used to claim.
+`ui.UpdateSettings` validates the name against the zone database this
+build carries, so a typo is refused while whoever typed it is still
+looking at it rather than leaving the pane showing one clock and the
+daemon firing on another.
+
 ### A capability can be ready and still ungrantable
 
 The Settings pane's Capabilities tab answers "would this capability work
