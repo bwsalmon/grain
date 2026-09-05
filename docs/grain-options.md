@@ -10,9 +10,11 @@ It exists so that a decision is not re-litigated from scratch, and so that
 
 ## Poll versus push
 
-Four options for how the controller learns a grain's state:
+Five options for how the controller learns a grain's state:
 
-1. **Poll via exec** — `grain status` per grain per tick. *Chosen.*
+1. **Poll via exec** — `grain status` per grain per tick. Chosen first,
+   then reduced to a fallback, then deleted; see below and "Removing the
+   status exec".
 2. **Push with a credential** — the shim holds a token and posts to the
    daemon's REST API. This is what grain does today for `update_status`,
    `open_pull_request` and `recreate_sandbox`.
@@ -20,6 +22,18 @@ Four options for how the controller learns a grain's state:
    transport with push semantics.
 4. **Poll via shared volume** — the shim writes `status.json` to a
    hostPath the controller reads directly.
+5. **Status records on the container log stream**, read with the runtime's
+   own listing. ***Chosen.*** Not on the table at first, because the log
+   stream was scoped to the trajectory; it arrived once the trajectory
+   moved there and the question "why is this a second channel?" had an
+   obvious answer.
+
+Option 5 keeps everything that made option 1 right — the controller
+reaches in, the grain never dials out, each read is a whole snapshot — and
+drops the one thing that made it cost something, a process per grain per
+tick. The reasoning below is written against option 1 because that is what
+it was written to defend; every argument in it is an argument for the
+direction rather than for the exec, so it carries over unchanged.
 
 **Push forces NAT, and the network decision deliberately keeps flat
 available.** Under flat the splice steals the container's ingress, so it
@@ -72,16 +86,23 @@ finished deleting.
 
 ### Transport is not the interface
 
-`Observe` says nothing about how a status is fetched, which leaves option 4
-available as an implementation detail. On the docker backend the controller
-and its grains share a host, so reading a hostPath is strictly cheaper than
-a `docker exec` with identical semantics; it stops working across nodes.
+`List` says nothing about how state is gathered, which is why option 5
+could replace option 1 without the interface moving, and why option 4
+stays available underneath it. On the docker backend the controller and
+its grains share a host, so a hostPath is strictly cheaper than the log
+API with identical semantics; it stops working across nodes.
 `KonturGrains` may choose it; nothing above it needs to know.
+
+That the read went from a process per grain per tick to two calls per
+tick, with no signature change but `Observe`'s removal, is the property
+working.
 
 ## Why the control channel is not itself MCP
 
-The traffic is MCP tool calls and grain already speaks MCP, so it is fair
-to ask why this is a CLI.
+Asked when the controller still called into the shim: the traffic looked
+like MCP tool calls and grain already speaks MCP, so why was it a CLI?
+Kept because the reasoning is what eventually removed the channel
+altogether rather than choosing a protocol for it.
 
 **MCP assumes a session; `Reconcile` assumes there is not one.** MCP's
 transports — stdio and Streamable HTTP — open with an `initialize`
@@ -99,13 +120,18 @@ two parties, which is what that decision removed.
 | | shape | protocol |
 | --- | --- | --- |
 | agent ↔ shim | one session for the run's life | **MCP** (`pkg/mcp`, unchanged) |
-| controller ↔ shim | independent level-triggered calls | the CLI |
+| controller ↔ shim | no calls at all | a stream and a listing |
 
-What MCP has that we would otherwise have invented is already taken from
-elsewhere or better as it is: version negotiation is the wire version plus
-image labels (Kubernetes' string form rather than `initialize`'s); error
-codes are exit codes, which `docker exec` propagates for free and which we
-need anyway to tell exec-failed from shim-failed; progress notifications
+The second row started as "independent level-triggered calls, the CLI" and
+got shorter twice — first when status moved onto the log stream, then when
+the fallback exec went too ("And then the fallback went too", below). The
+argument against MCP there is now moot in the strongest way: there is no
+channel to choose a protocol for.
+
+What MCP would have contributed is taken from elsewhere anyway: version
+negotiation is the wire version plus image labels (Kubernetes' string form
+rather than `initialize`'s); error codes are `grain run`'s own exit code,
+which the runtime reports in the container status; progress notifications
 are the container log stream, which survives a disconnected controller and
 replays from `--since`.
 
@@ -421,11 +447,42 @@ records make `List` exec-free in the steady state, stay level-triggered
 because each is a full snapshot, and keep absence meaningful because
 container state still comes from the runtime listing.
 
-`grain status` stays as the fallback rather than being deleted — it costs
-one subcommand of a binary that already exists and buys the ability to ask
-when a stream has gone stale. Honestly, it is less independent than it
-looks: on Kubernetes exec and logs both go through the API server and
-largely fail together, so it is a genuine second route only under docker.
+### And then the fallback went too
+
+`grain status` survived the first pass as a fallback — one subcommand of a
+binary that exists anyway, buying the ability to ask when a stream had
+gone stale. Removed on a second look, because the honesty in the paragraph
+that justified it was doing all the work:
+
+- **It is not a second route where it matters.** On Kubernetes exec and
+  logs both go through the API server and largely fail together. Under
+  docker it is genuinely independent, so this is a fallback for one
+  backend.
+- **It cannot report the state it exists for.** The same shim answers, so
+  a wedged one returns a stale document or hangs. "Container listed,
+  nothing recent on the stream" already names that condition, and names it
+  without waiting for a timeout.
+- **It made the split inexact.** With two channels, `Health.Container` and
+  `ID` could plausibly be filled by either. With one, they are definitively
+  the backend's, filled from the listing — and now asserted
+  (`TestAGrainReportsNeitherItsNameNorItsReachability`), because a grain
+  reporting its own reachability states the fact its answering proved.
+
+**What it costs**, stated plainly: after log rotation drops the last
+status record, a controller waits up to one heartbeat to learn a phase
+rather than asking. Bounded by a knob, which is a better home for that
+tradeoff than a channel.
+
+**What would reopen it**: a heartbeat slow enough that the wait hurts, or
+a backend whose log stream is materially less reliable than its exec. Both
+are measurable, and neither is true of docker or the kubelet today.
+
+**What it bought** is larger than the deletion: with no call into a grain,
+a grain has no inbound surface at all. Its input is environment and files
+fixed at create; its output is stdout and the termination log. Nothing to
+authenticate, nothing to version as an API, nothing that can hang — and
+`Grains`/`Grain` becomes container-runtime operations end to end, with
+zero methods that reach a shim.
 
 ## Can stdout and stderr be told apart?
 

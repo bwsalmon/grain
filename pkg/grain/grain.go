@@ -57,18 +57,25 @@
 //
 // # Why polling
 //
-// Every method here is idempotent, none blocks on the work, and Observe
-// returns the whole of what can be seen rather than a delta. The
-// controller compares that answer to what it wants and issues at most one
-// round of actions per tick (Reconcile). Level-triggered, the same
-// discipline orchestrator.Reconciler already states: running one is
-// always safe and skipping one costs latency rather than correctness.
+// Every method here is idempotent, none blocks on the work, and what a
+// controller reads is a whole snapshot rather than a delta. It compares
+// that to what it wants and issues at most one round of actions per tick
+// (Reconcile). Level-triggered, the same discipline
+// orchestrator.Reconciler already states: running one is always safe and
+// skipping one costs latency rather than correctness.
 //
-// The direction matters as much as the shape. The controller reaches in;
-// the grain never reaches out. A grain that cannot be polled is a grain
-// that has failed, which is a state the controller can act on -- as
-// against a grain whose push failed, which is silence it cannot tell from
-// health.
+// What is polled is the container runtime, not the grain. Nothing here is
+// a call into a shim: a grain's whole output is the records it writes to
+// stdout and the file it leaves at FileTerminationLog, and its whole
+// input arrives before it starts, as environment and files. It has no
+// inbound surface at all -- nothing to authenticate, nothing to version
+// as an API, and nothing that can hang.
+//
+// The direction still matters as much as the shape. The controller
+// reaches in; the grain never reaches out. A grain that has stopped
+// producing records while its container is still listed is a wedged shim,
+// which is a state the controller can act on -- as against a grain whose
+// push failed, which is silence it cannot tell from health.
 package grain
 
 import "context"
@@ -102,14 +109,20 @@ type Grains interface {
 	// It is served from two things a controller reads anyway: the
 	// container runtime's own listing, for which grains exist and whether
 	// each is running, and the log stream each one is already tailed for,
-	// whose latest KindStatus record is that grain's state. So the
-	// steady state costs no exec per grain at all -- Observe is what a
-	// controller falls back to when a grain has gone quiet and it wants a
-	// fresh answer rather than the last one the grain chose to give.
+	// whose latest KindStatus record is that grain's state. Those two are
+	// the whole of it -- there is no third read and no exec, so a tick
+	// costs the same whether the fleet is healthy or not.
+	//
+	// The backend is what merges them, which is why a Status coming back
+	// from here carries fields no grain emits: ID, from the container the
+	// record was read out of, and Health.Container, from the listing. A
+	// grain cannot report that it is unreachable.
 	//
 	// A grain whose container is running and whose stream has nothing
 	// recent is not a gap in this: it is a wedged shim, which is a state
-	// worth being able to see.
+	// worth being able to see, and one an exec could not have told apart
+	// -- whatever a status subcommand printed would come from the same
+	// wedged shim.
 	List(ctx context.Context) ([]Status, error)
 
 	// Get re-attaches to one grain by name.
@@ -126,20 +139,6 @@ type Grains interface {
 // is one to kill, and Policy.MaxRebuilds is where that is decided.
 type Grain interface {
 	ID() ID
-
-	// Observe asks a grain for its state directly. It is the same
-	// document List reads off the log stream, and exists for when that
-	// stream has gone stale: a controller that wants a fresh answer
-	// rather than the last one a grain chose to emit.
-	//
-	// Fat by design -- one call, one round trip, everything -- because a
-	// field left out here is a second exec on the path that is already
-	// the expensive one.
-	//
-	// Less independent than it looks on Kubernetes, where exec and logs
-	// both go through the API server and largely fail together. It is
-	// genuinely a second route only under docker.
-	Observe(ctx context.Context) (Status, error)
 
 	// Transcript reads this run's trajectory from a cursor -- the
 	// sequence number of the last record the caller saw, Status.Seq's own

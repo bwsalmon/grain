@@ -11,8 +11,9 @@
 Everything below follows from that sentence, and it has two faces that
 should not be confused. Facing its agent, a grain is an ordinary MCP
 server over stdio, and everything it serves is about the sandbox. Facing
-its controller, it is polled and answers questions; it never dials out,
-holds nothing open, and does not know a controller exists.
+its controller, it is read rather than called: it emits records and is
+listed, never dials out, holds nothing open, answers no questions, and
+does not know a controller exists.
 
 ## What runs today
 
@@ -44,7 +45,9 @@ boots, with the shim as PID 1 holding them together.
 │  holds: credential, prompt, setup,       │   builds, tests  │
 │         tools, placements                │                  │
 └─────────────────────────────────────────────────────────────┘
-        ▲ docker exec / kubectl exec — the controller's only route in
+        │ stdout: trajectory + status records — the only route out
+        ▼ and there is no route in: the controller creates, lists,
+          tails and destroys, and never calls
 ```
 
 The agent is in the container; the sandbox is the guest, one vsock hop
@@ -210,7 +213,7 @@ CHV_CPUS=2  CHV_MEMORY_MB=8192  CHV_DISK_SIZE_MB=30720
 
 There is **no configure step**: a container starts knowing what it is, so
 there is no window between create and configure for a failure to fall
-into, and no "not configured yet" for a poll to mean.
+into, and no "not configured yet" for a first status to mean.
 
 The file half is delivered by whatever the backend already has. On
 Kubernetes a Secret or ConfigMap volume **is** this model —
@@ -249,17 +252,15 @@ setup tried to do.
 the VMM as a child and kontur parses its own configuration, so a `Shape`
 passes straight through in kontur's vocabulary.
 
-## Poll for state, logs for the trajectory
+## The log stream is the whole read
 
-> **Snapshot state → exec poll. Append-only stream → container logs.**
+> **Everything a grain says, it says on stdout. There is no call into it.**
 
-Both are the controller reaching in; the grain never dials out.
-
-**State rides the same stream.** The shim emits its whole `Status` as a
-`kind: "status"` record, so `List` is served from two things a controller
-reads anyway — the runtime's own container listing, for which grains exist
-and whether each is running, and the log tail it already follows for the
-trajectory. **In the steady state that is no exec per grain at all.**
+The shim emits its whole `Status` as a `kind: "status"` record on the same
+stream that carries the trajectory, so `List` is served from two things a
+controller reads anyway — the runtime's own container listing, for which
+grains exist and whether each is running, and the log tail it already
+follows. **That is the whole of it: no exec, ever, healthy or not.**
 
 A full snapshot rather than a delta, so this stays level-triggered — the
 property `Reconcile` rests on — and absence stays meaningful: container
@@ -271,12 +272,23 @@ Emitted **on change plus a slow heartbeat**, never on a fast fixed
 interval: the kubelet rotates at 10 MB across 5 files, and status records
 would otherwise eat the budget the trajectory needs.
 
-`grain status` remains as the fallback — for when a stream has gone stale
-and the controller wants a fresh answer rather than the last one a grain
-chose to give. Worth being honest that it is less independent than it
-looks on Kubernetes, where exec and logs both go through the API server
-and largely fail together; it is genuinely a second route only under
-docker.
+**`grain status` is gone, and with it the last call into a grain.** It
+survived for a while as a fallback for a stale stream, and it did not earn
+its keep: on Kubernetes exec and logs both go through the API server and
+largely fail together, so it was a second route only under docker — and
+even there it is the *same shim* answering, so a wedged one returns a
+stale answer or hangs rather than a fresh answer. The state it was meant
+to rescue is exactly the state it cannot report.
+
+The cost is real and bounded: after log rotation loses the last status
+record, a controller waits up to one heartbeat to learn a grain's phase
+instead of asking. That is the heartbeat interval's job, and a knob is a
+better place for that tradeoff than a second channel.
+
+What falls out is that **a grain has no inbound surface at all.** Its
+input arrives before it starts, as environment and files; its output is
+records on stdout and a file at `/dev/termination-log`. Nothing to
+authenticate, nothing to version as an API, nothing that can hang.
 
 A grain the controller cannot reach at all is `PhaseLost`, with a rule for
 it; a grain that stopped *pushing* would be silence indistinguishable from
@@ -308,47 +320,57 @@ Three things fall out:
 
 ## The wire
 
-The transport is the container runtime, so each call is one process: argv
-in, JSON on stdout, an exit code back. What has to stay stable is **a CLI,
-not an RPC schema** — `pkg/grain`'s Go types are the controller-side
-facade; the CLI is what crosses between the daemon binary and the sandbox
-image.
+The transport is the container runtime, and nothing calls into a grain, so
+what has to stay stable is **an input tree and an output format, not an
+RPC schema** — `pkg/grain`'s Go types are the controller-side facade; the
+environment, the files under `/grain` and the records on stdout are what
+cross between the daemon binary and the sandbox image.
 
 ```
 grain run
         PID 1 and the image's entrypoint. Boots the VMM, waits for the
         guest, applies placements, runs /grain/setup, starts the agent
-        named by GRAIN_FRAMEWORK with /grain/prompt, serving its own
-        tools and forwarding the declared ones. Writes trajectory
+        named by GRAIN_FRAMEWORK with /grain/prompt, serving the six
+        sandbox tools and nothing else. Writes trajectory and status
         records to stdout. Does not exit until the grain is done.
-
-grain status                       > status.json
 ```
 
-**One verb**, and it is the fallback: state normally arrives on the record
-stream. Everything else a controller does to a grain is a container-runtime
-operation — create it, list it, tail its logs, destroy it. An agent
-reaching past its sandbox does so as a command in the guest, which to the
-shim is an ordinary `run_command` and to this CLI is nothing at all.
+**One verb, and it is the entrypoint.** Everything a controller does to a
+grain is a container-runtime operation — create it, list it, tail its
+logs, destroy it — so there is no second subcommand for one to call. An
+agent reaching past its sandbox does so as a command in the guest, which
+to the shim is an ordinary `run_command` and to this CLI is nothing at
+all.
 
-`run`'s stdout is the container log stream; a `status` started by `docker
-exec` writes to whoever called it. Different streams, which reads as a
-conflict and is not.
+Which means the stable contract is not a CLI in the controller's
+direction: it is the **input tree** a grain is created with and the
+**record format** it writes. `grain run`'s argv is empty.
 
 ### Exit codes
 
+`grain run`'s own, read where the runtime reports it —
+`.status.containerStatuses[].state.terminated.exitCode`, or `docker
+inspect` — rather than from any call:
+
 | code | meaning | the controller |
 | --- | --- | --- |
-| 0 | ok | parses stdout |
-| 1 | failed; stderr is the detail | reports it |
-| 2 | unknown subcommand or flag | **version skew** — image predates this controller |
+| 0 | ok | the `Result` is on the stream and in the termination log |
+| 1 | failed; stderr and the termination log are the detail | reports it |
 | 4 | unrecognised wire version | fails the run `setup-failed`, naming both |
 
-The distinction not to lose is **exec-failed versus shim-failed**: `docker
-exec` uses 125/126/127 for its own failures and errors when the container
-is not running, as against propagating the command's code. The first means
-`PhaseLost`; the second means the shim answered and said no.
-`mcp.DockerExecRunner`'s `execFailedBeforeGuest` already draws that line.
+Code 4 is what version skew looks like now that there are no subcommands
+to get wrong: an image older than its controller meets a
+`GRAIN_WIRE_VERSION` it does not know, and `SpecFromEnv` refuses it before
+anything boots. Exiting distinctly matters because the alternative — a
+generic failure — is indistinguishable from a bad setup script, and the
+two want different responses.
+
+The distinction that used to live here, **exec-failed versus
+shim-failed**, does not disappear so much as move inside: it is now the
+shim's own, between `kontur exec` failing before the guest ran and a guest
+command that ran and failed. `mcp.DockerExecRunner`'s
+`execFailedBeforeGuest` already draws that line, and it is a `run_command`
+result rather than anything a controller sees.
 
 ### Versioning
 
@@ -371,10 +393,11 @@ Read once per image with `docker inspect`. That is when it is useful — to
 refuse a task naming a framework the image lacks — and asking a grain
 would require a grain to exist.
 
-### `status.json`
+### The status record
 
-One call, everything: the poll is the only read, so a field split out is a
-second exec per grain per tick.
+One record, everything — a whole snapshot on each emission, which is what
+lets a controller that missed the last one lose latency rather than
+correctness:
 
 ```json
 {
@@ -398,14 +421,22 @@ second exec per grain per tick.
 and every timeout the controller enforces is a subtraction against it.
 
 **There is no id, and nothing echoed back.** The container is the identity:
-a controller execs into one specific container, so the answer cannot be
-ambiguous about whose it is.
+a record is read off one specific container's stream, so the answer cannot
+be ambiguous about whose it is.
 
-**There is no `blocked` phase.** An agent waiting on a controller tool is
-waiting on an HTTP request it made itself, which the shim cannot see and
-does not need to — the controller is the far end of that request, so it
-already knows which grains are waiting on it, and knows it better than a
-shim inferring from outside could.
+**There is no `container` health either**, for the same reason and a
+sharper one: a grain cannot report that it is unreachable, and one that
+could answer has already answered the question. The backend fills both in
+from the listing while merging it with the stream, and
+`TestAGrainReportsNeitherItsNameNorItsReachability` holds the split exact
+— which matters more now that there is no second channel to reconcile
+against.
+
+**There is no `blocked` phase.** An agent waiting on the controller is
+waiting on a command it ran itself in the guest, which to the shim is an
+ordinary `run_command` that has not returned — and that is enough. The
+controller is the far end of whatever that command called, so it already
+knows which grains are waiting on it.
 
 `conntrackCount`/`conntrackMax` are there because of the network decision:
 under NAT the guest's traffic fills a table in the pod's namespace that the
@@ -461,9 +492,12 @@ well as to its status. Kubernetes surfaces that file in
 grain's outcome arrives in the same pod listing that enumerates it, with
 no exec at all.
 
-That covers the read that must not be missed: a grain that finished but
-whose `status` exec fails is a run the controller cannot finish, and it
-holds a slot until something notices. Pair it with
+That covers the read that must not be missed, and it is load-bearing now
+that the stream is the only other channel: a grain that finished but whose
+final status record was lost to rotation is a run the controller cannot
+finish, and it holds a slot until something notices. The termination log
+is not subject to rotation and the listing carries it, so the ending
+survives what the stream does not. Pair it with
 `terminationMessagePolicy: FallbackToLogsOnError` for a shim that died
 before writing one. The cap is a few kilobytes, so a `Result` belongs
 there and a trajectory does not; under docker nothing reads the file and
@@ -517,18 +551,17 @@ type Grains interface {
 
 type Grain interface {
 	ID() ID
-	Observe(ctx context.Context) (Status, error)
 	Transcript(ctx context.Context, from int64) (chunk []byte, next int64, err error)
 	Release(ctx context.Context) error
 }
 ```
 
-Half of it never reaches the shim: `Create` is `konturctl vm create` with
-the grain's environment and mount, `List` is `docker ps --filter
-label=grain.id`, `Transcript` is `docker logs --since`, `Release` is
-`docker rm -f` (and is also how a grain is cancelled). **One** is an
-actual shim call, matching the one verb. A method that cannot be served by one subcommand or one
-runtime operation has drifted from what the transport can do.
+**None of it reaches the shim.** `Create` is `konturctl vm create` with the
+grain's environment and mount, `List` is `docker ps --filter
+label=grain.id` merged with the log tail, `Transcript` is `docker logs
+--since`, `Release` is `docker rm -f` (and is also how a grain is
+cancelled). Every method is one container-runtime operation, and a method
+that cannot be served by one has drifted from what the transport can do.
 
 There is deliberately **no `Rebuild`**. Rebuilding the guest is internal to
 the grain; the controller learns of it only as `Status.Rebuilds` going up,
@@ -568,7 +601,7 @@ whole per-grain policy is a table test. Its ordering is the decision:
 | 6 | `provisioning`, over budget | live | `fail(setup-failed)`, `release` |
 | 7 | `running` | live | mirror activity |
 
-Row 5 is one tick, not two: signalling and then waiting for the next poll
+Row 5 is one tick, not two: signalling and then waiting for the next tick
 to see a terminal phase was the only place this table needed a follow-up
 round. The controller supplies the outcome rather than reading one back,
 because SIGKILL may win.
@@ -593,7 +626,7 @@ which looks inconsistent beside `Policy.ProvisionBudget` and is not:
 
 One enforcement point, not two. `Config.MaxRunRuntime`'s own concern — a
 stuck run "tying up its share of the concurrency limit" — is served anyway:
-the grain goes terminal and the next poll frees the slot. A stopped run
+the grain goes terminal and the next tick frees the slot. A stopped run
 reports `cancelled` with the limit named, which is what `run.go:1424`
 already records.
 

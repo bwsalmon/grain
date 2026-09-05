@@ -251,9 +251,6 @@ func TestStatusWireFormat(t *testing.T) {
     "output": "9f3c1a2\n"
   },
   "health": {
-    "container": {
-      "running": true
-    },
     "guest": {
       "ready": true,
       "loadAverage": "0.41 0.30 0.22",
@@ -444,5 +441,64 @@ func TestAGrainCannotReachAControllerAtAll(t *testing.T) {
 	// agent because the agent is what uses it.
 	if _, ok := files[grain.FileCredential]; !ok {
 		t.Error("the model credential is missing; that one is the grain's own business")
+	}
+}
+
+// A grain cannot report the two things only the outside knows: which
+// grain it is, and whether it can be reached. Both are filled in by the
+// backend while it merges the runtime's listing with the log stream
+// (Grains.List), and both must stay off the wire -- a grain that answered
+// "container: running" would be stating the one fact its answering
+// already proved, and a grain that could not answer could not correct it.
+//
+// This is what removing the status exec rests on: with no call into a
+// shim there is no second opinion to reconcile, so the split between what
+// a grain says and what the runtime says has to be exact.
+func TestAGrainReportsNeitherItsNameNorItsReachability(t *testing.T) {
+	st := grain.Status{
+		Version: grain.Version, Phase: grain.PhaseRunning,
+		Since: time.Date(2026, 9, 4, 19, 41, 12, 0, time.UTC),
+		ID:    "task-311-1",
+		Health: grain.Health{
+			Container: grain.ContainerHealth{Running: true, Err: "unreachable"},
+			Guest:     grain.GuestHealth{Ready: true},
+		},
+	}
+	body, err := json.Marshal(st)
+	if err != nil {
+		t.Fatalf("marshalling status: %v", err)
+	}
+	for _, leaked := range []string{"task-311-1", "unreachable"} {
+		if strings.Contains(string(body), leaked) {
+			t.Errorf("a status carries %q on the wire: %s", leaked, body)
+		}
+	}
+	// Asserted on the shape and not only on the values: an empty
+	// "container": {} would leak no string while still putting the
+	// question on the wire for something to start answering.
+	var shape struct {
+		Health map[string]json.RawMessage `json:"health"`
+	}
+	if err := json.Unmarshal(body, &shape); err != nil {
+		t.Fatalf("reading the health object back: %v", err)
+	}
+	if _, ok := shape.Health["container"]; ok {
+		t.Errorf("health carries a container object: %s", body)
+	}
+	if len(shape.Health) != 1 {
+		t.Errorf("health has %d members, want just guest: %s", len(shape.Health), body)
+	}
+
+	var back grain.Status
+	if err := json.Unmarshal(body, &back); err != nil {
+		t.Fatalf("reading the status back: %v", err)
+	}
+	if back.ID != "" || back.Health.Container != (grain.ContainerHealth{}) {
+		t.Errorf("id or container health survived a round trip: %+v", back)
+	}
+	// The half that is the grain's own still crosses, or the record would
+	// carry nothing worth reading.
+	if !back.Health.Guest.Ready || back.Phase != grain.PhaseRunning {
+		t.Errorf("the grain's own half did not survive: %+v", back)
 	}
 }

@@ -55,18 +55,20 @@ func (p Phase) Terminal() bool {
 	return false
 }
 
-// Status is the whole of what one poll returns. Every field is here
-// rather than behind its own call because the poll is the only read: a
-// field split out is a second exec per grain per tick.
+// Status is the whole of what a grain says about itself, carried as one
+// KindStatus record on its stdout. A full snapshot rather than a delta,
+// so that reading it stays level-triggered and a controller that missed
+// the last one has lost nothing but latency.
 type Status struct {
 	// Version is the wire format this document is written to.
 	Version string `json:"version"`
 	// ID is the grain this describes, and is deliberately not on the
-	// wire: a backend fills it in from the container it read the document
-	// out of, because the container is the identity. A controller execs
-	// into one specific container to get a status, so the answer cannot
-	// be ambiguous about whose it is, and a grain telling you its own
-	// name would be repeating what you had to know to ask.
+	// wire: a backend fills it in from the container whose log stream the
+	// record came off, because the container is the identity. A record is
+	// read out of one specific container's stream, so the answer cannot
+	// be ambiguous about whose it is, and a grain repeating its own name
+	// into every status would be repeating what you had to know to read
+	// it.
 	//
 	// Nothing else is echoed back either -- no task, no repo, no
 	// framework. The controller keys by this and looks the rest up in its
@@ -100,8 +102,9 @@ type Status struct {
 	Result *Result `json:"result,omitempty"`
 	Health Health  `json:"health"`
 	// Seq is the sequence number of the last trajectory record this grain
-	// emitted, so a poller knows whether there is anything new without
-	// reading it.
+	// emitted before this one, so a controller reading a status can tell
+	// whether it is behind on the stream that carried it -- which is how
+	// a gap from log rotation is noticed rather than inferred.
 	//
 	// A sequence rather than a byte offset because the trajectory is
 	// carried by the container runtime's own log stream (docs/grain.md,
@@ -183,16 +186,23 @@ type Usage struct {
 // is a grain that can repair itself, and the reverse is a grain that
 // cannot report anything at all.
 type Health struct {
-	Container ContainerHealth `json:"container"`
+	// Container is not on the wire, and for the same reason ID is not: a
+	// grain cannot report that it is unreachable, and one that could
+	// answer at all has already answered the question. The backend fills
+	// it from the runtime's own listing while merging that listing with
+	// the log stream (Grains.List).
+	Container ContainerHealth `json:"-"`
 	Guest     GuestHealth     `json:"guest"`
 }
 
-// ContainerHealth is the grain itself, as the container runtime sees it.
+// ContainerHealth is the grain itself, as the container runtime sees it
+// -- the half of Health that comes from outside the grain rather than
+// from it.
 type ContainerHealth struct {
-	Running bool `json:"running"`
+	Running bool `json:"-"`
 	// Err is why the container could not be reached just now, empty when
 	// Running is true.
-	Err string `json:"err,omitempty"`
+	Err string `json:"-"`
 }
 
 // GuestHealth is the sandbox, read over vsock -- what
