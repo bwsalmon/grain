@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -641,6 +642,40 @@ func TestUpdateSettingsTreatsCodexModelAsOptionalButNotBlank(t *testing.T) {
 	}
 	if read.CodexModel != named {
 		t.Errorf("CodexModel = %q, want %q", read.CodexModel, named)
+	}
+}
+
+// geminiEffort is saved from a vocabulary rather than as free text: agy
+// takes low, medium or high, and a value it does not know fails the run
+// it reaches before that run starts, where nobody who could fix it is
+// watching. A first save need not name one (the column arrived after
+// that check, exactly as codexModel's did), and the choices are reported
+// alongside the value so a pane can offer them.
+func TestUpdateSettingsChecksGeminiEffortAgainstAgysVocabulary(t *testing.T) {
+	c, _, ctx := testClient(t)
+	if _, err := c.UpdateSettings(ctx, firstSettings()); err != nil {
+		t.Fatalf("a first save naming no geminiEffort must succeed: %v", err)
+	}
+
+	for _, bogus := range []string{"", "   ", "maximum", "High"} {
+		if _, err := c.UpdateSettings(ctx, ui.UpdateSettingsRequest{GeminiEffort: &bogus}); err == nil {
+			t.Errorf("UpdateSettings with geminiEffort %q: want an error, got nil", bogus)
+		}
+	}
+
+	chosen := "low"
+	if _, err := c.UpdateSettings(ctx, ui.UpdateSettingsRequest{GeminiEffort: &chosen}); err != nil {
+		t.Fatal(err)
+	}
+	read, err := c.GetSettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if read.GeminiEffort != chosen {
+		t.Errorf("GeminiEffort = %q, want %q", read.GeminiEffort, chosen)
+	}
+	if !slices.Contains(read.GeminiEfforts, chosen) {
+		t.Errorf("GeminiEfforts = %v, want the vocabulary a pane offers, including %q", read.GeminiEfforts, chosen)
 	}
 }
 
