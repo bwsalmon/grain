@@ -52,12 +52,12 @@ describe("parsePath", () => {
     });
   });
 
-  it("parses the settings, debug and metrics paths", () => {
+  it("parses the settings, system and metrics paths", () => {
     expect(parsePath("/settings")).toEqual({
       view: "tasks",
       showSettings: true,
     });
-    expect(parsePath("/debug")).toEqual({ view: "tasks", showDebug: true });
+    expect(parsePath("/system")).toEqual({ view: "tasks", showSystem: true });
     expect(parsePath("/metrics")).toEqual({ view: "tasks", showMetrics: true });
   });
 
@@ -214,8 +214,8 @@ describe("buildPath", () => {
     );
   });
 
-  it("builds the debug and metrics panes' own paths", () => {
-    expect(buildPath({ view: "tasks", showDebug: true })).toBe("/debug");
+  it("builds the system and metrics panes' own paths", () => {
+    expect(buildPath({ view: "tasks", showSystem: true })).toBe("/system");
     expect(buildPath({ view: "repos", taskId: "42", showMetrics: true })).toBe(
       "/metrics",
     );
@@ -305,7 +305,7 @@ describe("buildPath", () => {
       "/suites",
       "/tasks/42",
       "/settings",
-      "/debug",
+      "/system",
       "/metrics",
       "/repos/acme/widgets",
       "/repos/acme/widgets/releases",

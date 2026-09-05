@@ -3186,12 +3186,12 @@ func diskUsage(disks []hostDisk) []ui.DiskUsage {
 
 // hostTopTimeout bounds one `top` run. Its own sampling interval is a
 // fraction of a second (pkg/hosttop), so anything near this means top is
-// stuck rather than slow -- and the Debug pane polls, so a request left
+// stuck rather than slow -- and the System pane polls, so a request left
 // hanging would pile a second one on top of it every few seconds.
 const hostTopTimeout = 15 * time.Second
 
 // hostTop is startUIServer's ui.Config.HostTop: a `top` snapshot of this
-// same process's own machine, for the Debug overlay's Top tab.
+// same process's own machine, for the System overlay's Top tab.
 //
 // The timeout is added here rather than inside pkg/hosttop for the same
 // reason hostStats above takes its path as an argument: the package

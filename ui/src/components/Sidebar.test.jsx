@@ -15,7 +15,7 @@ const baseProps = {
   onSetView: noop,
   onSetFilter: noop,
   onOpenSettings: noop,
-  onOpenDebug: noop,
+  onOpenSystem: noop,
   onOpenMetrics: noop,
   onOpenNewTask: noop,
 };
@@ -90,7 +90,7 @@ describe("Sidebar", () => {
 
   it("routes the footer and new-task buttons to their own callbacks", async () => {
     const onOpenSettings = vi.fn();
-    const onOpenDebug = vi.fn();
+    const onOpenSystem = vi.fn();
     const onOpenMetrics = vi.fn();
     const onOpenNewTask = vi.fn();
     const user = userEvent.setup();
@@ -100,7 +100,7 @@ describe("Sidebar", () => {
         config={null}
         tasks={[]}
         onOpenSettings={onOpenSettings}
-        onOpenDebug={onOpenDebug}
+        onOpenSystem={onOpenSystem}
         onOpenMetrics={onOpenMetrics}
         onOpenNewTask={onOpenNewTask}
       />,
@@ -108,21 +108,21 @@ describe("Sidebar", () => {
 
     await user.click(screen.getByRole("button", { name: "+ New task" }));
     await user.click(screen.getByRole("button", { name: "Settings" }));
-    await user.click(screen.getByRole("button", { name: "Debug" }));
+    await user.click(screen.getByRole("button", { name: "System" }));
     await user.click(screen.getByRole("button", { name: "Metrics" }));
 
     expect(onOpenNewTask).toHaveBeenCalledTimes(1);
     expect(onOpenSettings).toHaveBeenCalledTimes(1);
-    expect(onOpenDebug).toHaveBeenCalledTimes(1);
+    expect(onOpenSystem).toHaveBeenCalledTimes(1);
     expect(onOpenMetrics).toHaveBeenCalledTimes(1);
   });
 
-  // grain/task-115: Settings, Debug and Metrics open a pane beside this
+  // grain/task-115: Settings, System and Metrics open a pane beside this
   // rail rather than a box over the middle of the screen, so the rail is
   // still on screen while one is open and has to say which of the three
   // it is -- the same way the nav entries above mark the current view.
   it("marks the footer entry whose pane is open", () => {
-    const footer = ["Settings", "Debug", "Metrics"];
+    const footer = ["Settings", "System", "Metrics"];
     const expectOnly = (open) => {
       for (const name of footer) {
         const button = screen.getByRole("button", { name });
@@ -142,8 +142,8 @@ describe("Sidebar", () => {
     rerender(<Sidebar {...baseProps} config={null} tasks={[]} showSettings />);
     expectOnly("Settings");
 
-    rerender(<Sidebar {...baseProps} config={null} tasks={[]} showDebug />);
-    expectOnly("Debug");
+    rerender(<Sidebar {...baseProps} config={null} tasks={[]} showSystem />);
+    expectOnly("System");
 
     rerender(<Sidebar {...baseProps} config={null} tasks={[]} showMetrics />);
     expectOnly("Metrics");
@@ -328,7 +328,7 @@ describe("Sidebar", () => {
     expect(screen.queryByTitle(/^Running commit/)).not.toBeInTheDocument();
   });
 
-  // bwsalmon/agents#640: Logs and Sandbox health share the "Debug" nav
+  // bwsalmon/agents#640: Logs and Sandbox health share the "System" nav
   // entry rather than having one each of their own. Metrics does have
   // one of its own (grain/task-173), since it is the question asked when
   // nothing is wrong rather than one of these.
@@ -341,7 +341,7 @@ describe("Sidebar", () => {
     expect(
       screen.queryByRole("button", { name: "Sandbox health" }),
     ).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Debug" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "System" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Metrics" })).toBeInTheDocument();
   });
 });

@@ -1,7 +1,7 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import DebugOverlay from "./DebugOverlay.jsx";
+import SystemOverlay from "./SystemOverlay.jsx";
 import api from "../api.js";
 
 vi.mock("../api.js", () => ({ default: vi.fn() }));
@@ -11,7 +11,7 @@ vi.mock("../api.js", () => ({ default: vi.fn() }));
 // (the same layout SettingsOverlay.jsx uses). Only the active tab's panel
 // is mounted, so only it feeds its own GET /api/logs or GET /api/sandboxes
 // call a response.
-describe("DebugOverlay", () => {
+describe("SystemOverlay", () => {
   const noLogs = { enabled: false };
   const noSandboxes = { enabled: false };
 
@@ -22,7 +22,7 @@ describe("DebugOverlay", () => {
   it("shows Logs by default, with Sandbox health, Top and Restart as other tabs", async () => {
     api.mockResolvedValueOnce(noLogs);
     render(
-      <DebugOverlay
+      <SystemOverlay
         config={{ rebootEnabled: true }}
         onClose={() => {}}
         showError={() => {}}
@@ -46,7 +46,7 @@ describe("DebugOverlay", () => {
   it("does not show Metrics as a tab", async () => {
     api.mockResolvedValueOnce(noLogs);
     render(
-      <DebugOverlay
+      <SystemOverlay
         config={{ rebootEnabled: true }}
         onClose={() => {}}
         showError={() => {}}
@@ -66,7 +66,7 @@ describe("DebugOverlay", () => {
   it("fills the pane beside the sidebar, with its tabs in the fixed header", async () => {
     api.mockResolvedValueOnce(noLogs);
     render(
-      <DebugOverlay
+      <SystemOverlay
         config={{ rebootEnabled: true }}
         onClose={() => {}}
         showError={() => {}}
@@ -82,7 +82,7 @@ describe("DebugOverlay", () => {
       screen.getByRole("tab", { name: "Sandbox health" }),
     );
     expect(head).toContainElement(
-      screen.getByRole("heading", { name: "Debug" }),
+      screen.getByRole("heading", { name: "System" }),
     );
   });
 
@@ -90,7 +90,7 @@ describe("DebugOverlay", () => {
     api.mockResolvedValueOnce(noLogs).mockResolvedValueOnce(noSandboxes);
     const user = userEvent.setup();
     render(
-      <DebugOverlay
+      <SystemOverlay
         config={{ rebootEnabled: true }}
         onClose={() => {}}
         showError={() => {}}
@@ -115,7 +115,7 @@ describe("DebugOverlay", () => {
     });
     const user = userEvent.setup();
     render(
-      <DebugOverlay
+      <SystemOverlay
         config={{ rebootEnabled: true }}
         onClose={() => {}}
         showError={() => {}}
@@ -133,7 +133,7 @@ describe("DebugOverlay", () => {
     api.mockResolvedValueOnce(noLogs);
     const user = userEvent.setup();
     render(
-      <DebugOverlay
+      <SystemOverlay
         config={{ rebootEnabled: true }}
         onClose={() => {}}
         showError={() => {}}
@@ -152,7 +152,7 @@ describe("DebugOverlay", () => {
     api.mockResolvedValueOnce(noLogs);
     const user = userEvent.setup();
     render(
-      <DebugOverlay
+      <SystemOverlay
         config={{ rebootEnabled: false }}
         onClose={() => {}}
         showError={() => {}}
@@ -175,7 +175,7 @@ describe("DebugOverlay", () => {
     vi.stubGlobal("confirm", vi.fn().mockReturnValue(true));
     const user = userEvent.setup();
     render(
-      <DebugOverlay
+      <SystemOverlay
         config={{ rebootEnabled: true }}
         onClose={() => {}}
         showError={() => {}}
@@ -195,7 +195,7 @@ describe("DebugOverlay", () => {
     vi.stubGlobal("confirm", vi.fn().mockReturnValue(false));
     const user = userEvent.setup();
     render(
-      <DebugOverlay
+      <SystemOverlay
         config={{ rebootEnabled: true }}
         onClose={() => {}}
         showError={() => {}}
@@ -224,7 +224,7 @@ describe("DebugOverlay", () => {
     const user = userEvent.setup();
     const showError = vi.fn();
     render(
-      <DebugOverlay
+      <SystemOverlay
         config={{ rebootEnabled: true }}
         onClose={() => {}}
         showError={showError}
@@ -247,7 +247,7 @@ describe("DebugOverlay", () => {
     const user = userEvent.setup();
     const showError = vi.fn();
     render(
-      <DebugOverlay
+      <SystemOverlay
         config={{ rebootEnabled: true }}
         onClose={() => {}}
         showError={showError}

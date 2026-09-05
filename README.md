@@ -3004,11 +3004,11 @@ starts exactly where the list you opened it from started. Dialogs that
 are an *action* rather than a thing you opened — New task, Run a suite,
 an attempt's transcript — stay centered boxes.
 
-**Settings and Debug are panes too (grain/task-115).** Those two were
+**Settings and System are panes too (grain/task-115).** Those two were
 the largest things still drawn as centered boxes, and neither is really
-an action: Settings is six tabs of deployment configuration, Debug is
+an action: Settings is six tabs of deployment configuration, System is
 four panels of live diagnostics, and both are destinations with a URL of
-their own (`/settings`, `/debug`) that an operator navigates around
+their own (`/settings`, `/system`) that an operator navigates around
 rather than a form to fill in and dismiss. The shapes were fighting the
 content — a log tail and a sandbox-health table sharing the widest box
 `Overlay.jsx` draws, a settings form scrolling its own tab strip off the
@@ -3020,16 +3020,16 @@ Panes that open a *thing* (a task, a schedule) pass none and scroll their
 whole body as before. Settings caps its tab bodies at the same
 `.pane-form` width its forms already used — a "Poll interval" box an arm's
 length wide is the porthole's opposite failure, not its fix — while
-Debug deliberately caps nothing, since the tables and log lines in
+System deliberately caps nothing, since the tables and log lines in
 there are what wanted the room in the first place. The sidebar marks
 whichever pane is open the way it already marks the current view:
 the rail is on screen the whole time now, so it should say what is
 covering the rest of it.
 
 **Metrics is its own destination on the sidebar (grain/task-173).** That
-pane's nav entry is called "Debug" rather than "Debugging" now, and the
-throughput and latency report is no longer a tab inside it: it sits
-beside Settings and Debug, at `/metrics`. Metrics landed there
+pane's nav entry was renamed from "Debugging" to "Debug" at the time,
+and the throughput and latency report is no longer a tab inside it: it
+sits beside Settings and that pane, at `/metrics`. Metrics landed there
 originally because it is the same *kind* of thing Logs, Sandbox health
 and Top are — a read-only, deployment-wide view rather than a knob — and
 that is still true. It is not the same *question*, though, and the
@@ -3042,14 +3042,34 @@ doing, and the numbers it moves are weekly ones. Filing it under the
 word "debug" told an operator to open it at the wrong times, and two
 clicks and a tab strip is the wrong price for something read on a
 schedule. Splitting it out is also what makes it linkable: `/metrics`
-is a URL that goes in a document or a standup note, where "open Debug,
-click Metrics" is an instruction. The pane's header carries the title
-now, so `MetricsPage` drops the "Metrics" heading it used to print above
-its own window picker, and `DebugOverlay` no longer takes an
+is a URL that goes in a document or a standup note, where "open that
+pane, click Metrics" is an instruction. The pane's header carries the
+title now, so `MetricsPage` drops the "Metrics" heading it used to print
+above its own window picker, and `SystemOverlay` no longer takes an
 `onOpenTask` — the one link out of any of these panels (the backlog's
 oldest queued task) belongs to the report, and it is App that closes the
 metrics pane on the way to that task, since two stacked panes would put
 it behind the one the click came from.
+
+**That pane is called System now (grain/task-12).** "Debugging", then
+"Debug", named the mood somebody opens it in rather than what is behind
+it, and the thing behind it is the machine this deployment runs on: its
+logs, its sandboxes, its processes, its power switch. An operator reads
+those to see what the deployment is *doing* — is the daemon still
+writing, what is the pool holding, what is spending the machine — and
+not only once they have decided something is broken. Naming it for the
+state it shows says the same thing about it that "Metrics" already says
+about the report next door. It is also the one word this codebase was
+spending twice: `self-debug` is a capability that lets a run read
+grain's own source, and Settings had a "Debug" tab of its own before
+this pane moved out of it (bwsalmon/agents#623), so "the debug pane"
+named none of the three unambiguously. The rename is the nav entry, the
+pane's own heading, `SystemOverlay.jsx` and the path: `/system` rather
+than `/debug`. A bookmark to the old path falls back to the task list
+the way `/logs` and `/sandboxes` — the two nav entries this pane was
+made out of — already do, rather than redirecting; nothing here is
+linked from outside the deployment, and `paths.js` has never carried a
+redirect for a path it retired.
 
 **A repo is a page of its own, the way a task is (grain/task-111).**
 Everything grain knew about one repo used to hang off that repo's row in
@@ -3079,7 +3099,7 @@ go now, not a filter left standing on another place.
 (grain/task-177).** Those two halves grew their own way out. A repo's
 page and its releases were plain pages, so they took the obvious one: a
 "← Repos" button in the top-left corner, above the title. Every pane --
-a task, a schedule, a template, a suite, Settings, Debug, Metrics -- was
+a task, a schedule, a template, a suite, Settings, System, Metrics -- was
 a `Dialog` before it was a destination, so it kept the dialog's own X
 floating in the top-right. That left one product with two gestures for
 the same "go back where I came from", in opposite corners of the screen,
@@ -6255,9 +6275,9 @@ queue is a capacity one. They are the first two numbers any optimization
 here should have to move.
 
 **The UI reads the same report,** in a pane of its own at `/metrics`,
-reached from the sidebar beside Settings and Debug. (It was a tab of the
-Debug pane until grain/task-173 — see "Metrics is its own destination
-on the sidebar" above for why it left.) The window picker sends the same
+reached from the sidebar beside Settings and System. (It was a tab of
+the System pane until grain/task-173 — see "Metrics is its own
+destination on the sidebar" above for why it left.) The window picker sends the same
 strings `-window` takes, the throughput
 buckets are drawn as sparklines, and the two presentation rules above
 are enforced rather than described: the latency stages are a table of
@@ -6267,7 +6287,7 @@ is a section of its own headed "right now, not over the window". Each
 stage's `n` sits beside its percentiles, and a percentile with too few
 samples behind it to mean what its name says — fewer than 10 for a p90,
 100 for a p99 — is dimmed and footnoted rather than shown as if it were
-one. Unlike the Debug pane's own panels there is no poll: a report costs
+one. Unlike the System pane's own panels there is no poll: a report costs
 a full scan every time it is asked for, so it loads once and reloads
 when the window changes or Refresh is clicked.
 
@@ -6881,7 +6901,7 @@ about anyone's host. A per-task override is still the escape hatch for
 the one job that needs more, and still the only way to ask for *less*
 than the deployment's own shape.
 
-## `top`, in the Debug pane
+## `top`, in the System pane
 
 Sandbox health can say the daemon's machine is under pressure. It has
 never been able to say by what. Load average, memory and disk are
@@ -6890,7 +6910,7 @@ aggregates by construction — `pkg/sysstat` reads `/proc/loadavg` and
 pane could show a load of 12 and leave the only question anybody actually
 has at that point ("which process?") to an SSH session and a terminal.
 
-The Debug pane has a Top tab now: `GET /api/host/top`, `pkg/hosttop`,
+The System pane has a Top tab now: `GET /api/host/top`, `pkg/hosttop`,
 `top` itself. Shelling out rather than walking `/proc/[pid]/stat` and
 reimplementing its accounting is the same call `pkg/systemlog.Journalctl`
 already made for `journalctl` — `procps` is a package, the output is what
@@ -6930,7 +6950,7 @@ image without `procps`) gets the same "not available" note every other
 optional panel already shows, rather than a pane that could only ever
 error.
 
-## The kernel log, in the Debug pane
+## The kernel log, in the System pane
 
 Top says which process is wearing the machine out. The failure it cannot
 describe is the one where the process is *gone*: an agent CLI picked off

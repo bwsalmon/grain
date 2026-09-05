@@ -1,6 +1,6 @@
 package ui_test
 
-// bwsalmon/agents#444: a debugging page in the UI reads back core system
+// bwsalmon/agents#444: the UI's System pane reads back core system
 // logs -- these cover the API surface behind it, the same
 // enabled-flag/404 conventions upgrade_test.go's own settings tests and
 // server_test.go's secrets tests already exercise for their own optional

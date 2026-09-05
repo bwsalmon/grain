@@ -1,6 +1,6 @@
 // paths.js maps App.jsx's own navigation state -- which of the four
 // sidebar destinations is showing, whether a task's or a repo's own page
-// is open, whether the settings or debug overlay is open -- onto real
+// is open, whether the settings or system overlay is open -- onto real
 // URL paths and back, so each is directly loadable/bookmarkable/
 // shareable instead of reachable only by clicking through from "/"
 // (bwsalmon/agents#548).
@@ -16,11 +16,11 @@
 // own Debug tab (bwsalmon/agents#623) and so lost their own paths, the
 // same way Upgrade lives there without ever having had a path of its
 // own (and Secrets did too, until grain/task-110 gave each secret to
-// whatever uses it). Debug (Logs, Sandbox health, Top and the reboot
+// whatever uses it). System (Logs, Sandbox health, Top and the reboot
 // control together) is a sidebar destination again now (bwsalmon/
-// agents#640), with /debug as its own path -- a stale bookmark to the
-// old /logs or /sandboxes still just falls back to the tasks view like
-// any other unrecognized path. Metrics left that pane for a sidebar
+// agents#640), with /system as its own path -- a stale bookmark to the
+// old /logs, /sandboxes or /debug still just falls back to the tasks
+// view like any other unrecognized path. Metrics left that pane for a sidebar
 // entry of its own (grain/task-173) and took /metrics with it, so the
 // report an operator reads weekly is a link they can keep.
 
@@ -46,7 +46,7 @@ import { FILTERS, NO_NARROWING, SORTS } from "./taskFilters.js";
 const VIEWS = ["tasks", "board", "repos", "schedules", "templates", "suites"];
 
 // parsePath turns a URL path into the {view, taskId, repo, showReleases,
-// scheduleId, templateId, suiteId, showSettings, showDebug, showMetrics}
+// scheduleId, templateId, suiteId, showSettings, showSystem, showMetrics}
 // App needs in order to restore on load or on a back/forward
 // navigation. Anything it
 // doesn't recognize -- an unknown segment, a stray trailing slash --
@@ -92,8 +92,8 @@ function parseSegments(pathname) {
   if (segments[0] === "settings") {
     return { view: "tasks", showSettings: true };
   }
-  if (segments[0] === "debug") {
-    return { view: "tasks", showDebug: true };
+  if (segments[0] === "system") {
+    return { view: "tasks", showSystem: true };
   }
   if (segments[0] === "metrics") {
     return { view: "tasks", showMetrics: true };
@@ -125,12 +125,12 @@ function parseSegments(pathname) {
 // showsTaskView is whether a parsed path has a task view on screen --
 // the flat list, the board, or the list on a repo's own page -- and so
 // whether a narrowing means anything on it. An overlay's path
-// (/settings, /debug, /metrics), an open task and the releases pane all
+// (/settings, /system, /metrics), an open task and the releases pane all
 // say no: each of those covers the list rather than narrowing it, and
 // none of them survives in the URL as "the thing behind the overlay"
 // today either.
 function showsTaskView(parsed) {
-  if (parsed.showSettings || parsed.showDebug || parsed.showMetrics)
+  if (parsed.showSettings || parsed.showSystem || parsed.showMetrics)
     return false;
   if (parsed.taskId) return false;
   if (parsed.view === "repos") return !!parsed.repo && !parsed.showReleases;
@@ -209,13 +209,13 @@ export function buildPath({
   templateId,
   suiteId,
   showSettings,
-  showDebug,
+  showSystem,
   showMetrics,
   narrowing,
 }) {
   const query = narrowingQuery(narrowing);
   if (showSettings) return "/settings";
-  if (showDebug) return "/debug";
+  if (showSystem) return "/system";
   if (showMetrics) return "/metrics";
   if (taskId) return `/tasks/${taskId}`;
   // An open repo only means anything within the repos view -- App keeps
