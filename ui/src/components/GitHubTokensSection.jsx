@@ -42,7 +42,24 @@ import api from "../api.js";
 // between them is what "restart needed" below is. A *ladder* change
 // carries no such wait: the git proxy re-reads credentials.json, so a
 // repo pointed at a credential here is pushed with it on its next clone.
-export default function GitHubTokensSection({ showError }) {
+//
+// grain/task-16: targetReposMissingCredentials is the one thing here not
+// read from /api/github-tokens -- it comes from GET /api/settings
+// (ui.Settings' own field), which is the only place that knows both
+// halves of the question: which repos a task may target, and which of
+// them this ladder actually covers. A repo in that list dispatches fine
+// and then fails every push at the git proxy with a 500 "no credential
+// configured", so it is named next to the ladder form that fixes it
+// rather than left to be discovered as that failure. onLadderChanged is
+// how it stays true: every mutation below can change the answer (the
+// first token added writes "*" on its own), so the pane re-reads
+// settings after one instead of leaving a gap on screen that has just
+// been closed.
+export default function GitHubTokensSection({
+  showError,
+  targetReposMissingCredentials,
+  onLadderChanged,
+}) {
   const [resp, setResp] = useState(null);
   const [name, setName] = useState("");
   const [value, setValue] = useState("");
@@ -72,6 +89,7 @@ export default function GitHubTokensSection({ showError }) {
       );
       setName("");
       setValue("");
+      onLadderChanged?.();
     } catch (err) {
       showError(err);
     }
@@ -84,6 +102,7 @@ export default function GitHubTokensSection({ showError }) {
           method: "DELETE",
         }),
       );
+      onLadderChanged?.();
     } catch (err) {
       showError(err);
     }
@@ -103,6 +122,7 @@ export default function GitHubTokensSection({ showError }) {
       );
       setPattern("");
       setPatternCredential("");
+      onLadderChanged?.();
     } catch (err) {
       showError(err);
     }
@@ -116,6 +136,7 @@ export default function GitHubTokensSection({ showError }) {
           { method: "DELETE" },
         ),
       );
+      onLadderChanged?.();
     } catch (err) {
       showError(err);
     }
@@ -129,6 +150,7 @@ export default function GitHubTokensSection({ showError }) {
 
   const tokens = resp.tokens || [];
   const patterns = resp.patterns || [];
+  const uncovered = targetReposMissingCredentials || [];
   // Anything a ladder entry may name: a credential that exists, plus the
   // no-credential-at-all case a public repo wants. The same set
   // SetPattern accepts, so the picker cannot offer what the API refuses.
@@ -276,6 +298,31 @@ export default function GitHubTokensSection({ showError }) {
             the first credential added above becomes. Changes here need no
             restart.
           </Typography>
+          {uncovered.length > 0 && (
+            <Alert severity="warning" sx={{ mb: 2 }}>
+              Nothing in the ladder covers{" "}
+              {uncovered.length === 1
+                ? "this target repo"
+                : "these target repos"}
+              . A task filed against{" "}
+              {uncovered.length === 1 ? "it" : "one of them"} is dispatched, and
+              then every clone and push its sandbox makes fails with &quot;no
+              credential configured&quot;. Add an entry below covering{" "}
+              {uncovered.length === 1 ? "it" : "each of them"} &mdash;
+              owner/repo, owner/*, or &quot;*&quot; for the lot.
+              <Box sx={{ display: "flex", gap: 0.6, flexWrap: "wrap", mt: 1 }}>
+                {uncovered.map((repo) => (
+                  <Chip
+                    key={repo}
+                    size="small"
+                    color="warning"
+                    variant="outlined"
+                    label={repo}
+                  />
+                ))}
+              </Box>
+            </Alert>
+          )}
           <ul className="secrets-list">
             {patterns.map((entry) => (
               <li className="secret-row" key={entry.pattern}>
