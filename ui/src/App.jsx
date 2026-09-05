@@ -20,8 +20,10 @@ import SystemOverlay from "./components/SystemOverlay.jsx";
 import MetricsOverlay from "./components/MetricsOverlay.jsx";
 import RepoReleases from "./components/RepoReleases.jsx";
 import LoadingScreen from "./components/LoadingScreen.jsx";
+import BannerStrip from "./components/BannerStrip.jsx";
 import ReconcilerDownBanner from "./components/ReconcilerDownBanner.jsx";
 import AgentPauseBanner from "./components/AgentPauseBanner.jsx";
+import HostSandboxesBanner from "./components/HostSandboxesBanner.jsx";
 
 // POLL_INTERVAL_MS is how long the UI can be out of date by.
 //
@@ -804,19 +806,26 @@ export default function App() {
             )}
           </>
         )}
-        {/* One banner at a time: both are pinned to the same strip at the
-          top of the page, and a dead reconcile loop is the larger fact
-          -- a deployment that is not dispatching at all has no use for
-          being told why it is also not dispatching. */}
-        {config?.reconcilerDown ? (
-          <ReconcilerDownBanner />
-        ) : config?.agentPause?.paused ? (
-          <AgentPauseBanner
-            pause={config.agentPause}
-            onLifted={refreshConfig}
-            showError={showError}
-          />
-        ) : null}
+        <BannerStrip>
+          {/* Always shown when it is true, above whatever else is:
+            host sandboxing is a fact about the deployment rather than
+            an incident, so it outlasts the banners below it and must
+            not be hidden by one of them (grain/task-15). */}
+          {config?.hostSandboxes && <HostSandboxesBanner />}
+          {/* One of these two at a time, though: a dead reconcile loop
+            is the larger fact -- a deployment that is not dispatching
+            at all has no use for being told why it is also not
+            dispatching. */}
+          {config?.reconcilerDown ? (
+            <ReconcilerDownBanner />
+          ) : config?.agentPause?.paused ? (
+            <AgentPauseBanner
+              pause={config.agentPause}
+              onLifted={refreshConfig}
+              showError={showError}
+            />
+          ) : null}
+        </BannerStrip>
         {error !== null && <ErrorBanner message={error} />}
         {openTaskId !== null && detail !== null && (
           <DetailOverlay

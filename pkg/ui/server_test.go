@@ -998,6 +998,37 @@ func TestReconcilerDownReportsConfiguredFunc(t *testing.T) {
 	}
 }
 
+// --- host sandboxing --------------------------------------------------
+//
+// grain/task-15: dispatching into plain directories on the daemon's own
+// machine -- no isolation between an agent and the host grain runs on --
+// was what a deployment got by leaving a flag off, and GET /api/config
+// said nothing about it, so the UI drew the same screen for that as for
+// a deployment giving every run a VM. These are the API half of the
+// standing banner that now says which one this is.
+
+func TestHostSandboxesNotReportedByDefault(t *testing.T) {
+	srv, _ := testServer(t)
+
+	rec := do(t, srv, http.MethodGet, "/api/config", "")
+	got := decode[map[string]any](t, rec)
+	if got["hostSandboxes"] != nil && got["hostSandboxes"] != false {
+		t.Fatalf("hostSandboxes = %v, want false or omitted", got["hostSandboxes"])
+	}
+}
+
+func TestHostSandboxesReportedWhenConfigured(t *testing.T) {
+	client, _, _ := testClient(t)
+	client.Config.HostSandboxes = true
+	srv := ui.NewServerWithClient(client)
+
+	rec := do(t, srv, http.MethodGet, "/api/config", "")
+	got := decode[map[string]any](t, rec)
+	if got["hostSandboxes"] != true {
+		t.Fatalf("hostSandboxes = %v, want true", got["hostSandboxes"])
+	}
+}
+
 func TestRebootSurfacesError(t *testing.T) {
 	client, _, _ := testClient(t)
 	client.Config.Reboot = func(ctx context.Context) error {
