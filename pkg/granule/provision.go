@@ -10,14 +10,12 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
-
-	"github.com/bwsalmon/grain/pkg/grain"
 )
 
 // Where granule puts its own two files in the guest. Both are granule's
 // business rather than the controller's, which is why they are here and
 // not in pkg/grain: the contract with the controller is the tree at
-// grain.Root and the records on stdout, and how a setup script comes to
+// Root and the records on stdout, and how a setup script comes to
 // be runnable inside the sandbox is an implementation of that, not part
 // of it.
 const (
@@ -58,10 +56,10 @@ type ProvisionPlan struct {
 	Setup bool
 }
 
-// PlanProvision reads the mounted tree at root -- grain.Root in a real
+// PlanProvision reads the mounted tree at root -- Root in a real
 // container -- and says what belongs in the guest.
 //
-// Placement paths are validated on the way back out (grain.GuestPath),
+// Placement paths are validated on the way back out (GuestPath),
 // not merely on the way in. The controller checked them when it composed
 // the Spec, but this walks a directory somebody else mounted: a symlink
 // or a stray file in it is not something that check ever saw, and this
@@ -77,7 +75,7 @@ func PlanProvision(root, clientBinary string) (ProvisionPlan, error) {
 		}
 	}
 
-	setup := path.Join(root, path.Base(grain.FileSetup))
+	setup := path.Join(root, path.Base(FileSetup))
 	if _, err := os.Stat(setup); err == nil {
 		plan.Files = append(plan.Files, ProvisionSource{
 			GuestPath: GuestSetupPath, LocalPath: setup, Mode: 0o700,
@@ -85,7 +83,7 @@ func PlanProvision(root, clientBinary string) (ProvisionPlan, error) {
 		plan.Setup = true
 	}
 
-	dir := path.Join(root, path.Base(grain.DirPlacements))
+	dir := path.Join(root, path.Base(DirPlacements))
 	entries, err := placementFiles(dir)
 	if err != nil {
 		return ProvisionPlan{}, err
@@ -97,7 +95,7 @@ func PlanProvision(root, clientBinary string) (ProvisionPlan, error) {
 		if err != nil {
 			return ProvisionPlan{}, fmt.Errorf("granule: %s is not under %s", local, dir)
 		}
-		guest, err := grain.GuestPath(grain.DirPlacements + "/" + filepath.ToSlash(rel))
+		guest, err := GuestPath(DirPlacements + "/" + filepath.ToSlash(rel))
 		if err != nil {
 			return ProvisionPlan{}, err
 		}
@@ -208,6 +206,6 @@ func parents(p string) []string {
 	return out
 }
 
-// ModeString renders a mode the way grain.File writes one, for the
+// ModeString renders a mode the way File writes one, for the
 // diagnostics that quote a plan.
 func ModeString(m fs.FileMode) string { return "0" + strconv.FormatUint(uint64(m.Perm()), 8) }

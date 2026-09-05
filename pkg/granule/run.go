@@ -11,13 +11,11 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/bwsalmon/grain/pkg/grain"
 )
 
 // Config is everything Run needs that is not the environment.
 type Config struct {
-	// Root is the mounted tree, grain.Root in a container.
+	// Root is the mounted tree, Root in a container.
 	Root string
 	// ClientBinary is the grain client to install into the guest, or ""
 	// to install none.
@@ -41,9 +39,9 @@ type Config struct {
 // DefaultConfig is a granule running in a real container.
 func DefaultConfig() Config {
 	return Config{
-		Root:           grain.Root,
+		Root:           Root,
 		ClientBinary:   "/usr/local/bin/grain",
-		TerminationLog: grain.FileTerminationLog,
+		TerminationLog: FileTerminationLog,
 		Heartbeat:      30 * time.Second,
 		ReadyTimeout:   5 * time.Minute,
 	}
@@ -57,7 +55,7 @@ type Deps struct {
 	// Agent runs the agent CLI once the sandbox is provisioned and
 	// returns its Result. Nil means there is no agent to run, which is
 	// how the provisioning half is exercised on its own.
-	Agent func(ctx context.Context, spec grain.Spec, g Guest, out io.Writer) (grain.Result, error)
+	Agent func(ctx context.Context, spec Spec, g Guest, out io.Writer) (Result, error)
 	Now   func() time.Time
 }
 
@@ -76,22 +74,22 @@ func Run(ctx context.Context, cfg Config, deps Deps, stream *Stream) int {
 	st := &state{
 		stream: stream,
 		now:    now,
-		status: grain.Status{
-			Version: grain.Version,
-			Phase:   grain.PhaseProvisioning,
+		status: Status{
+			Version: Version,
+			Phase:   PhaseProvisioning,
 			Since:   now().UTC(),
 		},
 	}
 	st.emitLocked()
 
-	spec, err := grain.SpecFromEnv(grain.Getenv)
+	spec, err := SpecFromEnv(Getenv)
 	if err != nil {
 		// Before anything booted, so there is nothing to shut down. A
 		// wire version this build does not speak is the one failure that
 		// must be distinguishable from a bad setup script, and it is
 		// distinguishable by exit code (see docs/grain.md, "Exit codes").
-		st.finish(cfg, grain.PhaseFailed, grain.Result{
-			Outcome: grain.OutcomeSetupFailed,
+		st.finish(cfg, PhaseFailed, Result{
+			Outcome: OutcomeSetupFailed,
 			Detail:  err.Error(),
 		})
 		return ExitWireVersion
@@ -106,10 +104,10 @@ func Run(ctx context.Context, cfg Config, deps Deps, stream *Stream) int {
 		defer cancel()
 	}
 
-	console := stream.LineWriter(grain.SrcConsole)
+	console := stream.LineWriter(SrcConsole)
 	if err := deps.VMM.Start(ctx, console); err != nil {
-		st.finish(cfg, grain.PhaseFailed, grain.Result{
-			Outcome: grain.OutcomeSetupFailed,
+		st.finish(cfg, PhaseFailed, Result{
+			Outcome: OutcomeSetupFailed,
 			Detail:  err.Error(),
 		})
 		return ExitFailed
@@ -129,8 +127,8 @@ func Run(ctx context.Context, cfg Config, deps Deps, stream *Stream) int {
 
 	st.activity("waiting for the guest")
 	if err := waitReady(ctx, deps.Guest, cfg.ReadyTimeout, now); err != nil {
-		st.finish(cfg, grain.PhaseFailed, grain.Result{
-			Outcome: grain.OutcomeSetupFailed,
+		st.finish(cfg, PhaseFailed, Result{
+			Outcome: OutcomeSetupFailed,
 			Detail:  err.Error(),
 		})
 		return ExitFailed
@@ -139,8 +137,8 @@ func Run(ctx context.Context, cfg Config, deps Deps, stream *Stream) int {
 	st.activity("provisioning the sandbox")
 	plan, err := PlanProvision(cfg.Root, cfg.ClientBinary)
 	if err != nil {
-		st.finish(cfg, grain.PhaseFailed, grain.Result{
-			Outcome: grain.OutcomeSetupFailed,
+		st.finish(cfg, PhaseFailed, Result{
+			Outcome: OutcomeSetupFailed,
 			Detail:  err.Error(),
 		})
 		return ExitFailed
@@ -150,8 +148,8 @@ func Run(ctx context.Context, cfg Config, deps Deps, stream *Stream) int {
 		err = deps.Guest.Unpack(ctx, bytes.NewReader(blob))
 	}
 	if err != nil {
-		st.finish(cfg, grain.PhaseFailed, grain.Result{
-			Outcome: grain.OutcomeSetupFailed,
+		st.finish(cfg, PhaseFailed, Result{
+			Outcome: OutcomeSetupFailed,
 			Detail:  err.Error(),
 		})
 		return ExitFailed
@@ -161,8 +159,8 @@ func Run(ctx context.Context, cfg Config, deps Deps, stream *Stream) int {
 		st.activity("running setup")
 		res, err := runSetup(ctx, deps.Guest)
 		if err != nil {
-			st.finish(cfg, grain.PhaseFailed, grain.Result{
-				Outcome: grain.OutcomeSetupFailed,
+			st.finish(cfg, PhaseFailed, Result{
+				Outcome: OutcomeSetupFailed,
 				Detail:  err.Error(),
 			})
 			return ExitFailed
@@ -171,8 +169,8 @@ func Run(ctx context.Context, cfg Config, deps Deps, stream *Stream) int {
 		if res.ExitCode != 0 {
 			// The whole point of gating the agent on this: a failed
 			// checkout costs no model tokens.
-			st.finish(cfg, grain.PhaseFailed, grain.Result{
-				Outcome: grain.OutcomeSetupFailed,
+			st.finish(cfg, PhaseFailed, Result{
+				Outcome: OutcomeSetupFailed,
 				Detail:  fmt.Sprintf("setup exited %d", res.ExitCode),
 			})
 			return ExitFailed
@@ -189,7 +187,7 @@ func Run(ctx context.Context, cfg Config, deps Deps, stream *Stream) int {
 	// activity would have thrown it away at the moment it became the
 	// most recent thing known. It is also the one read that does not
 	// depend on a heartbeat having ticked.
-	st.enter(grain.PhaseRunning, readActivity(ctx, deps.Guest))
+	st.enter(PhaseRunning, readActivity(ctx, deps.Guest))
 
 	stop := st.heartbeat(ctx, deps.Guest, cfg.Heartbeat)
 	defer stop()
@@ -198,40 +196,40 @@ func Run(ctx context.Context, cfg Config, deps Deps, stream *Stream) int {
 		// No agent configured. Not an error: it is how the provisioning
 		// half is run on its own, and it ends the way a grain with
 		// nothing to do should -- with a Result, not by hanging.
-		st.finish(cfg, grain.PhaseSucceeded, grain.Result{Outcome: grain.OutcomeNoAction})
+		st.finish(cfg, PhaseSucceeded, Result{Outcome: OutcomeNoAction})
 		return ExitOK
 	}
 
-	result, err := deps.Agent(ctx, spec, deps.Guest, stream.LineWriter(grain.SrcAgent))
+	result, err := deps.Agent(ctx, spec, deps.Guest, stream.LineWriter(SrcAgent))
 	switch {
 	case errors.Is(ctx.Err(), context.DeadlineExceeded):
 		// MaxRuntime. The grain ends itself rather than being destroyed
 		// mid-thought, and says so.
-		result.Outcome = grain.OutcomeFailed
+		result.Outcome = OutcomeFailed
 		if result.Detail == "" {
 			result.Detail = "the grain reached GRAIN_MAX_RUNTIME"
 		}
-		st.finish(cfg, grain.PhaseFailed, result)
+		st.finish(cfg, PhaseFailed, result)
 		return ExitFailed
 	case err != nil:
 		if result.Outcome == "" {
-			result.Outcome = grain.OutcomeFailed
+			result.Outcome = OutcomeFailed
 		}
 		if result.Detail == "" {
 			result.Detail = err.Error()
 		}
-		st.finish(cfg, grain.PhaseFailed, result)
+		st.finish(cfg, PhaseFailed, result)
 		return ExitFailed
 	}
 	if result.Outcome == "" {
-		result.Outcome = grain.OutcomeSucceeded
+		result.Outcome = OutcomeSucceeded
 	}
-	phase := grain.PhaseSucceeded
-	if result.Outcome != grain.OutcomeSucceeded {
-		phase = grain.PhaseFailed
+	phase := PhaseSucceeded
+	if result.Outcome != OutcomeSucceeded {
+		phase = PhaseFailed
 	}
 	st.finish(cfg, phase, result)
-	if phase == grain.PhaseSucceeded {
+	if phase == PhaseSucceeded {
 		return ExitOK
 	}
 	return ExitFailed
@@ -287,16 +285,16 @@ const setupOutputLimit = 16 << 10
 // runSetup runs the controller's script in the guest and reports how it
 // ended, without reading it: the controller wrote that script, so it is
 // the one that knows what its output means.
-func runSetup(ctx context.Context, g Guest) (grain.SetupResult, error) {
+func runSetup(ctx context.Context, g Guest) (SetupResult, error) {
 	var out bytes.Buffer
 	// Combined, because a setup script's diagnosis is routinely
 	// interleaved across both and the reader is trying to find out what
 	// went wrong.
 	code, err := g.Exec(ctx, []string{GuestSetupPath}, &out, &out)
 	if err != nil {
-		return grain.SetupResult{}, fmt.Errorf("running the setup script: %w", err)
+		return SetupResult{}, fmt.Errorf("running the setup script: %w", err)
 	}
-	return grain.SetupResult{ExitCode: code, Output: tail(out.String(), setupOutputLimit)}, nil
+	return SetupResult{ExitCode: code, Output: tail(out.String(), setupOutputLimit)}, nil
 }
 
 // tail keeps the last n bytes, marking the cut so a reader is not left
@@ -323,14 +321,14 @@ type state struct {
 	now    func() time.Time
 
 	mu     sync.Mutex
-	status grain.Status
+	status Status
 	done   bool
 }
 
 // emit writes a whole snapshot. Caller holds mu.
 func (s *state) emit() {
 	s.status.Seq = s.stream.Seq()
-	_, _ = s.stream.Emit(grain.SrcShim, grain.KindStatus, s.status)
+	_, _ = s.stream.Emit(SrcShim, KindStatus, s.status)
 }
 
 func (s *state) emitLocked() {
@@ -339,7 +337,7 @@ func (s *state) emitLocked() {
 	s.emit()
 }
 
-func (s *state) setup(res grain.SetupResult) {
+func (s *state) setup(res SetupResult) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.status.Setup = &res
@@ -355,18 +353,18 @@ func (s *state) activity(what string) {
 	s.emit()
 }
 
-func (s *state) enter(p grain.Phase, activity string) {
+func (s *state) enter(p Phase, activity string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.status.Phase, s.status.Since, s.status.Activity = p, s.now().UTC(), activity
-	_, _ = s.stream.Emit(grain.SrcShim, grain.KindPhase, string(p))
+	_, _ = s.stream.Emit(SrcShim, KindPhase, string(p))
 	s.emit()
 }
 
 // finish writes the one ending. Idempotent, because several paths can
 // reach it and a grain that reported two Results would have the
 // controller believe whichever it read last.
-func (s *state) finish(cfg Config, p grain.Phase, r grain.Result) {
+func (s *state) finish(cfg Config, p Phase, r Result) {
 	s.mu.Lock()
 	if s.done {
 		s.mu.Unlock()
@@ -375,7 +373,7 @@ func (s *state) finish(cfg Config, p grain.Phase, r grain.Result) {
 	s.done = true
 	s.status.Phase, s.status.Since, s.status.Result = p, s.now().UTC(), &r
 	s.status.Activity = ""
-	_, _ = s.stream.Emit(grain.SrcShim, grain.KindPhase, string(p))
+	_, _ = s.stream.Emit(SrcShim, KindPhase, string(p))
 	s.emit()
 	s.mu.Unlock()
 
@@ -402,7 +400,7 @@ func (s *state) finished() bool {
 
 // heartbeat emits a status on a slow tick, refreshing the two things
 // that come from inside the sandbox: its health, and whatever the work
-// has said about itself through grain.GuestActivityFile.
+// has said about itself through GuestActivityFile.
 //
 // The activity file is read on this round trip rather than on one of its
 // own, which is the whole reason it is a file: the shim is already
@@ -451,7 +449,7 @@ func (s *state) heartbeat(ctx context.Context, g Guest, every time.Duration) fun
 const activityLimit = 200
 
 func readActivity(ctx context.Context, g Guest) string {
-	body, err := g.ReadFile(ctx, grain.GuestActivityFile)
+	body, err := g.ReadFile(ctx, GuestActivityFile)
 	if err != nil || len(body) == 0 {
 		return ""
 	}

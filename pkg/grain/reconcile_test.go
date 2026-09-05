@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/bwsalmon/grain/pkg/grain"
+	"github.com/bwsalmon/grain/pkg/granule"
 )
 
 var start = time.Date(2026, 9, 4, 12, 0, 0, 0, time.UTC)
@@ -48,7 +49,7 @@ func TestReconcile(t *testing.T) {
 	}{{
 		name: "a grain the store knows nothing about is released",
 		obs: grain.Observed{
-			Status: grain.Status{Phase: grain.PhaseRunning, Since: start},
+			Status: granule.Status{Phase: granule.PhaseRunning, Since: start},
 			Run:    nil,
 			Now:    start.Add(time.Minute),
 		},
@@ -56,7 +57,7 @@ func TestReconcile(t *testing.T) {
 	}, {
 		name: "a grain whose run was already finished is released",
 		obs: grain.Observed{
-			Status: grain.Status{Phase: grain.PhaseSucceeded, Since: start},
+			Status: granule.Status{Phase: granule.PhaseSucceeded, Since: start},
 			Run:    &grain.RunRow{ID: "task-7-1", Live: false},
 			Now:    start.Add(time.Minute),
 		},
@@ -64,7 +65,7 @@ func TestReconcile(t *testing.T) {
 	}, {
 		name: "an already-released grain needs nothing",
 		obs: grain.Observed{
-			Status: grain.Status{Phase: grain.PhaseReleased, Since: start},
+			Status: granule.Status{Phase: granule.PhaseReleased, Since: start},
 			Run:    &grain.RunRow{ID: "task-7-1", Live: false},
 			Now:    start.Add(time.Minute),
 		},
@@ -74,7 +75,7 @@ func TestReconcile(t *testing.T) {
 		// row is all that is left of it and still needs an ending.
 		name: "a released grain under a live run is failed",
 		obs: grain.Observed{
-			Status: grain.Status{Phase: grain.PhaseReleased, Since: start},
+			Status: granule.Status{Phase: granule.PhaseReleased, Since: start},
 			Run:    live(),
 			Now:    start.Add(time.Minute),
 		},
@@ -82,7 +83,7 @@ func TestReconcile(t *testing.T) {
 	}, {
 		name: "a lost container is failed and released, with no repair attempt",
 		obs: grain.Observed{
-			Status: grain.Status{Phase: grain.PhaseLost, Since: start, Activity: "running the test suite"},
+			Status: granule.Status{Phase: granule.PhaseLost, Since: start, Activity: "running the test suite"},
 			Run:    live(),
 			Now:    start.Add(time.Minute),
 		},
@@ -90,8 +91,8 @@ func TestReconcile(t *testing.T) {
 	}, {
 		name: "a finished grain is finished with and released",
 		obs: grain.Observed{
-			Status: grain.Status{Phase: grain.PhaseSucceeded, Since: start,
-				Result: &grain.Result{Outcome: grain.OutcomeSucceeded}},
+			Status: granule.Status{Phase: granule.PhaseSucceeded, Since: start,
+				Result: &granule.Result{Outcome: granule.OutcomeSucceeded}},
 			Run: live(),
 			Now: start.Add(time.Hour),
 		},
@@ -101,8 +102,8 @@ func TestReconcile(t *testing.T) {
 		// destroying the grain that holds it.
 		name: "a finished grain whose task was closed is still finished with",
 		obs: grain.Observed{
-			Status: grain.Status{Phase: grain.PhaseFailed, Since: start,
-				Result: &grain.Result{Outcome: grain.OutcomeFailed}},
+			Status: granule.Status{Phase: granule.PhaseFailed, Since: start,
+				Result: &granule.Result{Outcome: granule.OutcomeFailed}},
 			Run: &grain.RunRow{ID: "task-7-1", Live: true, TaskClosed: true},
 			Now: start.Add(time.Hour),
 		},
@@ -112,7 +113,7 @@ func TestReconcile(t *testing.T) {
 		// converging.
 		name: "rebuilds within the cap are left alone",
 		obs: grain.Observed{
-			Status: grain.Status{Phase: grain.PhaseRunning, Since: start, Rebuilds: 3},
+			Status: granule.Status{Phase: granule.PhaseRunning, Since: start, Rebuilds: 3},
 			Run:    live(),
 			Now:    start.Add(time.Minute),
 		},
@@ -120,7 +121,7 @@ func TestReconcile(t *testing.T) {
 	}, {
 		name: "rebuilds past the cap end the grain",
 		obs: grain.Observed{
-			Status: grain.Status{Phase: grain.PhaseRunning, Since: start, Rebuilds: 4},
+			Status: granule.Status{Phase: granule.PhaseRunning, Since: start, Rebuilds: 4},
 			Run:    live(),
 			Now:    start.Add(time.Minute),
 		},
@@ -132,7 +133,7 @@ func TestReconcile(t *testing.T) {
 		// controller supplies the outcome because SIGKILL may win.
 		name: "a closed task is failed and destroyed in one tick",
 		obs: grain.Observed{
-			Status: grain.Status{Phase: grain.PhaseRunning, Since: start},
+			Status: granule.Status{Phase: granule.PhaseRunning, Since: start},
 			Run:    &grain.RunRow{ID: "task-7-1", Live: true, TaskClosed: true},
 			Now:    start.Add(time.Minute),
 		},
@@ -140,7 +141,7 @@ func TestReconcile(t *testing.T) {
 	}, {
 		name: "a paused deployment stops its grains",
 		obs: grain.Observed{
-			Status: grain.Status{Phase: grain.PhaseRunning, Since: start},
+			Status: granule.Status{Phase: granule.PhaseRunning, Since: start},
 			Run:    &grain.RunRow{ID: "task-7-1", Live: true, Paused: true},
 			Now:    start.Add(time.Minute),
 		},
@@ -149,7 +150,7 @@ func TestReconcile(t *testing.T) {
 		// A grain being stopped is not also reattached.
 		name: "a cancelled grain is failed and destroyed",
 		obs: grain.Observed{
-			Status: grain.Status{Phase: grain.PhaseRunning, Since: start, Activity: "building"},
+			Status: granule.Status{Phase: granule.PhaseRunning, Since: start, Activity: "building"},
 			Run:    &grain.RunRow{ID: "task-7-1", Live: true, TaskClosed: true},
 			Now:    start.Add(time.Minute),
 		},
@@ -157,7 +158,7 @@ func TestReconcile(t *testing.T) {
 	}, {
 		name: "a boot within budget is waited on",
 		obs: grain.Observed{
-			Status: grain.Status{Phase: grain.PhaseProvisioning, Since: start},
+			Status: granule.Status{Phase: granule.PhaseProvisioning, Since: start},
 			Run:    live(),
 			Now:    start.Add(9 * time.Minute),
 		},
@@ -165,7 +166,7 @@ func TestReconcile(t *testing.T) {
 	}, {
 		name: "a boot past budget is failed and released",
 		obs: grain.Observed{
-			Status: grain.Status{Phase: grain.PhaseProvisioning, Since: start,
+			Status: granule.Status{Phase: granule.PhaseProvisioning, Since: start,
 				Activity: "cloning acme/widgets"},
 			Run: live(),
 			Now: start.Add(11 * time.Minute),
@@ -177,7 +178,7 @@ func TestReconcile(t *testing.T) {
 		// for in between.
 		name: "a provisioning grain within budget is left to get on with it",
 		obs: grain.Observed{
-			Status: grain.Status{Phase: grain.PhaseProvisioning, Since: start,
+			Status: granule.Status{Phase: granule.PhaseProvisioning, Since: start,
 				Activity: "cloning acme/widgets"},
 			Run: &grain.RunRow{ID: "task-7-1", Live: true, Activity: "cloning acme/widgets"},
 			Now: start.Add(2 * time.Minute),
@@ -186,7 +187,7 @@ func TestReconcile(t *testing.T) {
 	}, {
 		name: "a running grain with nothing outstanding needs nothing",
 		obs: grain.Observed{
-			Status: grain.Status{Phase: grain.PhaseRunning, Since: start, Activity: "building"},
+			Status: granule.Status{Phase: granule.PhaseRunning, Since: start, Activity: "building"},
 			Run:    &grain.RunRow{ID: "task-7-1", Live: true, Activity: "building"},
 			Now:    start.Add(time.Minute),
 		},
@@ -194,7 +195,7 @@ func TestReconcile(t *testing.T) {
 	}, {
 		name: "a running grain's activity is mirrored onto its row",
 		obs: grain.Observed{
-			Status: grain.Status{Phase: grain.PhaseRunning, Since: start, Activity: "waiting for CI"},
+			Status: granule.Status{Phase: granule.PhaseRunning, Since: start, Activity: "waiting for CI"},
 			Run:    &grain.RunRow{ID: "task-7-1", Live: true, Activity: "building"},
 			Now:    start.Add(time.Minute),
 		},
@@ -216,7 +217,7 @@ func TestReconcile(t *testing.T) {
 // that drifted on a second look would make skipping a tick unsafe.
 func TestReconcileIsLevelTriggered(t *testing.T) {
 	obs := grain.Observed{
-		Status: grain.Status{Phase: grain.PhaseRunning, Since: start, Activity: "building"},
+		Status: granule.Status{Phase: granule.PhaseRunning, Since: start, Activity: "building"},
 		Run:    live(),
 		Now:    start.Add(time.Minute),
 	}
@@ -231,13 +232,13 @@ func TestReconcileIsLevelTriggered(t *testing.T) {
 // grain can be found in with no live run behind it, since that is the
 // whole of orphan reaping -- there is no separate pass.
 func TestEveryOrphanPhaseIsReleased(t *testing.T) {
-	phases := []grain.Phase{
-		grain.PhaseProvisioning, grain.PhaseRunning, grain.PhaseSucceeded, grain.PhaseFailed,
-		grain.PhaseCancelled, grain.PhaseLost,
+	phases := []granule.Phase{
+		granule.PhaseProvisioning, granule.PhaseRunning, granule.PhaseSucceeded, granule.PhaseFailed,
+		granule.PhaseCancelled, granule.PhaseLost,
 	}
 	for _, p := range phases {
 		got := kinds(grain.Reconcile(grain.Observed{
-			Status: grain.Status{Phase: p, Since: start},
+			Status: granule.Status{Phase: p, Since: start},
 			Now:    start.Add(time.Minute),
 		}, grain.DefaultPolicy()))
 		if !equal(got, []grain.ActionKind{grain.ActionRelease}) {

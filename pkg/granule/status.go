@@ -1,6 +1,19 @@
-package grain
+package granule
 
 import "time"
+
+// ID names one grain. It is derived from the run it serves
+// (dispatch.RunID) and never allocated by a backend, because a controller
+// that restarts has to be able to name every grain it left running
+// without holding a handle to it: List plus a derivable name is the whole
+// of reattach.
+//
+// It lives in this package rather than with the controller's own view of
+// a fleet because both sides use it and neither owns it: the backend
+// labels a container with it, the controller addresses by it, and its
+// value is derived from the run rather than chosen by either. That is
+// what a shared contract is for.
+type ID string
 
 // Phase is where a grain is in its life. It is the one field Reconcile
 // branches on first, and it is deliberately coarse: anything finer -- what

@@ -1,5 +1,12 @@
-// Package grain is one unit of agent work and the seam a controller
-// drives it through.
+// Package grain is how a controller manages a fleet of grains: the seam
+// it drives them through (Grains, Grain) and the whole of its per-grain
+// policy (Reconcile, Policy).
+//
+// What one grain *is* -- its Spec, its Status, the records it emits, the
+// files and environment it is configured by -- is pkg/granule's, and a
+// granule never imports anything from here. That is the boundary: this
+// package is graind's view of many, and that one is the contract with
+// each.
 //
 // A grain is a container: the agent CLI, a kontur VMM, and the guest VM
 // that VMM boots, with a shim as PID 1 holding the three together. The
@@ -78,26 +85,24 @@
 // push failed, which is silence it cannot tell from health.
 package grain
 
-import "context"
+import (
+	"context"
 
-// ID names one grain. It is derived from the run it serves
-// (dispatch.RunID) and never allocated by a backend, because a controller
-// that restarts has to be able to name every grain it left running
-// without holding a handle to it: List plus a derivable name is the whole
-// of reattach.
-type ID string
+	"github.com/bwsalmon/grain/pkg/granule"
+)
 
 // Grains is one backend's fleet. KonturGrains is the real one; HostGrains
 // runs the agent as a plain subprocess against a directory, so the test
 // suite does not need a VM per case.
 type Grains interface {
-	// Create asks for a grain matching spec. It is idempotent by spec.ID
-	// -- asking twice returns the grain that exists rather than building
-	// a second -- and returns as soon as the ask is durable, never
+	// Create asks for a grain matching spec, under the name the
+	// controller derived for it. It is idempotent by that id -- asking
+	// twice returns the grain that exists rather than building a second
+	// -- and returns as soon as the ask is durable, never
 	// waiting for a boot. Waiting is the thing that put a VM boot on a
 	// caller's stack and stranded rows when it failed; here a boot is a
 	// Phase (PhaseProvisioning) the next poll observes.
-	Create(ctx context.Context, spec Spec) (Grain, error)
+	Create(ctx context.Context, id granule.ID, spec granule.Spec) (Grain, error)
 
 	// List reports every grain this backend holds, whether or not the
 	// controller knows about it. It is the poll primitive -- one call per
@@ -123,10 +128,10 @@ type Grains interface {
 	// worth being able to see, and one an exec could not have told apart
 	// -- whatever a status subcommand printed would come from the same
 	// wedged shim.
-	List(ctx context.Context) ([]Status, error)
+	List(ctx context.Context) ([]granule.Status, error)
 
 	// Get re-attaches to one grain by name.
-	Get(ctx context.Context, id ID) (Grain, error)
+	Get(ctx context.Context, id granule.ID) (Grain, error)
 }
 
 // Grain is one unit of agent work.
@@ -138,7 +143,7 @@ type Grains interface {
 // needs a view the grain does not have: a grain rebuilding over and over
 // is one to kill, and Policy.MaxRebuilds is where that is decided.
 type Grain interface {
-	ID() ID
+	ID() granule.ID
 
 	// Transcript reads this run's trajectory from a cursor -- the
 	// sequence number of the last record the caller saw, Status.Seq's own

@@ -1,4 +1,4 @@
-package grain_test
+package granule_test
 
 import (
 	"encoding/json"
@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bwsalmon/grain/pkg/grain"
+	"github.com/bwsalmon/grain/pkg/granule"
 )
 
 // The wire format is a contract between two separately released
@@ -26,14 +26,14 @@ func marshal(t *testing.T, v any) string {
 }
 
 func TestSpecEnvAndFiles(t *testing.T) {
-	spec := grain.Spec{
-		Version:    grain.Version,
-		Framework:  grain.FrameworkSpec{Name: "claude", Credential: "sk-ant-oat01-..."},
-		Shape:      grain.Shape{CPUs: 2, MemoryMB: 8192, DiskGB: 30},
+	spec := granule.Spec{
+		Version:    granule.Version,
+		Framework:  granule.FrameworkSpec{Name: "claude", Credential: "sk-ant-oat01-..."},
+		Shape:      granule.Shape{CPUs: 2, MemoryMB: 8192, DiskGB: 30},
 		Prompt:     "You are working on task-311...\n",
-		Setup:      "#!/bin/sh\nset -eu\ngit clone http://10.0.2.1:8080/bwsalmon/grain.git /w\ncd /w && ./scripts/setup.sh\ngit rev-parse HEAD\n",
-		Placements: []grain.Placement{{Path: "/home/agent/.git-credentials", Content: "https://x:tok@10.0.2.1:8080"}},
-		MaxRuntime: grain.Duration(2 * time.Hour),
+		Setup:      "#!/bin/sh\nset -eu\ngit clone http://10.0.2.1:8080/bwsalmon/granule.git /w\ncd /w && ./scripts/setup.sh\ngit rev-parse HEAD\n",
+		Placements: []granule.Placement{{Path: "/home/agent/.git-credentials", Content: "https://x:tok@10.0.2.1:8080"}},
+		MaxRuntime: granule.Duration(2 * time.Hour),
 	}
 
 	// Scalars only: no material in the environment at all.
@@ -65,7 +65,7 @@ func TestSpecEnvAndFiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Files: %v", err)
 	}
-	wantFiles := map[string]grain.File{
+	wantFiles := map[string]granule.File{
 		"/grain/credential": {Content: "sk-ant-oat01-...", Mode: "0600"},
 		"/grain/prompt":     {Content: spec.Prompt, Mode: "0644"},
 		"/grain/setup":      {Content: spec.Setup, Mode: "0755"},
@@ -87,7 +87,7 @@ func TestSpecEnvAndFiles(t *testing.T) {
 		}
 	}
 
-	back, err := grain.SpecFromEnv(func(k string) string { return env[k] })
+	back, err := granule.SpecFromEnv(func(k string) string { return env[k] })
 	if err != nil {
 		t.Fatalf("SpecFromEnv: %v", err)
 	}
@@ -110,14 +110,14 @@ func TestSpecEnvAndFiles(t *testing.T) {
 // names a location.
 func TestPlacementPathContainment(t *testing.T) {
 	for _, guest := range []string{"/home/agent/.netrc", "/etc/pip.conf", "/a"} {
-		at, err := grain.PlacementPath(guest)
+		at, err := granule.PlacementPath(guest)
 		if err != nil {
 			t.Fatalf("PlacementPath(%q): %v", guest, err)
 		}
-		if !strings.HasPrefix(at, grain.DirPlacements+"/") {
-			t.Errorf("PlacementPath(%q) = %q, outside %s", guest, at, grain.DirPlacements)
+		if !strings.HasPrefix(at, granule.DirPlacements+"/") {
+			t.Errorf("PlacementPath(%q) = %q, outside %s", guest, at, granule.DirPlacements)
 		}
-		back, err := grain.GuestPath(at)
+		back, err := granule.GuestPath(at)
 		if err != nil {
 			t.Fatalf("GuestPath(%q): %v", at, err)
 		}
@@ -133,17 +133,17 @@ func TestPlacementPathContainment(t *testing.T) {
 		"/a/./b",              // not in simplest form
 		"/a//b",               // ditto
 	} {
-		if at, err := grain.PlacementPath(bad); err == nil {
+		if at, err := granule.PlacementPath(bad); err == nil {
 			t.Errorf("PlacementPath(%q) = %q, want an error", bad, at)
 		}
 	}
 
 	// A stray file the shim finds under the tree is refused on the way
 	// out too: it walks a directory somebody else mounted.
-	if _, err := grain.GuestPath("/grain/placements/a/../../../etc/shadow"); err == nil {
+	if _, err := granule.GuestPath("/grain/placements/a/../../../etc/shadow"); err == nil {
 		t.Error("GuestPath accepted a path escaping the placements tree")
 	}
-	if _, err := grain.GuestPath("/somewhere/else"); err == nil {
+	if _, err := granule.GuestPath("/somewhere/else"); err == nil {
 		t.Error("GuestPath accepted a path outside the placements tree")
 	}
 }
@@ -152,9 +152,9 @@ func TestPlacementPathContainment(t *testing.T) {
 // something wrong; writing one of them silently is worse than writing
 // neither and saying so.
 func TestFilesRefusesClashingPlacements(t *testing.T) {
-	_, err := grain.Spec{
-		Version: grain.Version,
-		Placements: []grain.Placement{
+	_, err := granule.Spec{
+		Version: granule.Version,
+		Placements: []granule.Placement{
 			{Path: "/home/agent/.netrc", Content: "a"},
 			{Path: "/home/agent/.netrc", Content: "b"},
 		},
@@ -175,8 +175,8 @@ func TestSpecFromEnvRefusesAnotherVersion(t *testing.T) {
 	// rather than a compile error. A fake version has no business
 	// spending that word.
 	const other = "v7"
-	_, err := grain.SpecFromEnv(func(k string) string {
-		if k == grain.EnvVersion {
+	_, err := granule.SpecFromEnv(func(k string) string {
+		if k == granule.EnvVersion {
 			return other
 		}
 		return ""
@@ -184,11 +184,11 @@ func TestSpecFromEnvRefusesAnotherVersion(t *testing.T) {
 	if err == nil {
 		t.Fatalf("SpecFromEnv accepted wire version %s", other)
 	}
-	if !strings.Contains(err.Error(), other) || !strings.Contains(err.Error(), grain.Version) {
+	if !strings.Contains(err.Error(), other) || !strings.Contains(err.Error(), granule.Version) {
 		t.Errorf("error should name both versions, got: %v", err)
 	}
 
-	if _, err := grain.SpecFromEnv(func(string) string { return "" }); err == nil {
+	if _, err := granule.SpecFromEnv(func(string) string { return "" }); err == nil {
 		t.Fatal("SpecFromEnv accepted an environment with no version at all")
 	}
 }
@@ -204,12 +204,12 @@ func TestSpecFromEnvRefusesAnotherVersion(t *testing.T) {
 // perfectly and still put grain's task model into the sandbox image's
 // contract.
 func TestGrainEnvCarriesNoTaskModel(t *testing.T) {
-	full := marshal(t, grain.Spec{
-		Version:   grain.Version,
-		Framework: grain.FrameworkSpec{Name: "claude", Credential: "sk-ant-oat01-..."},
-		Shape:     grain.Shape{CPUs: 2}, Setup: "true",
-		Placements: []grain.Placement{{Path: "/p", Mode: "0600"}},
-		MaxRuntime: grain.Duration(time.Hour),
+	full := marshal(t, granule.Spec{
+		Version:   granule.Version,
+		Framework: granule.FrameworkSpec{Name: "claude", Credential: "sk-ant-oat01-..."},
+		Shape:     granule.Shape{CPUs: 2}, Setup: "true",
+		Placements: []granule.Placement{{Path: "/p", Mode: "0600"}},
+		MaxRuntime: granule.Duration(time.Hour),
 	})
 	for _, absent := range []string{
 		"\"task\"", "\"repo\"", "\"branch\"", "\"base\"", "\"target\"",
@@ -230,17 +230,17 @@ func TestGrainEnvCarriesNoTaskModel(t *testing.T) {
 }
 
 func TestStatusWireFormat(t *testing.T) {
-	st := grain.Status{
-		Version:  grain.Version,
+	st := granule.Status{
+		Version:  granule.Version,
 		ID:       "task-311-2", // set by the backend, never on the wire
-		Phase:    grain.PhaseRunning,
+		Phase:    granule.PhaseRunning,
 		Since:    time.Date(2026, 9, 4, 19, 41, 12, 0, time.UTC),
 		Activity: "waiting for CI",
 		Rebuilds: 1,
-		Setup:    &grain.SetupResult{Output: "9f3c1a2\n"},
-		Health: grain.Health{
-			Container: grain.ContainerHealth{Running: true},
-			Guest: grain.GuestHealth{
+		Setup:    &granule.SetupResult{Output: "9f3c1a2\n"},
+		Health: granule.Health{
+			Container: granule.ContainerHealth{Running: true},
+			Guest: granule.GuestHealth{
 				Ready: true, LoadAverage: "0.41 0.30 0.22",
 				ConntrackCount: 812, ConntrackMax: 262144,
 			},
@@ -277,10 +277,10 @@ func TestStatusWireFormat(t *testing.T) {
 // value that spans lines cannot survive a reader joining mid-stream or a
 // rotation taking the first half of it.
 func TestRecordIsOneLine(t *testing.T) {
-	rec := grain.Record{
-		Version: grain.Version, Seq: 42,
+	rec := granule.Record{
+		Version: granule.Version, Seq: 42,
 		T:    time.Date(2026, 9, 4, 19, 55, 3, 0, time.UTC),
-		Src:  grain.SrcConsole,
+		Src:  granule.SrcConsole,
 		Data: json.RawMessage(`"[    0.512] EXT4-fs (vda): mounted"`),
 	}
 	b, err := json.Marshal(rec)
@@ -299,7 +299,7 @@ func TestRecordIsOneLine(t *testing.T) {
 // A duration that cannot be parsed must say so rather than silently
 // becoming zero, which would read downstream as "no limit".
 func TestDurationRejectsNonsense(t *testing.T) {
-	var d grain.Duration
+	var d granule.Duration
 	if err := json.Unmarshal([]byte(`"two hours"`), &d); err == nil {
 		t.Fatal("parsing \"two hours\" succeeded, want an error")
 	}
@@ -312,11 +312,11 @@ func TestDurationRejectsNonsense(t *testing.T) {
 // everyone remembers. Redacted is the enforceable version, and this is
 // what stops a later field from quietly escaping it.
 func TestRedactedCarriesNoMaterial(t *testing.T) {
-	spec := grain.Spec{
-		Version:   grain.Version,
-		Framework: grain.FrameworkSpec{Name: "claude", Credential: "sk-ant-oat01-secret"},
-		Setup:     "git clone http://10.0.2.1:8080/bwsalmon/grain.git /w",
-		Placements: []grain.Placement{
+	spec := granule.Spec{
+		Version:   granule.Version,
+		Framework: granule.FrameworkSpec{Name: "claude", Credential: "sk-ant-oat01-secret"},
+		Setup:     "git clone http://10.0.2.1:8080/bwsalmon/granule.git /w",
+		Placements: []granule.Placement{
 			{Path: "/home/agent/.git-credentials", Content: "https://x:sbx_tok@10.0.2.1:8080", Mode: "0600"},
 		},
 	}
@@ -345,7 +345,7 @@ func TestRedactedCarriesNoMaterial(t *testing.T) {
 	// than something interpolated into the script: a secret in Setup
 	// would survive Redacted, and Setup is exactly the field you need
 	// unblanked to diagnose a failed run.
-	if !strings.Contains(out, "git clone http://10.0.2.1:8080/bwsalmon/grain.git") {
+	if !strings.Contains(out, "git clone http://10.0.2.1:8080/bwsalmon/granule.git") {
 		t.Error("Redacted blanked setup, which is diagnosis rather than material")
 	}
 	if strings.Contains(spec.Setup, "@") {
@@ -358,8 +358,8 @@ func TestRedactedCarriesNoMaterial(t *testing.T) {
 // literal JSON for the same reason every other document is: the reader
 // and the writer ship in different artifacts.
 func TestStatusRidesTheRecordStream(t *testing.T) {
-	st := grain.Status{
-		Version: grain.Version, Phase: grain.PhaseRunning,
+	st := granule.Status{
+		Version: granule.Version, Phase: granule.PhaseRunning,
 		Since:    time.Date(2026, 9, 4, 19, 41, 12, 0, time.UTC),
 		Activity: "running the test suite", Seq: 4471,
 	}
@@ -367,11 +367,11 @@ func TestStatusRidesTheRecordStream(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshalling status: %v", err)
 	}
-	rec := grain.Record{
-		Version: grain.Version, Seq: st.Seq,
+	rec := granule.Record{
+		Version: granule.Version, Seq: st.Seq,
 		T:    time.Date(2026, 9, 4, 19, 41, 12, 0, time.UTC),
-		Src:  grain.SrcShim,
-		Kind: grain.KindStatus,
+		Src:  granule.SrcShim,
+		Kind: granule.KindStatus,
 		Data: body,
 	}
 	line, err := json.Marshal(rec)
@@ -385,23 +385,23 @@ func TestStatusRidesTheRecordStream(t *testing.T) {
 	// A reader tailing the stream gets the Status back whole -- it is a
 	// snapshot, not a delta, which is what keeps Reconcile level-triggered
 	// when it is fed from here instead of from an exec.
-	var back grain.Record
+	var back granule.Record
 	if err := json.Unmarshal(line, &back); err != nil {
 		t.Fatalf("reading the record back: %v", err)
 	}
-	if back.Kind != grain.KindStatus || back.Src != grain.SrcShim {
+	if back.Kind != granule.KindStatus || back.Src != granule.SrcShim {
 		t.Fatalf("record round-tripped as src=%q kind=%q", back.Src, back.Kind)
 	}
-	var got grain.Status
+	var got granule.Status
 	if err := json.Unmarshal(back.Data, &got); err != nil {
 		t.Fatalf("reading the status back: %v", err)
 	}
-	if got.Phase != grain.PhaseRunning || got.Activity != st.Activity || got.Seq != st.Seq {
+	if got.Phase != granule.PhaseRunning || got.Activity != st.Activity || got.Seq != st.Seq {
 		t.Errorf("status round-tripped as %+v", got)
 	}
 }
 
-func keys(m map[string]grain.File) []string {
+func keys(m map[string]granule.File) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {
 		out = append(out, k)
@@ -419,11 +419,11 @@ func keys(m map[string]grain.File) []string {
 // failure this guards against is a later change quietly reintroducing a
 // controller address or a controller credential on the grain's own wire.
 func TestAGrainCannotReachAControllerAtAll(t *testing.T) {
-	spec := grain.Spec{
-		Version:   grain.Version,
-		Framework: grain.FrameworkSpec{Name: "claude", Credential: "sk-ant-oat01-..."},
+	spec := granule.Spec{
+		Version:   granule.Version,
+		Framework: granule.FrameworkSpec{Name: "claude", Credential: "sk-ant-oat01-..."},
 		Setup:     "true",
-		Placements: []grain.Placement{
+		Placements: []granule.Placement{
 			// A run's controller credential is one of these, exactly as
 			// its git credential is -- and grain cannot tell them apart,
 			// which is the property.
@@ -447,7 +447,7 @@ func TestAGrainCannotReachAControllerAtAll(t *testing.T) {
 	}
 	// The one it does place is the agent's own, which lives beside the
 	// agent because the agent is what uses it.
-	if _, ok := files[grain.FileCredential]; !ok {
+	if _, ok := files[granule.FileCredential]; !ok {
 		t.Error("the model credential is missing; that one is the grain's own business")
 	}
 }
@@ -463,13 +463,13 @@ func TestAGrainCannotReachAControllerAtAll(t *testing.T) {
 // shim there is no second opinion to reconcile, so the split between what
 // a grain says and what the runtime says has to be exact.
 func TestAGrainReportsNeitherItsNameNorItsReachability(t *testing.T) {
-	st := grain.Status{
-		Version: grain.Version, Phase: grain.PhaseRunning,
+	st := granule.Status{
+		Version: granule.Version, Phase: granule.PhaseRunning,
 		Since: time.Date(2026, 9, 4, 19, 41, 12, 0, time.UTC),
 		ID:    "task-311-1",
-		Health: grain.Health{
-			Container: grain.ContainerHealth{Running: true, Err: "unreachable"},
-			Guest:     grain.GuestHealth{Ready: true},
+		Health: granule.Health{
+			Container: granule.ContainerHealth{Running: true, Err: "unreachable"},
+			Guest:     granule.GuestHealth{Ready: true},
 		},
 	}
 	body, err := json.Marshal(st)
@@ -497,16 +497,16 @@ func TestAGrainReportsNeitherItsNameNorItsReachability(t *testing.T) {
 		t.Errorf("health has %d members, want just guest: %s", len(shape.Health), body)
 	}
 
-	var back grain.Status
+	var back granule.Status
 	if err := json.Unmarshal(body, &back); err != nil {
 		t.Fatalf("reading the status back: %v", err)
 	}
-	if back.ID != "" || back.Health.Container != (grain.ContainerHealth{}) {
+	if back.ID != "" || back.Health.Container != (granule.ContainerHealth{}) {
 		t.Errorf("id or container health survived a round trip: %+v", back)
 	}
 	// The half that is the grain's own still crosses, or the record would
 	// carry nothing worth reading.
-	if !back.Health.Guest.Ready || back.Phase != grain.PhaseRunning {
+	if !back.Health.Guest.Ready || back.Phase != granule.PhaseRunning {
 		t.Errorf("the grain's own half did not survive: %+v", back)
 	}
 }
@@ -518,21 +518,21 @@ func TestAGrainReportsNeitherItsNameNorItsReachability(t *testing.T) {
 // the sandbox appear to have authored a prompt, a credential or a setup
 // script.
 func TestTheGuestActivityPathIsOutsideTheMountedTree(t *testing.T) {
-	if strings.HasPrefix(grain.GuestActivityFile, grain.Root+"/") || grain.GuestActivityFile == grain.Root {
-		t.Fatalf("%s is inside the mounted tree %s", grain.GuestActivityFile, grain.Root)
+	if strings.HasPrefix(granule.GuestActivityFile, granule.Root+"/") || granule.GuestActivityFile == granule.Root {
+		t.Fatalf("%s is inside the mounted tree %s", granule.GuestActivityFile, granule.Root)
 	}
-	if !path.IsAbs(grain.GuestActivityFile) || path.Clean(grain.GuestActivityFile) != grain.GuestActivityFile {
-		t.Errorf("%s is not an absolute, cleaned path", grain.GuestActivityFile)
+	if !path.IsAbs(granule.GuestActivityFile) || path.Clean(granule.GuestActivityFile) != granule.GuestActivityFile {
+		t.Errorf("%s is not an absolute, cleaned path", granule.GuestActivityFile)
 	}
 	// It is a guest path, so it is not something Files renders: a Spec
 	// that could write it would be the controller setting an activity on
 	// the grain's behalf, which is backwards.
-	spec := grain.Spec{Version: grain.Version, Prompt: "p", Setup: "s"}
+	spec := granule.Spec{Version: granule.Version, Prompt: "p", Setup: "s"}
 	files, err := spec.Files()
 	if err != nil {
 		t.Fatalf("rendering files: %v", err)
 	}
-	if _, ok := files[grain.GuestActivityFile]; ok {
+	if _, ok := files[granule.GuestActivityFile]; ok {
 		t.Errorf("Files renders the guest activity path")
 	}
 }

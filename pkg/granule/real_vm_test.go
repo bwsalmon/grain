@@ -11,7 +11,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bwsalmon/grain/pkg/grain"
 	"github.com/bwsalmon/grain/pkg/granule"
 )
 
@@ -86,7 +85,7 @@ func TestGranuleProvisionsARealSandbox(t *testing.T) {
 	setup := `#!/bin/sh
 set -eu
 mkdir -p /run/grain
-echo "provisioning the widget" > ` + grain.GuestActivityFile + `
+echo "provisioning the widget" > ` + granule.GuestActivityFile + `
 echo "placement: $(cat /etc/grain-test/token)"
 echo "mode: $(stat -c %a /etc/grain-test/token)"
 echo "uname: $(uname -s)"
@@ -101,8 +100,8 @@ test -f ` + granule.GuestSetupPath + `
 		// Same grants kontur's own docker backend takes: a VMM needs the
 		// device, and netshim needs the capability.
 		"--privileged", "--device", "/dev/kvm",
-		"-e", grain.EnvVersion + "=" + grain.Version,
-		"-v", root + ":" + grain.Root + ":ro",
+		"-e", granule.EnvVersion + "=" + granule.Version,
+		"-v", root + ":" + granule.Root + ":ro",
 		image,
 	}
 	cmd := exec.Command("docker", args...)
@@ -126,12 +125,12 @@ test -f ` + granule.GuestSetupPath + `
 	// Read the stream the way a controller does, before deciding whether
 	// the exit code was right: the records say *why*, and a bare exit
 	// code from a failed boot is the least useful thing in this test.
-	var recs []grain.Record
+	var recs []granule.Record
 	for _, line := range strings.Split(strings.TrimSpace(stdout.String()), "\n") {
 		if line == "" {
 			continue
 		}
-		var r grain.Record
+		var r granule.Record
 		if err := json.Unmarshal([]byte(line), &r); err != nil {
 			// stdout is records only, so an unparseable line is a real
 			// defect rather than noise to tolerate.
@@ -144,16 +143,16 @@ test -f ` + granule.GuestSetupPath + `
 		t.Fatalf("the container produced no records at all\nstdout:\n%s\nstderr:\n%s", stdout.String(), stderr.String())
 	}
 
-	var final grain.Status
+	var final granule.Status
 	var sawConsole bool
 	var setupOut string
 	activities := map[string]bool{}
 	for _, r := range recs {
 		switch {
-		case r.Src == grain.SrcConsole:
+		case r.Src == granule.SrcConsole:
 			sawConsole = true
-		case r.Kind == grain.KindStatus:
-			var st grain.Status
+		case r.Kind == granule.KindStatus:
+			var st granule.Status
 			if err := json.Unmarshal(r.Data, &st); err != nil {
 				t.Fatalf("unmarshalling a status record: %v", err)
 			}

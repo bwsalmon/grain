@@ -1,4 +1,4 @@
-package grain
+package granule
 
 // BuiltinTools are the tools a grain serves itself, and the whole of what
 // it understands. Each is about the sandbox and nothing else:

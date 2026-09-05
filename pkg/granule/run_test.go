@@ -12,19 +12,18 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bwsalmon/grain/pkg/grain"
 	"github.com/bwsalmon/grain/pkg/granule"
 )
 
 // records parses a stream back the way a controller reads one.
-func records(t *testing.T, out string) []grain.Record {
+func records(t *testing.T, out string) []granule.Record {
 	t.Helper()
-	var recs []grain.Record
+	var recs []granule.Record
 	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
 		if line == "" {
 			continue
 		}
-		var r grain.Record
+		var r granule.Record
 		if err := json.Unmarshal([]byte(line), &r); err != nil {
 			t.Fatalf("a line on the stream is not a record: %q: %v", line, err)
 		}
@@ -34,12 +33,12 @@ func records(t *testing.T, out string) []grain.Record {
 }
 
 // lastStatus is what a controller that joined the stream late would see.
-func lastStatus(t *testing.T, recs []grain.Record) grain.Status {
+func lastStatus(t *testing.T, recs []granule.Record) granule.Status {
 	t.Helper()
-	var st grain.Status
+	var st granule.Status
 	found := false
 	for _, r := range recs {
-		if r.Kind != grain.KindStatus {
+		if r.Kind != granule.KindStatus {
 			continue
 		}
 		if err := json.Unmarshal(r.Data, &st); err != nil {
@@ -73,7 +72,7 @@ func withEnv(t *testing.T, kv map[string]string) {
 // and an ending. Every one of those has to show up on the stream,
 // because the stream is the only thing a controller reads.
 func TestAProvisionedGrainNarratesItselfAndEnds(t *testing.T) {
-	withEnv(t, map[string]string{grain.EnvVersion: grain.Version, grain.EnvFramework: "claude"})
+	withEnv(t, map[string]string{granule.EnvVersion: granule.Version, granule.EnvFramework: "claude"})
 	root := mountedTree(t, map[string]string{
 		"setup":                        "#!/bin/sh\n",
 		"placements/home/agent/.netrc": "machine github.com",
@@ -114,10 +113,10 @@ func TestAProvisionedGrainNarratesItselfAndEnds(t *testing.T) {
 	// failed boot quotable.
 	var sawConsole, sawProvisioning bool
 	for _, r := range recs {
-		if r.Src == grain.SrcConsole && strings.Contains(string(r.Data), "Linux version") {
+		if r.Src == granule.SrcConsole && strings.Contains(string(r.Data), "Linux version") {
 			sawConsole = true
 		}
-		if r.Kind == grain.KindStatus && strings.Contains(string(r.Data), string(grain.PhaseProvisioning)) {
+		if r.Kind == granule.KindStatus && strings.Contains(string(r.Data), string(granule.PhaseProvisioning)) {
 			sawProvisioning = true
 		}
 	}
@@ -134,7 +133,7 @@ func TestAProvisionedGrainNarratesItselfAndEnds(t *testing.T) {
 			t.Fatalf("record %d has seq %d", i, r.Seq)
 			break
 		}
-		if r.Version != grain.Version {
+		if r.Version != granule.Version {
 			t.Errorf("record %d carries version %q", i, r.Version)
 		}
 	}
@@ -143,7 +142,7 @@ func TestAProvisionedGrainNarratesItselfAndEnds(t *testing.T) {
 // A failed setup ends the grain before an agent runs, which is what
 // makes a bad checkout cost no model tokens.
 func TestAFailedSetupEndsTheGrainWithoutRunningAnAgent(t *testing.T) {
-	withEnv(t, map[string]string{grain.EnvVersion: grain.Version})
+	withEnv(t, map[string]string{granule.EnvVersion: granule.Version})
 	root := mountedTree(t, map[string]string{"setup": "#!/bin/sh\nexit 3\n"},
 		map[string]os.FileMode{"setup": 0o755})
 
@@ -153,9 +152,9 @@ func TestAFailedSetupEndsTheGrainWithoutRunningAnAgent(t *testing.T) {
 
 	code := granule.Run(context.Background(), testConfig(t, root), granule.Deps{
 		VMM: &fakeVMM{}, Guest: guest,
-		Agent: func(context.Context, grain.Spec, granule.Guest, io.Writer) (grain.Result, error) {
+		Agent: func(context.Context, granule.Spec, granule.Guest, io.Writer) (granule.Result, error) {
 			agentRan = true
-			return grain.Result{}, nil
+			return granule.Result{}, nil
 		},
 	}, granule.NewStream(&out, nil))
 
@@ -166,8 +165,8 @@ func TestAFailedSetupEndsTheGrainWithoutRunningAnAgent(t *testing.T) {
 		t.Errorf("exit code = %d, want %d", code, granule.ExitFailed)
 	}
 	st := lastStatus(t, records(t, out.String()))
-	if st.Result == nil || st.Result.Outcome != grain.OutcomeSetupFailed {
-		t.Fatalf("result = %+v, want %s", st.Result, grain.OutcomeSetupFailed)
+	if st.Result == nil || st.Result.Outcome != granule.OutcomeSetupFailed {
+		t.Fatalf("result = %+v, want %s", st.Result, granule.OutcomeSetupFailed)
 	}
 	// The diagnosis is the script's own output, uninterpreted.
 	if st.Setup == nil || !strings.Contains(st.Setup.Output, "repository not found") {
@@ -180,7 +179,7 @@ func TestAFailedSetupEndsTheGrainWithoutRunningAnAgent(t *testing.T) {
 // failure is indistinguishable from a bad setup script and the two want
 // different responses.
 func TestAnUnknownWireVersionIsRefusedBeforeBooting(t *testing.T) {
-	withEnv(t, map[string]string{grain.EnvVersion: "v99"})
+	withEnv(t, map[string]string{granule.EnvVersion: "v99"})
 	vmm := &fakeVMM{}
 	var out bytes.Buffer
 
@@ -202,7 +201,7 @@ func TestAnUnknownWireVersionIsRefusedBeforeBooting(t *testing.T) {
 // The one read that must not be missed. A controller that lost the
 // stream to rotation still finds the ending in the pod listing.
 func TestTheResultAlsoLandsInTheTerminationLog(t *testing.T) {
-	withEnv(t, map[string]string{grain.EnvVersion: grain.Version})
+	withEnv(t, map[string]string{granule.EnvVersion: granule.Version})
 	cfg := testConfig(t, t.TempDir())
 	var out bytes.Buffer
 
@@ -213,7 +212,7 @@ func TestTheResultAlsoLandsInTheTerminationLog(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reading the termination log: %v", err)
 	}
-	var got grain.Result
+	var got granule.Result
 	if err := json.Unmarshal(body, &got); err != nil {
 		t.Fatalf("the termination log is not a Result: %q: %v", body, err)
 	}
@@ -225,16 +224,16 @@ func TestTheResultAlsoLandsInTheTerminationLog(t *testing.T) {
 // Cancellation is how a grain is stopped, and the shim's window is for
 // writing an ending -- not for exiting silently.
 func TestACancelledGrainStillWritesAnEnding(t *testing.T) {
-	withEnv(t, map[string]string{grain.EnvVersion: grain.Version})
+	withEnv(t, map[string]string{granule.EnvVersion: granule.Version})
 	ctx, cancel := context.WithCancel(context.Background())
 	var out bytes.Buffer
 
 	code := granule.Run(ctx, testConfig(t, t.TempDir()), granule.Deps{
 		VMM: &fakeVMM{}, Guest: &fakeGuest{},
-		Agent: func(ctx context.Context, _ grain.Spec, _ granule.Guest, _ io.Writer) (grain.Result, error) {
+		Agent: func(ctx context.Context, _ granule.Spec, _ granule.Guest, _ io.Writer) (granule.Result, error) {
 			cancel()
 			<-ctx.Done()
-			return grain.Result{}, ctx.Err()
+			return granule.Result{}, ctx.Err()
 		},
 	}, granule.NewStream(&out, nil))
 
@@ -251,16 +250,16 @@ func TestACancelledGrainStillWritesAnEnding(t *testing.T) {
 // controller involved at all.
 func TestMaxRuntimeEndsTheGrainItself(t *testing.T) {
 	withEnv(t, map[string]string{
-		grain.EnvVersion:    grain.Version,
-		grain.EnvMaxRuntime: "50ms",
+		granule.EnvVersion:    granule.Version,
+		granule.EnvMaxRuntime: "50ms",
 	})
 	var out bytes.Buffer
 
 	code := granule.Run(context.Background(), testConfig(t, t.TempDir()), granule.Deps{
 		VMM: &fakeVMM{}, Guest: &fakeGuest{},
-		Agent: func(ctx context.Context, _ grain.Spec, _ granule.Guest, _ io.Writer) (grain.Result, error) {
+		Agent: func(ctx context.Context, _ granule.Spec, _ granule.Guest, _ io.Writer) (granule.Result, error) {
 			<-ctx.Done()
-			return grain.Result{}, ctx.Err()
+			return granule.Result{}, ctx.Err()
 		},
 	}, granule.NewStream(&out, nil))
 
@@ -277,7 +276,7 @@ func TestMaxRuntimeEndsTheGrainItself(t *testing.T) {
 // the container is the only thing holding the run, so hanging here is a
 // slot nothing frees until the controller's own budget notices.
 func TestAGuestThatNeverComesUpEndsTheGrain(t *testing.T) {
-	withEnv(t, map[string]string{grain.EnvVersion: grain.Version})
+	withEnv(t, map[string]string{granule.EnvVersion: granule.Version})
 	cfg := testConfig(t, t.TempDir())
 	cfg.ReadyTimeout = 10 * time.Millisecond
 	var out bytes.Buffer
@@ -290,7 +289,7 @@ func TestAGuestThatNeverComesUpEndsTheGrain(t *testing.T) {
 		t.Errorf("exit code = %d, want %d", code, granule.ExitFailed)
 	}
 	st := lastStatus(t, records(t, out.String()))
-	if st.Result == nil || st.Result.Outcome != grain.OutcomeSetupFailed {
+	if st.Result == nil || st.Result.Outcome != granule.OutcomeSetupFailed {
 		t.Fatalf("result = %+v", st.Result)
 	}
 }
@@ -299,7 +298,7 @@ func TestAGuestThatNeverComesUpEndsTheGrain(t *testing.T) {
 // grain's business but a VMM that cannot start once is not a guest that
 // went wrong mid-run.
 func TestAVMMThatWillNotStartIsReported(t *testing.T) {
-	withEnv(t, map[string]string{grain.EnvVersion: grain.Version})
+	withEnv(t, map[string]string{granule.EnvVersion: granule.Version})
 	var out bytes.Buffer
 
 	code := granule.Run(context.Background(), testConfig(t, t.TempDir()), granule.Deps{
@@ -320,7 +319,7 @@ func TestAVMMThatWillNotStartIsReported(t *testing.T) {
 // human reads on a task row, and the shim picks it up on the round trip
 // it already makes.
 func TestTheGuestCanSetTheActivityAGrainReports(t *testing.T) {
-	withEnv(t, map[string]string{grain.EnvVersion: grain.Version})
+	withEnv(t, map[string]string{granule.EnvVersion: granule.Version})
 	guest := &fakeGuest{activity: "cloning acme/widgets\n"}
 	cfg := testConfig(t, t.TempDir())
 	cfg.Heartbeat = 5 * time.Millisecond
@@ -328,20 +327,20 @@ func TestTheGuestCanSetTheActivityAGrainReports(t *testing.T) {
 
 	granule.Run(context.Background(), cfg, granule.Deps{
 		VMM: &fakeVMM{}, Guest: guest,
-		Agent: func(ctx context.Context, _ grain.Spec, _ granule.Guest, _ io.Writer) (grain.Result, error) {
+		Agent: func(ctx context.Context, _ granule.Spec, _ granule.Guest, _ io.Writer) (granule.Result, error) {
 			// Long enough for a few heartbeats, which is the only path
 			// that reads the file.
 			time.Sleep(60 * time.Millisecond)
-			return grain.Result{Outcome: grain.OutcomeSucceeded}, nil
+			return granule.Result{Outcome: granule.OutcomeSucceeded}, nil
 		},
 	}, granule.NewStream(&out, nil))
 
 	var saw bool
 	for _, r := range records(t, out.String()) {
-		if r.Kind != grain.KindStatus {
+		if r.Kind != granule.KindStatus {
 			continue
 		}
-		var st grain.Status
+		var st granule.Status
 		if err := json.Unmarshal(r.Data, &st); err != nil {
 			t.Fatalf("unmarshalling a status: %v", err)
 		}

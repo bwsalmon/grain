@@ -6,8 +6,6 @@ import (
 	"io"
 	"sync"
 	"time"
-
-	"github.com/bwsalmon/grain/pkg/grain"
 )
 
 // Stream is a grain's stdout: the one route out, carrying both the
@@ -48,7 +46,7 @@ func (s *Stream) Seq() int64 {
 // A failure to write is returned rather than swallowed, but callers are
 // expected to keep going: stdout being closed is not a reason to abandon
 // a running agent, and the termination log is a second way out.
-func (s *Stream) Emit(src grain.Source, kind string, data any) (int64, error) {
+func (s *Stream) Emit(src Source, kind string, data any) (int64, error) {
 	var raw json.RawMessage
 	if data != nil {
 		b, err := json.Marshal(data)
@@ -61,8 +59,8 @@ func (s *Stream) Emit(src grain.Source, kind string, data any) (int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.seq++
-	rec := grain.Record{
-		Version: grain.Version,
+	rec := Record{
+		Version: Version,
 		Seq:     s.seq,
 		T:       s.now().UTC(),
 		Src:     src,
@@ -89,13 +87,13 @@ func (s *Stream) Emit(src grain.Source, kind string, data any) (int64, error) {
 // last console lines in the failure detail, and that needs them to be
 // records with sequence numbers rather than bytes that happened to share
 // a file descriptor.
-func (s *Stream) LineWriter(src grain.Source) io.Writer {
+func (s *Stream) LineWriter(src Source) io.Writer {
 	return &lineWriter{stream: s, src: src}
 }
 
 type lineWriter struct {
 	stream *Stream
-	src    grain.Source
+	src    Source
 	buf    []byte
 }
 

@@ -1,7 +1,8 @@
 # Grains
 
-> **Proposal.** Nothing here ships yet. `pkg/grain` carries the types, the
-> controller's decision table and the wire format as compiling, tested Go.
+> **Proposal.** Nothing here ships yet. `pkg/granule` carries the contract
+> and the per-run binary; `pkg/grain` carries the controller's seam and
+> decision table. Both are compiling, tested Go.
 > This document is what was decided; [`grain-options.md`](grain-options.md)
 > is what was considered and why, including the paths not taken and the
 > conditions that would reopen them.
@@ -359,7 +360,7 @@ Three things fall out:
 
 The transport is the container runtime, and nothing calls into a grain, so
 what has to stay stable is **an input tree and an output format, not an
-RPC schema** — `pkg/grain`'s Go types are the controller-side facade; the
+RPC schema** — `pkg/granule`'s Go types are the shared facade; the
 environment, the files under `/grain` and the records on stdout are what
 cross between the daemon binary and the sandbox image.
 
@@ -965,7 +966,12 @@ could not boot anything.
 every non-dispatch reconciler are untouched. This is a refactor of the run
 path and the agent's location, not of the task model.
 
-1. `pkg/grain` — the interface, `Reconcile`, and the wire format. **Done.**
+1. **The contract and the seam. Done.** `pkg/granule` holds what a grain
+   is configured by and reports through — `Spec`, `Status`, `Record`, the
+   environment and the file layout — and `pkg/grain` holds how a
+   controller manages many: `Grains`, `Grain`, `Reconcile`, `Policy`.
+   The line between them is not a judgement call: a granule imports
+   nothing from `pkg/grain`, which is what put the split there.
 2. `HostGrains` — agent as a local subprocess, no VM. Proves the interface
    and the decision table against the existing suite.
 3. The controller loop — `Tick` over `List` + `Reconcile`, alongside the

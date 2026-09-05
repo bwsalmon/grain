@@ -8,7 +8,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bwsalmon/grain/pkg/grain"
 	"github.com/bwsalmon/grain/pkg/granule"
 )
 
@@ -20,19 +19,19 @@ func TestNoRecordEverSpansALine(t *testing.T) {
 	var out bytes.Buffer
 	s := granule.NewStream(&out, func() time.Time { return time.Unix(0, 0) })
 
-	console := s.LineWriter(grain.SrcConsole)
+	console := s.LineWriter(granule.SrcConsole)
 	// Everything a guest console can plausibly emit: embedded newlines
 	// arriving mid-write, carriage returns, quotes and control bytes.
 	console.Write([]byte("[    0.0] boot\r\nsystemd[1]: \"quoted\"\tand\ttabs\n"))
 	console.Write([]byte("half a line"))
 	console.Write([]byte(" and the rest\n"))
-	if _, err := s.Emit(grain.SrcShim, grain.KindStatus, grain.Status{Activity: "line\nbreak\nin a phrase"}); err != nil {
+	if _, err := s.Emit(granule.SrcShim, granule.KindStatus, granule.Status{Activity: "line\nbreak\nin a phrase"}); err != nil {
 		t.Fatalf("Emit: %v", err)
 	}
 
 	lines := strings.Split(strings.TrimRight(out.String(), "\n"), "\n")
 	for i, line := range lines {
-		var r grain.Record
+		var r granule.Record
 		if err := json.Unmarshal([]byte(line), &r); err != nil {
 			t.Fatalf("line %d is not one whole record: %q: %v", i, line, err)
 		}
@@ -54,10 +53,10 @@ func TestSeqIsMonotonicUnderConcurrentWriters(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			w := s.LineWriter(grain.SrcAgent)
+			w := s.LineWriter(granule.SrcAgent)
 			for j := 0; j < 25; j++ {
 				w.Write([]byte("a line\n"))
-				_, _ = s.Emit(grain.SrcShim, grain.KindPhase, "running")
+				_, _ = s.Emit(granule.SrcShim, granule.KindPhase, "running")
 			}
 		}()
 	}
@@ -66,7 +65,7 @@ func TestSeqIsMonotonicUnderConcurrentWriters(t *testing.T) {
 	seen := map[int64]bool{}
 	var last int64
 	for _, line := range strings.Split(strings.TrimRight(out.String(), "\n"), "\n") {
-		var r grain.Record
+		var r granule.Record
 		if err := json.Unmarshal([]byte(line), &r); err != nil {
 			t.Fatalf("interleaved writers produced an unparseable line: %q", line)
 		}
@@ -88,14 +87,14 @@ func TestSeqIsMonotonicUnderConcurrentWriters(t *testing.T) {
 func TestAnUnterminatedLineIsFlushedAtTheBound(t *testing.T) {
 	var out bytes.Buffer
 	s := granule.NewStream(&out, nil)
-	w := s.LineWriter(grain.SrcConsole)
+	w := s.LineWriter(granule.SrcConsole)
 
 	w.Write(bytes.Repeat([]byte("x"), 40<<10))
 	if out.Len() == 0 {
 		t.Fatal("40KiB with no newline produced no records at all")
 	}
 	for _, line := range strings.Split(strings.TrimRight(out.String(), "\n"), "\n") {
-		var r grain.Record
+		var r granule.Record
 		if err := json.Unmarshal([]byte(line), &r); err != nil {
 			t.Fatalf("a flushed chunk is not a record: %v", err)
 		}

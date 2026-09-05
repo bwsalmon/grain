@@ -1,17 +1,36 @@
-// Package granule is the per-run binary: PID 1 in a grain's container,
-// boots the VMM beside it, provisions the sandbox, runs the agent, and
-// narrates the whole thing to stdout as records.
+// Package granule is one run: the contract a grain is configured by and
+// reports through, and the binary that honours it.
 //
-// It is named for what it is -- a small grain, one per run. See
+// It is named for what that binary is -- a small grain, one per run. See
 // docs/grain.md, "Three binaries, one per trust zone": graind serves,
 // grain calls, granule is one run.
 //
-// Nothing here is called into. A granule reads its environment and the
-// tree at grain.Root before it starts, writes records to stdout and a
-// Result to grain.FileTerminationLog on the way out, and has no inbound
-// surface of any kind. That is the property the controller's whole read
-// path rests on, so it is worth stating in the package that would be the
-// one to break it.
+// # Two halves, deliberately together
+//
+// The contract is Spec (what a granule is given), Status and Record (what
+// it emits), and the environment and file layout that carry them
+// (env.go, files.go). The implementation is everything that boots a VMM,
+// provisions a guest and writes those records.
+//
+// They live in one package because they have to agree, and a change to
+// either is then a change in the same place as the other -- the same
+// instinct that makes this repo build a guest and its konturctl from one
+// commit. The cost is that a controller importing this for a Status also
+// links the code that forks kontur; that is stdlib-only and has no init,
+// so the cost is conceptual rather than real.
+//
+// What is *not* here is how a controller manages many of these: Grains,
+// Grain, Reconcile and Policy are pkg/grain's, because a granule never
+// touches them. That split is not a judgement call -- it is what the
+// imports already said.
+//
+// # Nothing here is called into
+//
+// A granule reads its environment and the tree at Root before it starts,
+// writes records to stdout and a Result to FileTerminationLog on the way
+// out, and has no inbound surface of any kind. That is the property the
+// controller's whole read path rests on, so it is worth stating in the
+// package that would be the one to break it.
 package granule
 
 import (

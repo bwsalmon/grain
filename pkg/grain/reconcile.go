@@ -3,6 +3,8 @@ package grain
 import (
 	"fmt"
 	"time"
+
+	"github.com/bwsalmon/grain/pkg/granule"
 )
 
 // Policy is what the controller decides rather than the grain. Each of
@@ -62,7 +64,7 @@ type RunRow struct {
 // creating it and recording it, or one whose run was finished by an
 // earlier tick.
 type Observed struct {
-	Status Status
+	Status granule.Status
 	Run    *RunRow
 	Now    time.Time
 }
@@ -131,23 +133,23 @@ func Reconcile(o Observed, p Policy) []Action {
 	// Releasing an already-released grain is a no-op, so this is stated
 	// as a phase check rather than tracked.
 	if o.Run == nil || !o.Run.Live {
-		if st.Phase == PhaseReleased {
+		if st.Phase == granule.PhaseReleased {
 			return nil
 		}
 		return []Action{{Kind: ActionRelease}}
 	}
-	if st.Phase == PhaseReleased {
+	if st.Phase == granule.PhaseReleased {
 		// Released out from under a live row: something destroyed the
 		// container without the run being finished. The row is all that
 		// is left, and it needs an ending.
-		return []Action{{Kind: ActionFail, Outcome: OutcomeLost,
+		return []Action{{Kind: ActionFail, Outcome: granule.OutcomeLost,
 			Detail: "this run's grain was released while the run was still live"}}
 	}
 
 	// 2. The container is gone.
-	if st.Phase == PhaseLost {
+	if st.Phase == granule.PhaseLost {
 		return []Action{
-			{Kind: ActionFail, Outcome: OutcomeLost, Detail: lostDetail(st)},
+			{Kind: ActionFail, Outcome: granule.OutcomeLost, Detail: lostDetail(st)},
 			{Kind: ActionRelease},
 		}
 	}
@@ -160,7 +162,7 @@ func Reconcile(o Observed, p Policy) []Action {
 	// 4. Self-repair that is not converging.
 	if p.MaxRebuilds > 0 && st.Rebuilds > p.MaxRebuilds {
 		return []Action{
-			{Kind: ActionFail, Outcome: OutcomeThrashing,
+			{Kind: ActionFail, Outcome: granule.OutcomeThrashing,
 				Detail: fmt.Sprintf("this run's grain rebuilt its sandbox %d times, past the %d it is allowed",
 					st.Rebuilds, p.MaxRebuilds)},
 			{Kind: ActionRelease},
@@ -178,22 +180,22 @@ func Reconcile(o Observed, p Policy) []Action {
 	// follow-up round.
 	if o.Run.TaskClosed {
 		return []Action{
-			{Kind: ActionFail, Outcome: OutcomeCancelled, Detail: "the task was closed"},
+			{Kind: ActionFail, Outcome: granule.OutcomeCancelled, Detail: "the task was closed"},
 			{Kind: ActionRelease},
 		}
 	}
 	if o.Run.Paused {
 		return []Action{
-			{Kind: ActionFail, Outcome: OutcomeCancelled, Detail: "the deployment met its usage limit"},
+			{Kind: ActionFail, Outcome: granule.OutcomeCancelled, Detail: "the deployment met its usage limit"},
 			{Kind: ActionRelease},
 		}
 	}
 
 	// 6. Stuck before there was ever an agent.
-	if st.Phase == PhaseProvisioning && p.ProvisionBudget > 0 &&
+	if st.Phase == granule.PhaseProvisioning && p.ProvisionBudget > 0 &&
 		o.Now.Sub(st.Since) > p.ProvisionBudget {
 		return []Action{
-			{Kind: ActionFail, Outcome: OutcomeSetupFailed,
+			{Kind: ActionFail, Outcome: granule.OutcomeSetupFailed,
 				Detail: fmt.Sprintf("this run's sandbox was still being prepared after %s: %s",
 					o.Now.Sub(st.Since).Round(time.Second), provisioningDetail(st))},
 			{Kind: ActionRelease},
@@ -213,7 +215,7 @@ func Reconcile(o Observed, p Policy) []Action {
 // gone. Whatever phrase was standing when it went is left standing,
 // deliberately: where a grain got to before it vanished is exactly the
 // context the outcome alone does not carry.
-func lostDetail(st Status) string {
+func lostDetail(st granule.Status) string {
 	if st.Activity == "" {
 		return "this run's grain could no longer be reached"
 	}
@@ -223,7 +225,7 @@ func lostDetail(st Status) string {
 // provisioningDetail is the same courtesy for a grain that never finished
 // booting: the phrase it was on says which step of a preparation ran out
 // of budget.
-func provisioningDetail(st Status) string {
+func provisioningDetail(st granule.Status) string {
 	if st.Activity == "" {
 		return "it reported no progress"
 	}

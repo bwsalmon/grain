@@ -1,4 +1,4 @@
-package grain
+package granule
 
 import "fmt"
 
