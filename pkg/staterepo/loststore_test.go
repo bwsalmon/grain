@@ -19,9 +19,9 @@ package staterepo_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
-	"fmt"
 	"testing"
 
 	"github.com/bwsalmon/grain/pkg/model"

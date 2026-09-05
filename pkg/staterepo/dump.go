@@ -2,10 +2,10 @@ package staterepo
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
-"crypto/rand"
-	"encoding/binary"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"os"
