@@ -181,7 +181,15 @@ func Run(ctx context.Context, cfg Config, deps Deps, stream *Stream) int {
 
 	// Straight from provisioning to running: the prompt is a file the
 	// grain already has, so there is nothing to wait for in between.
-	st.enter(grain.PhaseRunning, "")
+	//
+	// Carrying the guest's own last word across the transition rather
+	// than blanking it: setup is the phase with no agent in it, so
+	// whatever the sandbox last said about itself is the only account
+	// there is, and a grain that reached "running" with an empty
+	// activity would have thrown it away at the moment it became the
+	// most recent thing known. It is also the one read that does not
+	// depend on a heartbeat having ticked.
+	st.enter(grain.PhaseRunning, readActivity(ctx, deps.Guest))
 
 	stop := st.heartbeat(ctx, deps.Guest, cfg.Heartbeat)
 	defer stop()

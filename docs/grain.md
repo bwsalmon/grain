@@ -984,6 +984,15 @@ path and the agent's location, not of the task model.
    is the seam the agent CLI plugs into, and it is nil today, which is
    what lets the provisioning half be run and tested with no VM. Running
    the agent, and the six sandbox tools it calls, is the next step.
+
+   Proven against a booted guest by tests.yml's `granule-vm` job, which
+   builds both halves from this commit and asserts on the record stream:
+   the console arrived, a placement crossed the vsock with its mode
+   intact, setup ran in a Linux guest and its exit code came back, the
+   activity the guest set reached a status, and one ending was written.
+   Everything else in `pkg/granule` runs against fakes, which are
+   granule's own idea of what kontur does; that job is what checks the
+   idea.
 5. `grain`'s server verbs and the `graind`-side listener they call: the scope check
    (item 7 above), then the verbs that today are MCP tools reaching the
    daemon. Shares `gitproxy`'s token store and `startGitProxy`'s

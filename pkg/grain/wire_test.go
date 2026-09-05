@@ -168,16 +168,23 @@ func TestFilesRefusesClashingPlacements(t *testing.T) {
 // the wrong thing quietly. Refusing costs one run and names the
 // disagreement.
 func TestSpecFromEnvRefusesAnotherVersion(t *testing.T) {
+	// Deliberately not "v2": tests/deploy's own
+	// TestNoSourceFileStillRefersToTheV2Subdirectory forbids that
+	// segment anywhere in the tree, because v1's removal moved the Go
+	// tree out of v2/ and a survivor is a file-not-found at run time
+	// rather than a compile error. A fake version has no business
+	// spending that word.
+	const other = "v7"
 	_, err := grain.SpecFromEnv(func(k string) string {
 		if k == grain.EnvVersion {
-			return "v2"
+			return other
 		}
 		return ""
 	})
 	if err == nil {
-		t.Fatal("SpecFromEnv accepted wire version v2")
+		t.Fatalf("SpecFromEnv accepted wire version %s", other)
 	}
-	if !strings.Contains(err.Error(), "v2") || !strings.Contains(err.Error(), grain.Version) {
+	if !strings.Contains(err.Error(), other) || !strings.Contains(err.Error(), grain.Version) {
 		t.Errorf("error should name both versions, got: %v", err)
 	}
 
