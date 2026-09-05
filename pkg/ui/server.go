@@ -149,6 +149,7 @@ func (s *Server) routes() {
 
 	s.route("POST /api/host/reboot", s.handleRebootHost)
 	s.route("GET /api/host/top", s.handleGetHostTop)
+	s.route("POST /api/host/shell", s.handleRootShell)
 	s.route("GET /api/upgrade", s.handleGetUpgradeStatus)
 	s.route("POST /api/upgrade", s.handleStartUpgrade)
 
