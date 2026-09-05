@@ -179,6 +179,11 @@ install -m0755 -d /etc/apt/keyrings
 curl -fsSL https://download.docker.com/linux/debian/gpg \
   -o /etc/apt/keyrings/docker.asc
 chmod a+r /etc/apt/keyrings/docker.asc
+# /etc/os-release is the guest's, written by its own base image; there is
+# no copy of it in this repository for the linter to follow (SC1091), and
+# `source=/dev/null` would only trade that for "VERSION_CODENAME is
+# referenced but not assigned".
+# shellcheck disable=SC1091
 echo \
   "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
   > /etc/apt/sources.list.d/docker.list
@@ -224,6 +229,8 @@ echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.clou
   > /etc/apt/sources.list.d/google-cloud-sdk.list
 curl -fsSL https://apt.releases.hashicorp.com/gpg | \
   gpg --dearmor -o /usr/share/keyrings/hashicorp.gpg
+# The guest's own /etc/os-release again -- see the docker.list block above.
+# shellcheck disable=SC1091
 echo \
   "deb [signed-by=/usr/share/keyrings/hashicorp.gpg] https://apt.releases.hashicorp.com $(. /etc/os-release && echo "$VERSION_CODENAME") main" \
   > /etc/apt/sources.list.d/hashicorp.list

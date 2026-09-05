@@ -40,6 +40,20 @@
 # produce the same bytes and a run against a different agy produces a diff
 # that is entirely about agy.
 
+# File-wide rather than on any one line: this script's output is Markdown,
+# and most of it is emitted by `printf` with a single-quoted format string
+# full of the prose that document is made of -- `$PROBE`, `$UUID`,
+# `${guide#./}`, backticked identifiers. Every one of those looks to the
+# linter like an expansion someone forgot to double-quote (SC2016), and
+# there are twenty-odd of them; the sed scrubbers below write the same
+# `$NAME` placeholders into the captures on purpose. Suppressing them one
+# at a time would put a directive over every second printf in the file and
+# still redden CI the next time a sentence gains a backtick. The cost is
+# that a genuinely wrong '$var' in this one file goes unreported -- worth
+# it here, where the single-quoted strings are documents rather than
+# commands, and not something to copy into a script that runs anything.
+# shellcheck disable=SC2016
+
 # Not -e: see the first rule above. A probe's failure is an answer.
 set -uo pipefail
 

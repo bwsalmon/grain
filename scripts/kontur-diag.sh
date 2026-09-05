@@ -400,6 +400,13 @@ diagnose() {
     guest_reachable=1
   else
     bad "docker exec $vm_c kontur exec -- whoami failed"
+    # SC2001 wants ${out//search/replace} here, which cannot express this:
+    # the anchor is the start of *every* line of a captured multi-line
+    # error, and bash's replacement has no per-line anchor. sed is also
+    # what the three sibling indents in this file use, and they are piped
+    # from commands rather than fed a variable, so only this one is
+    # noticed at all.
+    # shellcheck disable=SC2001
     sed 's/^/           /' <<<"$out"
   fi
 
