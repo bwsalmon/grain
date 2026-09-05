@@ -245,7 +245,7 @@ export default function DetailOverlay({
             act={act}
             showError={showError}
           />
-          <Declared t={t} />
+          <Declared t={t} config={config} />
           <CapabilityToggles t={t} config={config} act={act} />
           <Dependencies t={t} tasks={tasks} act={act} onOpenTask={onOpenTask} />
         </div>
@@ -373,7 +373,7 @@ function pullRequestUrl(ref) {
 // ReadOnlyRepos) or in Actions (the auto-merge checkbox), and a static
 // row repeating one of them would be the same field on screen twice in a
 // 260px column.
-function Declared({ t }) {
+function Declared({ t, config }) {
   const rows = [];
   // bwsalmon/agents#534, grain/task-41: a per-task sandbox shape
   // override, shown only when set -- most tasks use the deployment
@@ -389,6 +389,18 @@ function Declared({ t }) {
   // task overrides the deployment's own, which most do not.
   if (t.agentFramework)
     rows.push(["Agent framework", frameworkLabel(t.agentFramework)]);
+
+  const framework = t.agentFramework || config.agentFramework || "antigravity";
+  const modelStr =
+    framework === "claude"
+      ? config.claudeModel
+      : framework === "codex"
+        ? config.codexModel
+        : config.geminiModel;
+  if (modelStr) {
+    rows.push(["Model", modelStr]);
+  }
+
   // Same treatment again for a task that replaces the standing
   // instructions its deployment and repo would otherwise give its runs
   // (grain/task-114): shown only when it has one, since most tasks do

@@ -592,6 +592,9 @@ type configResponse struct {
 	// model.AgentFrameworkAntigravity, the same defaulting ui.Settings
 	// does.
 	AgentFramework string `json:"agentFramework"`
+	GeminiModel    string `json:"geminiModel"`
+	ClaudeModel    string `json:"claudeModel"`
+	CodexModel     string `json:"codexModel"`
 	// DefaultCapabilities mirrors model.Config's own field of the same
 	// name, read from the store the same way ShowClosedByDefault above
 	// is: the capability ids a task filed here starts out holding.
@@ -710,6 +713,9 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		resp.AutoMergeByDefault = cfg.AutoMergeByDefault
 		resp.NewestFirst = cfg.NewestFirst
 		resp.AgentFramework = model.NormalizeAgentFramework(cfg.AgentFramework)
+		resp.GeminiModel = cfg.GeminiModel
+		resp.ClaudeModel = cfg.ClaudeModel
+		resp.CodexModel = cfg.CodexModel
 		resp.PromptExtension = cfg.PromptExtension
 		// Filtered to what this build actually offers, the same way
 		// (*Client).defaultCapabilities filters before granting -- the
