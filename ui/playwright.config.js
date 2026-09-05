@@ -18,7 +18,7 @@ export default defineConfig({
   testDir: "./e2e",
   fullyParallel: false,
   retries: 0,
-  reporter: "list",
+  reporter: process.env.CI ? "github" : "list",
   use: {
     baseURL,
     trace: "retain-on-failure",
