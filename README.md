@@ -3004,11 +3004,11 @@ starts exactly where the list you opened it from started. Dialogs that
 are an *action* rather than a thing you opened — New task, Run a suite,
 an attempt's transcript — stay centered boxes.
 
-**Settings and Debug are panes too (grain/task-115).** Those two were
+**Settings and System are panes too (grain/task-115).** Those two were
 the largest things still drawn as centered boxes, and neither is really
-an action: Settings is six tabs of deployment configuration, Debug is
+an action: Settings is six tabs of deployment configuration, System is
 four panels of live diagnostics, and both are destinations with a URL of
-their own (`/settings`, `/debug`) that an operator navigates around
+their own (`/settings`, `/system`) that an operator navigates around
 rather than a form to fill in and dismiss. The shapes were fighting the
 content — a log tail and a sandbox-health table sharing the widest box
 `Overlay.jsx` draws, a settings form scrolling its own tab strip off the
@@ -3020,16 +3020,16 @@ Panes that open a *thing* (a task, a schedule) pass none and scroll their
 whole body as before. Settings caps its tab bodies at the same
 `.pane-form` width its forms already used — a "Poll interval" box an arm's
 length wide is the porthole's opposite failure, not its fix — while
-Debug deliberately caps nothing, since the tables and log lines in
+System deliberately caps nothing, since the tables and log lines in
 there are what wanted the room in the first place. The sidebar marks
 whichever pane is open the way it already marks the current view:
 the rail is on screen the whole time now, so it should say what is
 covering the rest of it.
 
 **Metrics is its own destination on the sidebar (grain/task-173).** That
-pane's nav entry is called "Debug" rather than "Debugging" now, and the
-throughput and latency report is no longer a tab inside it: it sits
-beside Settings and Debug, at `/metrics`. Metrics landed there
+pane's nav entry was renamed from "Debugging" to "Debug" at the time,
+and the throughput and latency report is no longer a tab inside it: it
+sits beside Settings and that pane, at `/metrics`. Metrics landed there
 originally because it is the same *kind* of thing Logs, Sandbox health
 and Top are — a read-only, deployment-wide view rather than a knob — and
 that is still true. It is not the same *question*, though, and the
@@ -3042,14 +3042,34 @@ doing, and the numbers it moves are weekly ones. Filing it under the
 word "debug" told an operator to open it at the wrong times, and two
 clicks and a tab strip is the wrong price for something read on a
 schedule. Splitting it out is also what makes it linkable: `/metrics`
-is a URL that goes in a document or a standup note, where "open Debug,
-click Metrics" is an instruction. The pane's header carries the title
-now, so `MetricsPage` drops the "Metrics" heading it used to print above
-its own window picker, and `DebugOverlay` no longer takes an
+is a URL that goes in a document or a standup note, where "open that
+pane, click Metrics" is an instruction. The pane's header carries the
+title now, so `MetricsPage` drops the "Metrics" heading it used to print
+above its own window picker, and `SystemOverlay` no longer takes an
 `onOpenTask` — the one link out of any of these panels (the backlog's
 oldest queued task) belongs to the report, and it is App that closes the
 metrics pane on the way to that task, since two stacked panes would put
 it behind the one the click came from.
+
+**That pane is called System now (grain/task-12).** "Debugging", then
+"Debug", named the mood somebody opens it in rather than what is behind
+it, and the thing behind it is the machine this deployment runs on: its
+logs, its sandboxes, its processes, its power switch. An operator reads
+those to see what the deployment is *doing* — is the daemon still
+writing, what is the pool holding, what is spending the machine — and
+not only once they have decided something is broken. Naming it for the
+state it shows says the same thing about it that "Metrics" already says
+about the report next door. It is also the one word this codebase was
+spending twice: `self-debug` is a capability that lets a run read
+grain's own source, and Settings had a "Debug" tab of its own before
+this pane moved out of it (bwsalmon/agents#623), so "the debug pane"
+named none of the three unambiguously. The rename is the nav entry, the
+pane's own heading, `SystemOverlay.jsx` and the path: `/system` rather
+than `/debug`. A bookmark to the old path falls back to the task list
+the way `/logs` and `/sandboxes` — the two nav entries this pane was
+made out of — already do, rather than redirecting; nothing here is
+linked from outside the deployment, and `paths.js` has never carried a
+redirect for a path it retired.
 
 **A repo is a page of its own, the way a task is (grain/task-111).**
 Everything grain knew about one repo used to hang off that repo's row in
@@ -3079,7 +3099,7 @@ go now, not a filter left standing on another place.
 (grain/task-177).** Those two halves grew their own way out. A repo's
 page and its releases were plain pages, so they took the obvious one: a
 "← Repos" button in the top-left corner, above the title. Every pane --
-a task, a schedule, a template, a suite, Settings, Debug, Metrics -- was
+a task, a schedule, a template, a suite, Settings, System, Metrics -- was
 a `Dialog` before it was a destination, so it kept the dialog's own X
 floating in the top-right. That left one product with two gestures for
 the same "go back where I came from", in opposite corners of the screen,
@@ -6255,9 +6275,9 @@ queue is a capacity one. They are the first two numbers any optimization
 here should have to move.
 
 **The UI reads the same report,** in a pane of its own at `/metrics`,
-reached from the sidebar beside Settings and Debug. (It was a tab of the
-Debug pane until grain/task-173 — see "Metrics is its own destination
-on the sidebar" above for why it left.) The window picker sends the same
+reached from the sidebar beside Settings and System. (It was a tab of
+the System pane until grain/task-173 — see "Metrics is its own
+destination on the sidebar" above for why it left.) The window picker sends the same
 strings `-window` takes, the throughput
 buckets are drawn as sparklines, and the two presentation rules above
 are enforced rather than described: the latency stages are a table of
@@ -6267,7 +6287,7 @@ is a section of its own headed "right now, not over the window". Each
 stage's `n` sits beside its percentiles, and a percentile with too few
 samples behind it to mean what its name says — fewer than 10 for a p90,
 100 for a p99 — is dimmed and footnoted rather than shown as if it were
-one. Unlike the Debug pane's own panels there is no poll: a report costs
+one. Unlike the System pane's own panels there is no poll: a report costs
 a full scan every time it is asked for, so it loads once and reloads
 when the window changes or Refresh is clicked.
 
@@ -6881,7 +6901,7 @@ about anyone's host. A per-task override is still the escape hatch for
 the one job that needs more, and still the only way to ask for *less*
 than the deployment's own shape.
 
-## `top`, in the Debug pane
+## `top`, in the System pane
 
 Sandbox health can say the daemon's machine is under pressure. It has
 never been able to say by what. Load average, memory and disk are
@@ -6890,7 +6910,7 @@ aggregates by construction — `pkg/sysstat` reads `/proc/loadavg` and
 pane could show a load of 12 and leave the only question anybody actually
 has at that point ("which process?") to an SSH session and a terminal.
 
-The Debug pane has a Top tab now: `GET /api/host/top`, `pkg/hosttop`,
+The System pane has a Top tab now: `GET /api/host/top`, `pkg/hosttop`,
 `top` itself. Shelling out rather than walking `/proc/[pid]/stat` and
 reimplementing its accounting is the same call `pkg/systemlog.Journalctl`
 already made for `journalctl` — `procps` is a package, the output is what
@@ -6930,7 +6950,7 @@ image without `procps`) gets the same "not available" note every other
 optional panel already shows, rather than a pane that could only ever
 error.
 
-## The kernel log, in the Debug pane
+## The kernel log, in the System pane
 
 Top says which process is wearing the machine out. The failure it cannot
 describe is the one where the process is *gone*: an agent CLI picked off
@@ -6968,6 +6988,99 @@ sandbox's. Every kontur guest runs its own kernel, and an OOM inside one
 of those is that guest's business. What shows up here is what happened
 to the machine the daemon and every sandbox share — which is the level
 the questions that reach this pane are asked at.
+
+## A root shell, from the UI
+
+Every panel of the System pane answers one fixed question. Logs says what the
+daemon, the proxy, config-sync and the kernel wrote down; Top says which
+process is spending the machine; Sandbox health says how loaded it is and
+what each slot is holding. The failure that reaches an operator anyway is
+the one none of those has a column for — a disk filled by something no
+panel counts, a unit that will not come back, a container the daemon
+cannot see past — and the answer to it has always been the same: get a
+shell on the host and look.
+
+That is the pane: System → Root shell, one command at a time, run as root
+on the machine the daemon runs on, with its output read back in the
+browser (`POST /api/host/shell`, `pkg/rootshell`, `ui.Config.RootShell`).
+A scrollback of everything run since the pane was opened, because the
+output of the third command means nothing without the two above it. A
+command that fails is an answer rather than an error: it comes back with
+its exit code beside its output, since "the unit is dead and here is why"
+is what the question was.
+
+**Why it is in here at all**, given that an operator with an SSH session
+needs none of it. Because the deployments worth opening this pane for are
+the ones where that session is exactly what is missing: a host that
+stopped accepting connections, a VM in a cloud project whose console is
+three support tickets away, a machine reachable only over the tailnet
+this same UI is served on (`GRAIN_TAILSCALE_ENABLE`). The UI is the one
+surface that is definitionally still up when grain itself is up — it is
+what stays serving when the reconcile loop has died
+(`Config.ReconcilerDown`) — so it is the right place for the hatch that
+gets used on the day nothing else works.
+
+**The daemon cannot run the command itself.** It is a container process
+running unprivileged as `$GRAIN_USER`, with no `sudo` in the image and no
+`systemctl` that reaches a systemd that matters (`scripts/setup.sh`'s
+`docker_run_args`); a `bash -c` from in there is neither root nor on the
+host, which is both of the things this pane is opened for. So it asks
+instead of acting, over the control channel the reboot button and the
+Upgrade button's restart already use: the daemon writes the command to
+`$GRAIN_DATA_DIR/control/shell`, a systemd `.path` unit out on the host
+notices, and `grain-shell.service` runs it as root and writes back what
+it printed.
+
+The exchange is three files, and the ordering is the whole protocol:
+`shell` (the command), `shell.out` (stdout and stderr interleaved, as a
+terminal would show them), and `shell.status` (the exit status, written
+*last* and renamed into place). A status file existing means the output
+beside it is finished, so the daemon side never reads a half-written
+answer and never has to guess. Both answer files are written under a
+`077` umask and chowned to the control directory's owner, so what a root
+command prints is readable by the daemon that asked for it and by root
+and by nobody else on the box. The responder consumes the request before
+running it, so a command that reboots the host is not run a second time
+on the way back up, and `TimeoutStartSec` bounds one that never returns
+at all.
+
+**What this grants, said plainly.** The two units beside this one each
+run one fixed command — `systemctl reboot`, `systemctl restart
+grain-daemon.service` — and that narrowness was the argument for
+replacing the `NOPASSWD` sudoers drop-ins they came from. This one runs
+whatever it is handed. It is unrestricted root on the host, held by
+whatever can reach the UI, and the UI carries no auth of its own: on a
+default deployment that is loopback, and on a tailnet deployment it is
+everyone the tailnet ACL lets in. There is no way to make a debug hatch
+narrower than the failures it is for, which is the honest reason it is
+this wide rather than a list of allowed commands.
+
+It is on by default anyway (`GRAIN_ROOT_SHELL=0` turns it off, and a
+re-run with `0` removes a responder an earlier run installed). A hatch
+that has to be installed in advance is one that is not installed on the
+day it is wanted — which is precisely the day the host stopped letting
+anyone in to install it — and this same UI could already reboot the
+machine out from under every running task. What the default buys is that
+the pane is there when the deployment is broken; what it costs is the
+paragraph above, which is why `scripts/setup.sh` says it too, at the
+variable.
+
+Two smaller decisions worth recording. Every command is logged to the
+daemon's journal before it runs, and that is the only record there is:
+the exchange leaves no file behind and the host-side unit's own journal
+names the unit rather than the command. And the warning above the prompt
+is standing, not a confirm per command — a confirm is clicked through by
+the second command, and this pane is used a dozen short commands at a
+time. Each of those is its own `bash -lc`, so a `cd` does not persist
+between them; the pane says so rather than leaving it to be discovered.
+
+A deployment with no responder behind the route says so on the tab, off
+`GET /api/config`'s own `rootShellEnabled`, rather than offering a prompt
+whose every command could only 404 — the same nil-means-unavailable
+contract every other optional panel here follows. A host deployed before
+any of this existed is in exactly that state until `sudo ./setup.sh` is
+re-run, and `pkg/rootshell`'s timeout message names the units to install
+rather than only reporting that nothing answered.
 
 ## A sandbox shape the backend ignores says so
 

@@ -48,10 +48,10 @@ import { capabilityRows } from "../state.js";
 //
 // Logs, Sandbox health and the reboot control used to join them here as
 // a single Debug tab (bwsalmon/agents#623), but moved back out to their
-// own sidebar entry/overlay, DebugOverlay.jsx (bwsalmon/agents#640): live
-// diagnostics for a deployment gone wrong turned out to want quicker
-// reach than a tab buried inside Settings, unlike the configuration the
-// tabs below actually are.
+// own sidebar entry/overlay, SystemOverlay.jsx (bwsalmon/agents#640):
+// live diagnostics for a deployment gone wrong turned out to want
+// quicker reach than a tab buried inside Settings, unlike the
+// configuration the tabs below actually are.
 //
 // The catch-all "General" tab this pane started with grew past the point
 // a single scroll of unrelated fields was still readable, so it is split
@@ -841,8 +841,23 @@ export default function SettingsOverlay({ onClose, onSaved, showError }) {
               not deployment settings saved with that button -- each one
               is written the moment it is added (grain/task-137), the
               same way the agent credentials on the Agents tab are, and a
-              stray Enter in one of its fields must not save this tab. */}
-            <GitHubTokensSection showError={showError} />
+              stray Enter in one of its fields must not save this tab.
+
+              targetReposMissingCredentials is passed down rather than
+              fetched there: that section reads /api/github-tokens, which
+              knows the ladder but not the target repo allowlist, and the
+              gap between the two is only computed here
+              (ui.Settings.TargetReposMissingCredentials). It is re-read
+              after every credential change (reloadSettings), since the
+              form that closes such a gap is the very one it is shown
+              beside. */}
+            <GitHubTokensSection
+              showError={showError}
+              targetReposMissingCredentials={
+                settings.targetReposMissingCredentials
+              }
+              onLadderChanged={reloadSettings}
+            />
           </>
         )}
         {tab === "sandbox" && (

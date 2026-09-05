@@ -2,7 +2,7 @@ package ui_test
 
 // bwsalmon/agents#536: the sandbox health pane's own API surface -- the
 // same enabled-flag conventions logs_test.go's own tests already
-// exercise for the debug section's other pane.
+// exercise for the System pane's other panel.
 
 import (
 	"context"

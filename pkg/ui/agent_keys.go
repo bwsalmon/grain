@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/bwsalmon/grain/pkg/model"
+	"github.com/bwsalmon/grain/pkg/agent/credcheck"
 	"github.com/bwsalmon/grain/pkg/secrets"
 )
 
@@ -34,20 +34,13 @@ import (
 // Deliberately not model.Config fields: a credential is not
 // configuration, and nothing that reaches the store's config row is
 // write-only the way this must be.
+// The mapping itself lives in pkg/agent/credcheck, which needs the same
+// three names to say which secret a refused credential is stored in
+// (agent_key_check.go beside this). One copy, so a fourth framework
+// cannot be settable here and untestable there -- it normalizes the
+// legacy "gemini" spelling on the way in exactly as this always did.
 func agentKeySecret(framework string) (string, bool) {
-	// Normalized first, so the legacy "gemini" spelling still resolves
-	// to the same secret it always did -- agent/antigravity runs agy,
-	// which authenticates with exactly that Gemini API key.
-	switch model.NormalizeAgentFrameworkName(framework) {
-	case model.AgentFrameworkAntigravity:
-		return secrets.GeminiAPIKeySecret, true
-	case model.AgentFrameworkClaude:
-		return secrets.ClaudeOAuthTokenSecret, true
-	case model.AgentFrameworkCodex:
-		return secrets.OpenAIAPIKeySecret, true
-	default:
-		return "", false
-	}
+	return credcheck.SecretFor(framework)
 }
 
 // agentKeysResponse is GET /api/agent-keys' body, and what setting or

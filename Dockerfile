@@ -23,7 +23,7 @@
 #   curl              the agent CLIs' own network calls, and a shell in
 #                     here that needs to reach something
 #   procps            for `top` alone -- pkg/hosttop shells out to it for
-#                     the UI's Debug pane, which is where an operator
+#                     the UI's System pane, which is where an operator
 #                     asks what is spending the daemon's machine once
 #                     sandbox health has said it is loaded
 #   systemd           for `journalctl` alone -- pkg/systemlog's Journalctl

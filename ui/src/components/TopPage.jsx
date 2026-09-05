@@ -10,7 +10,7 @@ import {
 import api from "../api.js";
 
 // REFRESH_MS is LogsPage's own cadence, for the same reason: every panel
-// of the Debug overlay should feel like the same kind of live view. It is
+// of the System overlay should feel like the same kind of live view. It is
 // also about as often as `top` itself redraws when an operator runs it in
 // a terminal.
 const REFRESH_MS = 5000;
@@ -20,7 +20,7 @@ const REFRESH_MS = 5000;
 // what falls off the end is idle (pkg/hosttop).
 const LINES_TO_FETCH = 60;
 
-// TopPage is the Top tab of DebugOverlay.jsx: `top` on the machine the
+// TopPage is the Top tab of SystemOverlay.jsx: `top` on the machine the
 // daemon itself runs on, over GET /api/host/top (grain/task-120).
 //
 // It sits beside Sandbox health rather than inside it because it answers

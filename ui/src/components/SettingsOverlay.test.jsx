@@ -687,6 +687,35 @@ describe("SettingsOverlay", () => {
     expect(await screen.findByText("deployment default")).toBeInTheDocument();
   });
 
+  // grain/task-16: the gap between the target repo allowlist and the
+  // credential ladder is computed on /api/settings and shown on this
+  // tab, beside the ladder form that closes it -- the token section
+  // fetches only /api/github-tokens and cannot know about it.
+  it("names a target repo the credential ladder does not cover", async () => {
+    api
+      .mockResolvedValueOnce({
+        ...settings,
+        targetReposMissingCredentials: ["acme/widgets"],
+      })
+      .mockResolvedValueOnce({
+        enabled: true,
+        dir: "/data/secrets/github",
+        tokens: [{ name: "bot", present: true }],
+        patterns: [],
+        restartRequired: false,
+      });
+    const user = userEvent.setup();
+    render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
+    await screen.findByDisplayValue("30s");
+
+    await user.click(screen.getByRole("tab", { name: "GitHub" }));
+
+    expect(
+      await screen.findByText(/Nothing in the ladder covers/i),
+    ).toBeInTheDocument();
+    expect(screen.getByText("acme/widgets")).toBeInTheDocument();
+  });
+
   it("switches to the Capabilities tab, offers the GCP fields and shows the panel", async () => {
     const capabilities = [
       {

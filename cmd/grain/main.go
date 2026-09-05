@@ -813,11 +813,20 @@ func cmdSettings(ctx context.Context, c *ui.HTTPClient, out *printer, args []str
 	// configured -- see cmdCheckCapability below.
 	checkCapability := fs.String("check-capability", "",
 		"test one capability's standing credential against the service that issued it, and print what came back -- changes nothing")
+	// The same question about the other kind of credential this command
+	// already reports on: an agent framework's own key, which this
+	// listing can likewise only say is *set*. See checkAgentCredential.
+	checkAgentKey := fs.String("check-agent-key", "",
+		"test one agent framework's credential (antigravity, claude, codex) against the vendor that issued it, "+
+			"and print what came back -- changes nothing")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *checkCapability != "" {
 		return checkCapabilityCredential(ctx, c, out, *checkCapability)
+	}
+	if *checkAgentKey != "" {
+		return checkAgentCredential(ctx, c, out, *checkAgentKey)
 	}
 
 	var req ui.UpdateSettingsRequest
@@ -1193,6 +1202,33 @@ func checkCapabilityCredential(ctx context.Context, c *ui.HTTPClient, out *print
 	return nil
 }
 
+// checkAgentCredential is `grain settings -check-agent-key <framework>`:
+// the same question one line down, asked of the credential a run is
+// dispatched with rather than of a capability's.
+//
+// `grain settings` prints which agent credentials are set, and "set" is
+// the whole of what the store knows: a Gemini key revoked in the console,
+// a Claude Code OAuth token whose session was ended, an OpenAI key
+// deleted by whoever else holds that account -- all of them leave the
+// stored secret exactly where it was, so grain reports it present and the
+// next dispatched run is what discovers otherwise, several minutes into
+// somebody's task. This authenticates as it and lists the models it can
+// see.
+//
+// A refused credential is a successful command printing a bad answer,
+// exactly as it is for -check-capability: nothing about the command
+// failed, and the sentence names the secret to replace. A non-zero exit
+// stays for the calls that could not be made at all -- a framework grain
+// does not have, a daemon not offering this.
+func checkAgentCredential(ctx context.Context, c *ui.HTTPClient, out *printer, framework string) error {
+	check, err := c.CheckAgentKey(ctx, framework)
+	if err != nil {
+		return err
+	}
+	out.agentKeyCheck(check)
+	return nil
+}
+
 // capabilityStatusLine renders one ui.CapabilityStatus as a line of
 // `grain settings` -- the CLI's half of the Settings pane's own
 // Capabilities tab, printed here because "why did a task never get the
@@ -1262,6 +1298,28 @@ func (p *printer) capabilityCheck(check ui.CapabilityCheck) {
 	fmt.Printf("%s: %s\n", check.ID, verdict)
 	if len(check.Credentials) > 0 {
 		fmt.Printf("checked as:  %s\n", strings.Join(check.Credentials, ", "))
+	}
+	fmt.Printf("checked at:  %s\n", check.CheckedAt.Format(time.RFC3339))
+	if check.Detail != "" {
+		fmt.Println(check.Detail)
+	}
+}
+
+// agentKeyCheck prints one ui.AgentKeyCheck the way capabilityCheck
+// above prints its own: the verdict first, then what was checked, when,
+// and the vendor's sentence.
+func (p *printer) agentKeyCheck(check ui.AgentKeyCheck) {
+	if p.json {
+		p.encode(check)
+		return
+	}
+	verdict := "REFUSED"
+	if check.OK {
+		verdict = "ok"
+	}
+	fmt.Printf("%s: %s\n", check.Framework, verdict)
+	if check.Secret != "" {
+		fmt.Printf("checked as:  %s\n", check.Secret)
 	}
 	fmt.Printf("checked at:  %s\n", check.CheckedAt.Format(time.RFC3339))
 	if check.Detail != "" {

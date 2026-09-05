@@ -1,6 +1,6 @@
 package ui_test
 
-// GET /api/host/top: the Debug overlay's Top tab (grain/task-120), which
+// GET /api/host/top: the System overlay's Top tab (grain/task-120), which
 // says which processes are spending the machine GET /api/sandboxes' own
 // host section only says is busy. Same enabled-flag/?lines= conventions
 // logs_test.go already exercises for the Logs pane beside it.

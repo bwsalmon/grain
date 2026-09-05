@@ -3,6 +3,7 @@ import { Alert, Button, Tab, Tabs, Typography } from "@mui/material";
 import api from "../api.js";
 import Overlay from "./Overlay.jsx";
 import LogsPage from "./LogsPage.jsx";
+import RootShellPage from "./RootShellPage.jsx";
 import SandboxHealthPage from "./SandboxHealthPage.jsx";
 import TopPage from "./TopPage.jsx";
 
@@ -10,10 +11,11 @@ const TABS = [
   { id: "logs", label: "Logs" },
   { id: "sandboxHealth", label: "Sandbox health" },
   { id: "top", label: "Top" },
+  { id: "rootShell", label: "Root shell" },
   { id: "restart", label: "Restart" },
 ];
 
-// DebugOverlay is Logs, Sandbox health and the reboot control's own
+// SystemOverlay is Logs, Sandbox health and the reboot control's own
 // sidebar destination (bwsalmon/agents#640) -- operator-only,
 // deployment-wide diagnostics, but distinct enough from Settings' own
 // configuration that it warranted a nav entry of its own again rather
@@ -21,10 +23,24 @@ const TABS = [
 // Each gets its own tab, the same layout SettingsOverlay.jsx already
 // uses for its own General/Capabilities/Upgrade split.
 //
+// "System" rather than the "Debug" this pane was called until now
+// (grain/task-12): what is behind it is the state of the machine this
+// deployment runs on -- its logs, its sandboxes, its processes, its
+// power switch -- which an operator reads to see what the deployment is
+// doing, not only when they have a bug to chase. "Debug" named the mood
+// somebody opens it in rather than what it shows, and it was the same
+// word Settings' old tab and the self-debug capability already carry.
+//
 // Top (GET /api/host/top) sits directly after Sandbox health because it
 // is the question that follows it: that panel's host section says the
 // daemon's machine is loaded, and only a per-process view says by what
 // (grain/task-120).
+//
+// Root shell (POST /api/host/shell, grain/task-13) comes last of the
+// four reading panes and just before the danger zone, which is where it
+// belongs in both directions: it is the pane an operator reaches only
+// once the three above have failed to explain anything, and it is the
+// only one that changes the machine rather than reporting on it.
 //
 // Metrics (GET /api/metrics) was a fourth tab here for a while, on the
 // reasoning that it is the same kind of read-only, deployment-wide view
@@ -32,7 +48,7 @@ const TABS = [
 // grain/task-173): what is left in here is what an operator opens
 // because something is wrong right now, and a throughput report is the
 // opposite of that -- it is read when nothing is wrong at all.
-export default function DebugOverlay({ config, onClose, showError }) {
+export default function SystemOverlay({ config, onClose, showError }) {
   const [tab, setTab] = useState("logs");
   // rebootHost is deliberately its own confirm/try, separate from any
   // settings-form save flow: it is not a settings field, and unlike a
@@ -71,7 +87,7 @@ export default function DebugOverlay({ config, onClose, showError }) {
   const header = (
     <>
       <Typography variant="h6" component="h2" sx={{ mt: 0 }}>
-        Debug
+        System
       </Typography>
       <Tabs
         value={tab}
@@ -97,6 +113,9 @@ export default function DebugOverlay({ config, onClose, showError }) {
       {tab === "logs" && <LogsPage showError={showError} />}
       {tab === "sandboxHealth" && <SandboxHealthPage showError={showError} />}
       {tab === "top" && <TopPage showError={showError} />}
+      {tab === "rootShell" && (
+        <RootShellPage config={config} showError={showError} />
+      )}
       {tab === "restart" &&
         (config && config.rebootEnabled ? (
           <fieldset>

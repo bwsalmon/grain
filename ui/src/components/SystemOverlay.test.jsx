@@ -1,7 +1,7 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import DebugOverlay from "./DebugOverlay.jsx";
+import SystemOverlay from "./SystemOverlay.jsx";
 import api from "../api.js";
 
 vi.mock("../api.js", () => ({ default: vi.fn() }));
@@ -11,7 +11,7 @@ vi.mock("../api.js", () => ({ default: vi.fn() }));
 // (the same layout SettingsOverlay.jsx uses). Only the active tab's panel
 // is mounted, so only it feeds its own GET /api/logs or GET /api/sandboxes
 // call a response.
-describe("DebugOverlay", () => {
+describe("SystemOverlay", () => {
   const noLogs = { enabled: false };
   const noSandboxes = { enabled: false };
 
@@ -19,10 +19,10 @@ describe("DebugOverlay", () => {
     api.mockReset();
   });
 
-  it("shows Logs by default, with Sandbox health, Top and Restart as other tabs", async () => {
+  it("shows Logs by default, with Sandbox health, Top, Root shell and Restart as other tabs", async () => {
     api.mockResolvedValueOnce(noLogs);
     render(
-      <DebugOverlay
+      <SystemOverlay
         config={{ rebootEnabled: true }}
         onClose={() => {}}
         showError={() => {}}
@@ -37,8 +37,54 @@ describe("DebugOverlay", () => {
       screen.getByRole("tab", { name: "Sandbox health" }),
     ).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "Top" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Root shell" })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "Restart" })).toBeInTheDocument();
     expect(api).toHaveBeenCalledTimes(1);
+  });
+
+  // grain/task-13: the last of the reading panes and the first that
+  // changes the machine -- one command as root on the host, for the
+  // failure the three tabs before it could not explain. It needs no
+  // fetch of its own to render: GET /api/config has already said whether
+  // this deployment has a responder behind the route.
+  it("shows the root shell on its own tab, without a call of its own", async () => {
+    api.mockResolvedValueOnce(noLogs);
+    const user = userEvent.setup();
+    render(
+      <SystemOverlay
+        config={{ rebootEnabled: true, rootShellEnabled: true }}
+        onClose={() => {}}
+        showError={() => {}}
+      />,
+    );
+    await screen.findByText(/no log sources configured/i);
+
+    await user.click(screen.getByRole("tab", { name: "Root shell" }));
+
+    expect(
+      screen.getByRole("button", { name: /run as root/i }),
+    ).toBeInTheDocument();
+    expect(api).toHaveBeenCalledTimes(1);
+  });
+
+  it("says the root shell is unavailable where the deployment has none", async () => {
+    api.mockResolvedValueOnce(noLogs);
+    const user = userEvent.setup();
+    render(
+      <SystemOverlay
+        config={{ rebootEnabled: true, rootShellEnabled: false }}
+        onClose={() => {}}
+        showError={() => {}}
+      />,
+    );
+    await screen.findByText(/no log sources configured/i);
+
+    await user.click(screen.getByRole("tab", { name: "Root shell" }));
+
+    expect(screen.getByText(/no root shell configured/i)).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /run as root/i }),
+    ).not.toBeInTheDocument();
   });
 
   // grain/task-173: the throughput and latency report is a sidebar
@@ -46,7 +92,7 @@ describe("DebugOverlay", () => {
   it("does not show Metrics as a tab", async () => {
     api.mockResolvedValueOnce(noLogs);
     render(
-      <DebugOverlay
+      <SystemOverlay
         config={{ rebootEnabled: true }}
         onClose={() => {}}
         showError={() => {}}
@@ -66,7 +112,7 @@ describe("DebugOverlay", () => {
   it("fills the pane beside the sidebar, with its tabs in the fixed header", async () => {
     api.mockResolvedValueOnce(noLogs);
     render(
-      <DebugOverlay
+      <SystemOverlay
         config={{ rebootEnabled: true }}
         onClose={() => {}}
         showError={() => {}}
@@ -82,7 +128,7 @@ describe("DebugOverlay", () => {
       screen.getByRole("tab", { name: "Sandbox health" }),
     );
     expect(head).toContainElement(
-      screen.getByRole("heading", { name: "Debug" }),
+      screen.getByRole("heading", { name: "System" }),
     );
   });
 
@@ -90,7 +136,7 @@ describe("DebugOverlay", () => {
     api.mockResolvedValueOnce(noLogs).mockResolvedValueOnce(noSandboxes);
     const user = userEvent.setup();
     render(
-      <DebugOverlay
+      <SystemOverlay
         config={{ rebootEnabled: true }}
         onClose={() => {}}
         showError={() => {}}
@@ -115,7 +161,7 @@ describe("DebugOverlay", () => {
     });
     const user = userEvent.setup();
     render(
-      <DebugOverlay
+      <SystemOverlay
         config={{ rebootEnabled: true }}
         onClose={() => {}}
         showError={() => {}}
@@ -133,7 +179,7 @@ describe("DebugOverlay", () => {
     api.mockResolvedValueOnce(noLogs);
     const user = userEvent.setup();
     render(
-      <DebugOverlay
+      <SystemOverlay
         config={{ rebootEnabled: true }}
         onClose={() => {}}
         showError={() => {}}
@@ -152,7 +198,7 @@ describe("DebugOverlay", () => {
     api.mockResolvedValueOnce(noLogs);
     const user = userEvent.setup();
     render(
-      <DebugOverlay
+      <SystemOverlay
         config={{ rebootEnabled: false }}
         onClose={() => {}}
         showError={() => {}}
@@ -175,7 +221,7 @@ describe("DebugOverlay", () => {
     vi.stubGlobal("confirm", vi.fn().mockReturnValue(true));
     const user = userEvent.setup();
     render(
-      <DebugOverlay
+      <SystemOverlay
         config={{ rebootEnabled: true }}
         onClose={() => {}}
         showError={() => {}}
@@ -195,7 +241,7 @@ describe("DebugOverlay", () => {
     vi.stubGlobal("confirm", vi.fn().mockReturnValue(false));
     const user = userEvent.setup();
     render(
-      <DebugOverlay
+      <SystemOverlay
         config={{ rebootEnabled: true }}
         onClose={() => {}}
         showError={() => {}}
@@ -224,7 +270,7 @@ describe("DebugOverlay", () => {
     const user = userEvent.setup();
     const showError = vi.fn();
     render(
-      <DebugOverlay
+      <SystemOverlay
         config={{ rebootEnabled: true }}
         onClose={() => {}}
         showError={showError}
@@ -247,7 +293,7 @@ describe("DebugOverlay", () => {
     const user = userEvent.setup();
     const showError = vi.fn();
     render(
-      <DebugOverlay
+      <SystemOverlay
         config={{ rebootEnabled: true }}
         onClose={() => {}}
         showError={showError}
