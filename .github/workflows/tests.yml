@@ -281,6 +281,104 @@ jobs:
             docker logs "$c" 2>&1 | tail -100
           done
 
+  # granule against a real guest. Everything else in pkg/granule runs
+  # against fakes -- deliberately, so the lifecycle is assertable without
+  # KVM -- and a fake vsock is granule's own idea of what kontur does.
+  # This is the job that checks the idea.
+  #
+  # Separate from real-vm above rather than folded into it: that one
+  # proves the vendored kontur works against pkg/kontur, this one proves
+  # granule works against a booted guest, and failing independently says
+  # which. Both build a guest, which is what dominates each.
+  #
+  # Not path-filtered, for the reason real-vm is not: a suite that only
+  # runs when someone predicted it was relevant is most of the way back
+  # to one that never runs.
+  granule-vm:
+    name: granule on a real VM
+    runs-on: ubuntu-latest
+    # build-guest.sh dominates this the same way it dominates real-vm --
+    # the kontur base out of the vendored tree, then a VM booted from it
+    # and provisioned. The granule image on top is a thin re-base, and
+    # the boot the test itself does is a couple of minutes.
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      # Same reclaim as real-vm and as build-artifacts' own guest job:
+      # the base image, the VM container and the commit's layer are three
+      # multi-gigabyte copies of the guest disk, and a hosted runner does
+      # not have room for them beside its preinstalled toolchains.
+      #
+      # Not $AGENT_TOOLSDIRECTORY: that is where actions/setup-go just
+      # put the Go this job builds with.
+      - name: Reclaim runner disk
+        run: |
+          echo "before:"; df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/share/boost || true
+          echo "after:"; df -h /
+
+      - name: Require KVM
+        run: |
+          if [ ! -e /dev/kvm ]; then
+            echo "::error::/dev/kvm is not present on this runner, so the suite below would skip rather than run. A green tick here would mean nothing." >&2
+            exit 1
+          fi
+          ls -l /dev/kvm
+          docker version
+
+      # The guest half, built from the vendored kontur for the reason
+      # build-artifacts.yml gives: a GITHUB_TOKEN is scoped to its own
+      # repository and cannot pull kontur's packages, and building it
+      # here makes "one commit drives both halves" true by construction.
+      - name: Build the guest image
+        run: IMAGE=grain-guest:ci ./scripts/kontur/build-guest.sh
+
+      # The container half: the same image re-based onto a real distro
+      # with granule as its entrypoint (Dockerfile.granule).
+      - name: Build the granule image
+        run: make granule-image GRANULE_BASE=grain-guest:ci GRANULE_IMAGE=grain-sandbox:ci
+
+      # -count=1 so a cached "ok" from an earlier skip can never stand in
+      # for a real run. -v because when a guest fails to come up, the
+      # per-step log is the only account of how far it got.
+      - name: granule end-to-end
+        env:
+          GRAIN_REAL_VM_TESTS: "1"
+          GRAIN_GRANULE_IMAGE: grain-sandbox:ci
+        run: |
+          set -euo pipefail
+          go test ./pkg/granule/ -run TestGranuleProvisionsARealSandbox \
+            -count=1 -v -timeout 20m 2>&1 | tee /tmp/granule-vm.log
+          # `go test` reports "ok" both for a package whose selected tests
+          # all skipped and for one where -run matched nothing at all, so
+          # neither shows up as a failure on its own. This suite has five
+          # separate reasons to skip (the variable, the image, docker,
+          # /dev/kvm, the OS), and every one of them would leave a green
+          # tick meaning nothing. Assert it actually ran.
+          if ! grep -q -- "--- PASS: TestGranuleProvisionsARealSandbox" /tmp/granule-vm.log; then
+            echo "::error::TestGranuleProvisionsARealSandbox did not run and pass; this job only means something when it does" >&2
+            exit 1
+          fi
+
+      # granule narrates itself to stdout, and `docker run --rm` in the
+      # test takes that with it when the container goes. The test prints
+      # what it parsed on failure; this is for the case where it could
+      # not parse or never got that far.
+      - name: Guest consoles on failure
+        if: failure()
+        run: |
+          for c in $(docker ps -aq --filter 'name=kontur-vm-'); do
+            echo "===== $(docker inspect -f '{{.Name}}' "$c") ====="
+            docker logs "$c" 2>&1 | tail -100
+          done
+
   # Nothing in this repository read a workflow file before GitHub ran it,
   # and three of these five are never run by a pull request at all:
   # gcp-smoke.yml and live-agent.yml trigger on `schedule` and

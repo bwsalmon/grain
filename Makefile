@@ -3,7 +3,7 @@
 # instructions kept in sync by hand.
 
 BIN := bin
-CMDS := grain
+CMDS := grain granule
 
 BUILDVCS ?= auto
 
@@ -89,7 +89,7 @@ CONTAINER_USER ?= $(shell id -u):$(shell id -g)
 # from .git. GO_VERSION is passed for the same reason `builder` passes
 # it -- one version, read out of go.mod.
 IMAGE ?= grain:dev
-.PHONY: all build test test-e2e vet fmt fmt-frontend clean builder container-build image frontend loadtest soak $(CMDS)
+.PHONY: all build test test-e2e vet fmt fmt-frontend clean builder container-build image granule-image frontend loadtest soak $(CMDS)
 
 all: vet test build
 
@@ -305,3 +305,18 @@ image:
 		$(if $(SANDBOX_IMAGE),--build-arg SANDBOX_IMAGE=$(SANDBOX_IMAGE),) \
 		$(if $(GRAIN_IMAGE_REF),--build-arg GRAIN_IMAGE_REF=$(GRAIN_IMAGE_REF),) \
 		-t $(IMAGE) -f Dockerfile .
+
+# The sandbox image: granule as PID 1, re-based onto a real distro with
+# kontur and the guest disk copied on. GRANULE_BASE is the image those
+# come from -- what scripts/kontur/build-guest.sh produces -- and
+# GRANULE_IMAGE is what this one is called.
+GRANULE_BASE ?= grain-guest:dev
+GRANULE_IMAGE ?= grain-sandbox:dev
+granule-image:
+	$(CONTAINER_ENGINE) build \
+		--build-arg GO_IMAGE=$(GO_IMAGE) \
+		--build-arg GO_VERSION=$(GO_VERSION) \
+		--build-arg BUILDVCS=$(BUILDVCS) \
+		--build-arg SANDBOX_IMAGE=$(GRANULE_BASE) \
+		$(if $(FRAMEWORKS),--build-arg FRAMEWORKS=$(FRAMEWORKS),) \
+		-t $(GRANULE_IMAGE) -f Dockerfile.granule .

@@ -1,0 +1,233 @@
+package grain
+
+import (
+	"fmt"
+	"time"
+
+	"github.com/bwsalmon/grain/pkg/granule"
+)
+
+// Policy is what the controller decides rather than the grain. Each of
+// these is a judgement that needs a view from outside one grain: how long
+// a boot is allowed to take before it is a failure rather than a wait, and
+// how much self-repair is repair rather than thrashing.
+type Policy struct {
+	// ProvisionBudget bounds PhaseProvisioning. It covers the one stretch
+	// a grain cannot bound for itself: a container that never started, or
+	// a guest that never answered, is exactly the grain that cannot
+	// report being stuck.
+	ProvisionBudget time.Duration
+	// MaxRebuilds is where self-repair stops being repair. A grain
+	// decides on its own to throw a wedged guest away and build a fresh
+	// one -- the controller never orders it and only sees Status.Rebuilds
+	// go up -- so this is the whole of the rule, held by the one side
+	// with a view of how the run is going rather than duplicated in the
+	// shim.
+	MaxRebuilds int
+}
+
+// DefaultPolicy is the shape a deployment gets when it names nothing. The
+// provision budget is generous because a real guest boot is genuinely
+// slow (orchestrator.KonturConfig.readyTimeout is two minutes for the VM
+// alone, before a clone or a setup command).
+func DefaultPolicy() Policy {
+	return Policy{ProvisionBudget: 10 * time.Minute, MaxRebuilds: 3}
+}
+
+// RunRow is the controller's own record of the run a grain is serving --
+// the fields of model.Run and its task that Reconcile needs, and no more,
+// so that the decision below can be exercised without a store.
+type RunRow struct {
+	ID     string
+	TaskID string
+	// Live is false once the run has been finished in the store. A grain
+	// still standing against a finished row is one whose finish already
+	// happened and whose release has not.
+	Live bool
+	// TaskClosed is a task closed while its grain was still running --
+	// the case orchestrator.watchForTaskClosed polls for today.
+	TaskClosed bool
+	// Paused is the deployment having met the agent's own usage limit,
+	// which stops every grain rather than letting each spend an agent's
+	// worth of wall clock discovering the same refusal.
+	Paused bool
+	// Activity is what the row currently says the grain is doing, so a
+	// tick that changes nothing writes nothing.
+	Activity string
+}
+
+// Observed is one grain as one tick sees it: what the grain says about
+// itself, what the store says about the run behind it, and when.
+//
+// Run is nil for a grain the store knows nothing about, which is the
+// ordinary shape of an orphan -- a grain whose controller died between
+// creating it and recording it, or one whose run was finished by an
+// earlier tick.
+type Observed struct {
+	Status granule.Status
+	Run    *RunRow
+	Now    time.Time
+}
+
+// ActionKind is what the controller does about a grain this tick.
+type ActionKind string
+
+const (
+	// ActionRecordActivity copies the grain's own phrase onto the task's
+	// row.
+	ActionRecordActivity ActionKind = "record-activity"
+	// ActionFinish records the grain's own Result and carries out what it
+	// implies -- orchestrator's FinishRun followed by ProcessResult.
+	ActionFinish ActionKind = "finish"
+	// ActionFail finishes a run whose grain never produced a Result of
+	// its own: the controller supplies the outcome, because the grain is
+	// in no position to.
+	ActionFail ActionKind = "fail"
+	// ActionRelease destroys the grain.
+	ActionRelease ActionKind = "release"
+)
+
+// Action is one thing to do. Actions come back in the order they should
+// be carried out, and a failure part-way through is safe to abandon: the
+// next tick observes whatever actually happened and decides again.
+type Action struct {
+	Kind     ActionKind
+	Outcome  string
+	Detail   string
+	Activity string
+}
+
+// Reconcile decides what to do about one grain this tick. It is pure: no
+// store, no backend, no clock of its own -- so the whole of the
+// controller's per-grain policy is a table test rather than something
+// that needs a VM to exercise. That is the point of splitting it out.
+// pkg/orchestrator's equivalent is runOne plus RunDispatch, ~730 lines
+// whose behaviour can only be observed by dispatching a real run.
+//
+// The ordering below is the decision, not an implementation detail:
+//
+//  1. A grain no live run claims is released, whatever it thinks it is
+//     doing. Nothing else can be true of it that matters.
+//  2. A lost container is failed and released. There is no repair path,
+//     because a wedged guest never reaches here -- the shim rebuilds
+//     that itself.
+//  3. A grain that has finished is finished with, even if its task was
+//     closed or the deployment paused in the meantime. Acting on a
+//     result that already exists beats destroying the grain that holds
+//     it.
+//  4. Thrashing is checked before the budget: a grain rebuilding in a
+//     loop is failing for a reason worth naming, not merely slow.
+//  5. Cancellation and pause come before the ordinary steady state, so
+//     a grain being stopped is not also served. Both are a kill: there is
+//     no signal for either.
+//  6. A provisioning grain past its budget is failed. Nothing else about
+//     a grain that cannot finish booting is worth doing.
+//  7. Otherwise, keep its row honest -- which is the only thing left. A
+//     running grain wants nothing from the controller: it reaches the
+//     controller's tools itself, over its own HTTP connection.
+func Reconcile(o Observed, p Policy) []Action {
+	st := o.Status
+
+	// 1. Orphan. A grain with no live run behind it holds a container, a
+	// VMM and a guest for a run that is over or was never recorded.
+	// Releasing an already-released grain is a no-op, so this is stated
+	// as a phase check rather than tracked.
+	if o.Run == nil || !o.Run.Live {
+		if st.Phase == granule.PhaseReleased {
+			return nil
+		}
+		return []Action{{Kind: ActionRelease}}
+	}
+	if st.Phase == granule.PhaseReleased {
+		// Released out from under a live row: something destroyed the
+		// container without the run being finished. The row is all that
+		// is left, and it needs an ending.
+		return []Action{{Kind: ActionFail, Outcome: granule.OutcomeLost,
+			Detail: "this run's grain was released while the run was still live"}}
+	}
+
+	// 2. The container is gone.
+	if st.Phase == granule.PhaseLost {
+		return []Action{
+			{Kind: ActionFail, Outcome: granule.OutcomeLost, Detail: lostDetail(st)},
+			{Kind: ActionRelease},
+		}
+	}
+
+	// 3. The grain finished on its own terms.
+	if st.Phase.Terminal() {
+		return []Action{{Kind: ActionFinish}, {Kind: ActionRelease}}
+	}
+
+	// 4. Self-repair that is not converging.
+	if p.MaxRebuilds > 0 && st.Rebuilds > p.MaxRebuilds {
+		return []Action{
+			{Kind: ActionFail, Outcome: granule.OutcomeThrashing,
+				Detail: fmt.Sprintf("this run's grain rebuilt its sandbox %d times, past the %d it is allowed",
+					st.Rebuilds, p.MaxRebuilds)},
+			{Kind: ActionRelease},
+		}
+	}
+
+	// 5. Stop it, which is destroying it: stopping a container SIGTERMs
+	// the shim and waits out a grace period, so the graceful ending is
+	// what killing already does and there is nothing a separate signal
+	// would buy. The controller supplies the outcome rather than reading
+	// one back, because SIGKILL may win.
+	//
+	// One tick rather than two. Signalling and waiting for the next poll
+	// to see a terminal phase was the only place this table needed a
+	// follow-up round.
+	if o.Run.TaskClosed {
+		return []Action{
+			{Kind: ActionFail, Outcome: granule.OutcomeCancelled, Detail: "the task was closed"},
+			{Kind: ActionRelease},
+		}
+	}
+	if o.Run.Paused {
+		return []Action{
+			{Kind: ActionFail, Outcome: granule.OutcomeCancelled, Detail: "the deployment met its usage limit"},
+			{Kind: ActionRelease},
+		}
+	}
+
+	// 6. Stuck before there was ever an agent.
+	if st.Phase == granule.PhaseProvisioning && p.ProvisionBudget > 0 &&
+		o.Now.Sub(st.Since) > p.ProvisionBudget {
+		return []Action{
+			{Kind: ActionFail, Outcome: granule.OutcomeSetupFailed,
+				Detail: fmt.Sprintf("this run's sandbox was still being prepared after %s: %s",
+					o.Now.Sub(st.Since).Round(time.Second), provisioningDetail(st))},
+			{Kind: ActionRelease},
+		}
+	}
+
+	// 7. Steady state, which is almost always nothing at all: mirroring
+	// what the grain says it is doing onto the task's row.
+	var out []Action
+	if st.Activity != o.Run.Activity {
+		out = append(out, Action{Kind: ActionRecordActivity, Activity: st.Activity})
+	}
+	return out
+}
+
+// lostDetail says what was last known about a grain whose container is
+// gone. Whatever phrase was standing when it went is left standing,
+// deliberately: where a grain got to before it vanished is exactly the
+// context the outcome alone does not carry.
+func lostDetail(st granule.Status) string {
+	if st.Activity == "" {
+		return "this run's grain could no longer be reached"
+	}
+	return "this run's grain could no longer be reached, last seen " + st.Activity
+}
+
+// provisioningDetail is the same courtesy for a grain that never finished
+// booting: the phrase it was on says which step of a preparation ran out
+// of budget.
+func provisioningDetail(st granule.Status) string {
+	if st.Activity == "" {
+		return "it reported no progress"
+	}
+	return "it was still " + st.Activity
+}
