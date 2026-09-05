@@ -12,6 +12,7 @@ import (
 	"github.com/bwsalmon/grain/pkg/agent"
 	"github.com/bwsalmon/grain/pkg/dispatch"
 	"github.com/bwsalmon/grain/pkg/github"
+	"github.com/bwsalmon/grain/pkg/mcp"
 	"github.com/bwsalmon/grain/pkg/model"
 )
 
@@ -244,7 +245,8 @@ func StaticFramework(f agent.Framework) func(context.Context, string) (agent.Fra
 // one reconciler has a problem the others might not.
 //
 // deps.MaxWorkers, deps.MaxMergers, deps.Config.MaxAgentTurns,
-// deps.Config.PromptExtension and deps.Config.TimeZone are
+// deps.Config.PromptExtension, deps.Config.TimeZone and
+// deps.Config.GitIdentity are
 // refreshed from deps.Store's own grain_config row (if any) before any
 // reconciler runs, so a change made through the store -- `grain
 // settings`, or the UI's Settings page -- takes effect on this cycle
@@ -299,6 +301,7 @@ func RunCycle(ctx context.Context, deps Deps, now time.Time) error {
 			deps.Config.MaxAgentTurns = mc.MaxAgentTurns
 			deps.Config.PromptExtension = mc.PromptExtension
 			deps.Config.TimeZone = mc.TimeZone
+			deps.Config.GitIdentity = mcp.GitIdentity{Name: mc.AgentGitName, Email: mc.AgentGitEmail}
 		}
 	}
 	var errs []error
@@ -693,7 +696,7 @@ func runOne(ctx context.Context, deps Deps, d dispatch.Dispatch, now time.Time) 
 			return fmt.Errorf("orchestrator: minting run %s's sandbox token: %w", d.RunID, err)
 		}
 		if err := sandbox.ConfigureGitCredentials(ctx,
-			deps.Config.GitRemoteBase+"/placeholder/placeholder.git", token); err != nil {
+			deps.Config.GitRemoteBase+"/placeholder/placeholder.git", token, deps.Config.GitIdentity); err != nil {
 			return fmt.Errorf("orchestrator: configuring git credentials for run %s: %w", d.RunID, err)
 		}
 	}

@@ -302,7 +302,7 @@ func (s *sandboxRecreation) restoreGitCredentials(ctx context.Context, out *Sand
 		return
 	}
 	if err := s.sandbox.ConfigureGitCredentials(ctx,
-		s.cfg.GitRemoteBase+"/placeholder/placeholder.git", token); err != nil {
+		s.cfg.GitRemoteBase+"/placeholder/placeholder.git", token, s.cfg.GitIdentity); err != nil {
 		out.Warnings = append(out.Warnings,
 			fmt.Sprintf("its git credentials could not be written back (%v) -- git push and git fetch will not work", err))
 		return

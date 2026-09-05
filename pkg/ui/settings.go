@@ -10,6 +10,7 @@ import (
 
 	"github.com/bwsalmon/grain/pkg/agent/antigravity"
 	"github.com/bwsalmon/grain/pkg/kontur"
+	"github.com/bwsalmon/grain/pkg/mcp"
 	"github.com/bwsalmon/grain/pkg/model"
 )
 
@@ -173,6 +174,31 @@ type Settings struct {
 	// arrive as present-and-empty rather than as an absent key leaving
 	// the old value on screen.
 	PromptExtension string `json:"promptExtension"`
+	// AgentGitName and AgentGitEmail are model.Config's own fields of the
+	// same name: the git identity every dispatched run's commits are
+	// authored under, which is what a reviewer sees against each commit on
+	// a pull request an agent pushes. Reported as stored, so empty means
+	// "this deployment has not chosen" -- and the two *Default fields
+	// below say what empty actually resolves to, so a pane can show the
+	// identity really in effect rather than a blank box.
+	//
+	// Deliberately not omitempty, like EnvironmentName and PromptExtension
+	// above and for the same reason: the frontend merges an update
+	// response over the settings it already has, so a name cleared back to
+	// grain's default has to arrive as present-and-empty rather than as an
+	// absent key leaving the old one on screen.
+	AgentGitName  string `json:"agentGitName"`
+	AgentGitEmail string `json:"agentGitEmail"`
+	// AgentGitNameDefault and AgentGitEmailDefault are grain's own
+	// identity (mcp.DefaultGitIdentityName/DefaultGitIdentityEmail) -- the
+	// one actually in effect whenever the stored value beside it is empty,
+	// surfaced for the same reason SandboxCPUsDefault and its two
+	// neighbours are: an operator reading this pane should be able to see
+	// what commits are being authored as without knowing which constant in
+	// which package answers that. Constant, never read from or written to
+	// the store.
+	AgentGitNameDefault  string `json:"agentGitNameDefault"`
+	AgentGitEmailDefault string `json:"agentGitEmailDefault"`
 	// Capabilities is every capability grain ships a provider for, with
 	// this deployment's own readiness computed against it -- capability_
 	// status.go's own CapabilityStatus, bwsalmon/agents#611. Always
@@ -287,6 +313,41 @@ type Settings struct {
 	// null when a change is undone rather than absent and leaving a stale
 	// warning on screen.
 	PendingRestart []string `json:"pendingRestart"`
+}
+
+// maxGitIdentityPartLen bounds each half of the agent git identity, in
+// runes. Both halves end up on every commit an agent makes, where the
+// whole author line is one line of `git log` output, so this is
+// generously above every real answer ("grain agent",
+// "bots@example.com") and far below a paste that would make a commit
+// unreadable.
+const maxGitIdentityPartLen = 128
+
+// validateGitIdentityPart is the shape check both halves of the agent git
+// identity share: short enough to live on an author line, and free of the
+// characters that would stop that line being one. Empty passes -- it means
+// "grain's own default" (UpdateSettingsRequest.AgentGitName), not a
+// nameless committer.
+//
+// A line break would end the `name = ...` line in the .gitconfig grain
+// writes early, turning the rest of the value into a key of its own or a
+// section header; a tab is what that file separates nothing with but is
+// still not something anyone means in a name. Angle brackets are refused
+// because git wraps the address in them on every author line it writes, so
+// one inside either half produces a line git itself cannot parse back.
+// Nothing beyond that: what a deployment calls its agents is its own
+// business, exactly as environmentName is.
+func validateGitIdentityPart(field, v string) error {
+	if utf8.RuneCountInString(v) > maxGitIdentityPartLen {
+		return validationErrorf("%s cannot be longer than %d characters", field, maxGitIdentityPartLen)
+	}
+	if strings.ContainsFunc(v, func(r rune) bool { return r == '\n' || r == '\r' || r == '\t' }) {
+		return validationErrorf("%s cannot contain line breaks or tabs", field)
+	}
+	if strings.ContainsAny(v, "<>") {
+		return validationErrorf("%s cannot contain < or >", field)
+	}
+	return nil
 }
 
 // maxEnvironmentNameLen bounds Settings.EnvironmentName, in runes. The
@@ -415,6 +476,10 @@ func (c *Client) settingsFrom(cfg model.Config, repoConfigs []model.RepoConfig) 
 		EnvironmentName:               cfg.EnvironmentName,
 		TimeZone:                      model.TimeZoneOrDefault(cfg.TimeZone),
 		PromptExtension:               cfg.PromptExtension,
+		AgentGitName:                  cfg.AgentGitName,
+		AgentGitEmail:                 cfg.AgentGitEmail,
+		AgentGitNameDefault:           mcp.DefaultGitIdentityName,
+		AgentGitEmailDefault:          mcp.DefaultGitIdentityEmail,
 		Capabilities:                  c.capabilityStatuses(cfg, repoConfigs),
 		DefaultCapabilities:           cfg.DefaultCapabilities,
 		ApprovedByDefault:             cfg.ApprovedByDefault,
@@ -486,6 +551,8 @@ func (c *Client) GetSettings(ctx context.Context) (Settings, error) {
 			SandboxCPUsDefault:     kontur.DefaultCPUs,
 			SandboxMemoryMBDefault: kontur.DefaultMemoryMB,
 			SandboxDiskGBDefault:   kontur.DefaultDiskGB,
+			AgentGitNameDefault:    mcp.DefaultGitIdentityName,
+			AgentGitEmailDefault:   mcp.DefaultGitIdentityEmail,
 			Capabilities:           c.capabilityStatuses(model.Config{}, repoConfigs),
 			AgentKeysEnabled:       c.Config.Secrets != nil,
 			GeminiAPIKeySet:        geminiKeySet,
@@ -566,6 +633,23 @@ type UpdateSettingsRequest struct {
 	// turns the feature back off. Trimmed on the way in, so a box someone
 	// cleared to a stray newline stores as the nothing it looks like.
 	PromptExtension *string `json:"promptExtension"`
+	// AgentGitName and AgentGitEmail set the identity every dispatched
+	// run's commits are authored under. Trimmed on the way in, and an
+	// empty one is accepted as "put it back to grain's own default"
+	// (Settings.AgentGitNameDefault) rather than as a request for a
+	// nameless committer -- the same reading timeZone's own empty has,
+	// and for the same reason: a cleared field should be able to say
+	// "default" without an operator having to retype the default.
+	//
+	// Both are checked for the two things that would make the .gitconfig
+	// grain writes from them unparseable or a lie: a line break, which
+	// would end the `name = ...` line early, and -- for the email -- the
+	// bare shape git itself expects. Neither is validated further than
+	// that: what a deployment calls its agents is its own business, and
+	// grain has no list of acceptable names any more than it has one of
+	// acceptable environment names.
+	AgentGitName  *string `json:"agentGitName"`
+	AgentGitEmail *string `json:"agentGitEmail"`
 	// DefaultCapabilities replaces the whole default set, the same way
 	// TargetRepos above replaces the whole allowlist: a present list is
 	// exactly the ids every new task will be filed with, and an empty one
@@ -785,6 +869,28 @@ func (c *Client) UpdateSettings(ctx context.Context, req UpdateSettingsRequest) 
 		// newline" the same setting (model.PromptExtensionFor trims
 		// again on the way out, for a row this never saw).
 		cfg.PromptExtension = strings.TrimSpace(*req.PromptExtension)
+	}
+	if req.AgentGitName != nil {
+		name := strings.TrimSpace(*req.AgentGitName)
+		if err := validateGitIdentityPart("agentGitName", name); err != nil {
+			return Settings{}, err
+		}
+		cfg.AgentGitName = name
+	}
+	if req.AgentGitEmail != nil {
+		email := strings.TrimSpace(*req.AgentGitEmail)
+		if err := validateGitIdentityPart("agentGitEmail", email); err != nil {
+			return Settings{}, err
+		}
+		// Spaces are refused in the address and not in the name, because
+		// git writes the address between angle brackets on the author
+		// line and a space there splits it: `git log --author` and every
+		// tool that parses that line would be reading a different address
+		// than the one saved here.
+		if strings.ContainsAny(email, " \t") {
+			return Settings{}, validationErrorf("agentGitEmail cannot contain spaces")
+		}
+		cfg.AgentGitEmail = email
 	}
 	if req.ApprovedByDefault != nil {
 		cfg.ApprovedByDefault = *req.ApprovedByDefault

@@ -51,6 +51,8 @@ var settingsAppliedLive = map[string]string{
 	"sandboxMemoryMb":        "the default shape the next sandbox is built at (liveConfig.refresh, via defaultShaper)",
 	"sandboxDiskGb":          "the default shape the next sandbox is built at (liveConfig.refresh, via defaultShaper)",
 	"promptExtension":        "the deployment-wide text RunCycle refreshes out of grain_config every cycle (orchestrator.resolvePromptExtension)",
+	"agentGitName":           "orchestrator.RunCycle's own per-cycle re-read (the identity the next run's sandbox is given, Sandbox.ConfigureGitCredentials)",
+	"agentGitEmail":          "orchestrator.RunCycle's own per-cycle re-read (the identity the next run's sandbox is given, Sandbox.ConfigureGitCredentials)",
 	"targetRepos":            "pkg/ui, which reads grain_config per request (and Client.setTargetRepos, in step with the write)",
 	"defaultCapabilities":    "pkg/ui, which reads grain_config per request (CreateTask's own defaults)",
 	"newestFirst":            "pkg/ui, which reads grain_config per request",

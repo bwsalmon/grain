@@ -10,7 +10,7 @@ import (
 func TestConfigureGitCredentialsOverSSHWritesACredentialLineMatchingGitCredentialStore(t *testing.T) {
 	home := t.TempDir()
 	runner := localExecRunner{dir: home}
-	if err := ConfigureGitCredentialsOverSSH(runner, "http://10.100.0.1:8080/owner/repo.git", "secret-token"); err != nil {
+	if err := ConfigureGitCredentialsOverSSH(runner, "http://10.100.0.1:8080/owner/repo.git", "secret-token", GitIdentity{}); err != nil {
 		t.Fatal(err)
 	}
 	data, err := os.ReadFile(filepath.Join(home, ".git-credentials"))
@@ -26,7 +26,7 @@ func TestConfigureGitCredentialsOverSSHWritesACredentialLineMatchingGitCredentia
 func TestConfigureGitCredentialsOverSSHWritesAGitconfigWithTheCredentialHelperAndAnIdentity(t *testing.T) {
 	home := t.TempDir()
 	runner := localExecRunner{dir: home}
-	if err := ConfigureGitCredentialsOverSSH(runner, "http://proxy:8080/owner/repo.git", "tok"); err != nil {
+	if err := ConfigureGitCredentialsOverSSH(runner, "http://proxy:8080/owner/repo.git", "tok", GitIdentity{}); err != nil {
 		t.Fatal(err)
 	}
 	data, err := os.ReadFile(filepath.Join(home, ".gitconfig"))
@@ -44,7 +44,7 @@ func TestConfigureGitCredentialsOverSSHWritesAGitconfigWithTheCredentialHelperAn
 func TestConfigureGitCredentialsOverSSHFilesAreReadableOnlyByTheOwner(t *testing.T) {
 	home := t.TempDir()
 	runner := localExecRunner{dir: home}
-	if err := ConfigureGitCredentialsOverSSH(runner, "http://proxy:8080/owner/repo.git", "tok"); err != nil {
+	if err := ConfigureGitCredentialsOverSSH(runner, "http://proxy:8080/owner/repo.git", "tok", GitIdentity{}); err != nil {
 		t.Fatal(err)
 	}
 	for _, name := range []string{".git-credentials", ".gitconfig"} {
@@ -60,7 +60,7 @@ func TestConfigureGitCredentialsOverSSHFilesAreReadableOnlyByTheOwner(t *testing
 
 func TestConfigureGitCredentialsOverSSHRejectsAMalformedRemoteURL(t *testing.T) {
 	runner := localExecRunner{dir: t.TempDir()}
-	if err := ConfigureGitCredentialsOverSSH(runner, "not-a-url", "tok"); err == nil {
+	if err := ConfigureGitCredentialsOverSSH(runner, "not-a-url", "tok", GitIdentity{}); err == nil {
 		t.Fatal("expected an error for a remote URL with no scheme or host")
 	}
 }
@@ -85,7 +85,7 @@ func TestConfigureGitCredentialsOverSSHSurfacesARemoteWriteFailure(t *testing.T)
 	}
 	t.Cleanup(func() { os.Chmod(home, 0o700) })
 	runner := localExecRunner{dir: home}
-	if err := ConfigureGitCredentialsOverSSH(runner, "http://proxy:8080/owner/repo.git", "tok"); err == nil {
+	if err := ConfigureGitCredentialsOverSSH(runner, "http://proxy:8080/owner/repo.git", "tok", GitIdentity{}); err == nil {
 		t.Fatal("expected an error writing into an unwritable session directory")
 	}
 }

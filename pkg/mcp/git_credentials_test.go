@@ -9,7 +9,7 @@ import (
 
 func TestConfigureGitCredentialsWritesACredentialLineMatchingGitCredentialStore(t *testing.T) {
 	root := t.TempDir()
-	if err := ConfigureGitCredentials(root, "http://10.100.0.1:8080/owner/repo.git", "secret-token"); err != nil {
+	if err := ConfigureGitCredentials(root, "http://10.100.0.1:8080/owner/repo.git", "secret-token", GitIdentity{}); err != nil {
 		t.Fatal(err)
 	}
 	data, err := os.ReadFile(filepath.Join(root, ".git-credentials"))
@@ -24,7 +24,7 @@ func TestConfigureGitCredentialsWritesACredentialLineMatchingGitCredentialStore(
 
 func TestConfigureGitCredentialsWritesAGitconfigWithTheCredentialHelperAndAnIdentity(t *testing.T) {
 	root := t.TempDir()
-	if err := ConfigureGitCredentials(root, "http://proxy:8080/owner/repo.git", "tok"); err != nil {
+	if err := ConfigureGitCredentials(root, "http://proxy:8080/owner/repo.git", "tok", GitIdentity{}); err != nil {
 		t.Fatal(err)
 	}
 	data, err := os.ReadFile(filepath.Join(root, ".gitconfig"))
@@ -41,7 +41,7 @@ func TestConfigureGitCredentialsWritesAGitconfigWithTheCredentialHelperAndAnIden
 
 func TestConfigureGitCredentialsFilesAreReadableOnlyByTheOwner(t *testing.T) {
 	root := t.TempDir()
-	if err := ConfigureGitCredentials(root, "http://proxy:8080/owner/repo.git", "tok"); err != nil {
+	if err := ConfigureGitCredentials(root, "http://proxy:8080/owner/repo.git", "tok", GitIdentity{}); err != nil {
 		t.Fatal(err)
 	}
 	for _, name := range []string{".git-credentials", ".gitconfig"} {
@@ -56,7 +56,7 @@ func TestConfigureGitCredentialsFilesAreReadableOnlyByTheOwner(t *testing.T) {
 }
 
 func TestConfigureGitCredentialsRejectsAMalformedRemoteURL(t *testing.T) {
-	if err := ConfigureGitCredentials(t.TempDir(), "not-a-url", "tok"); err == nil {
+	if err := ConfigureGitCredentials(t.TempDir(), "not-a-url", "tok", GitIdentity{}); err == nil {
 		t.Fatal("expected an error for a remote URL with no scheme or host")
 	}
 }

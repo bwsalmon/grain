@@ -199,6 +199,9 @@ func (s *Store) Init(ctx context.Context) error {
 	if err := s.ensureConfigTimeZoneColumn(ctx); err != nil {
 		return fmt.Errorf("migrating grain_config: %w", err)
 	}
+	if err := s.ensureConfigAgentGitIdentityColumns(ctx); err != nil {
+		return fmt.Errorf("migrating grain_config: %w", err)
+	}
 	if err := s.ensureRepoConfigPromptExtensionColumn(ctx); err != nil {
 		return fmt.Errorf("migrating repo_config: %w", err)
 	}
@@ -1023,6 +1026,32 @@ func (s *Store) ensureConfigTimeZoneColumn(ctx context.Context) error {
 	_, err = s.db.ExecContext(ctx,
 		"ALTER TABLE `grain_config` ADD COLUMN `time_zone` TEXT NOT NULL DEFAULT '"+DefaultTimeZone+"'")
 	return err
+}
+
+// ensureConfigAgentGitIdentityColumns adds grain_config.agent_git_name
+// and grain_config.agent_git_email (model.Config.AgentGitName's own doc
+// comment has the reasoning) to a database created before they existed,
+// the same probe-then-ALTER approach every migration above uses.
+//
+// Both default to the empty string, which is not an empty identity but
+// grain's own (mcp.DefaultGitIdentityName/DefaultGitIdentityEmail) --
+// so a deployment upgrading across these columns goes on committing
+// under exactly the name it always has until somebody chooses another.
+func (s *Store) ensureConfigAgentGitIdentityColumns(ctx context.Context) error {
+	for _, col := range []string{"agent_git_name", "agent_git_email"} {
+		rows, err := s.db.QueryContext(ctx, "SELECT `"+col+"` FROM `grain_config` WHERE 1 = 0")
+		if err == nil {
+			if err := rows.Close(); err != nil {
+				return err
+			}
+			continue
+		}
+		if _, err := s.db.ExecContext(ctx,
+			"ALTER TABLE `grain_config` ADD COLUMN `"+col+"` TEXT NOT NULL DEFAULT ''"); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // ensureRepoConfigPromptExtensionColumn is the same migration for
@@ -3403,7 +3432,8 @@ const configColumns = "`poll_interval_ms`,`max_workers`,`max_mergers`,`gemini_mo
 	"`github_host`,`github_insecure_http`,`gcp_project`,`gcp_service_account_email`,`target_repos`," +
 	"`newest_first`,`sandbox_cpus`,`sandbox_memory_mb`,`sandbox_disk_gb`,`show_closed_by_default`,`agent_framework`," +
 	"`approved_by_default`,`auto_merge_by_default`,`claude_model`,`codex_model`,`default_capabilities`," +
-	"`environment_name`,`prompt_extension`,`gemini_effort`,`time_zone`"
+	"`environment_name`,`prompt_extension`,`gemini_effort`,`time_zone`," +
+	"`agent_git_name`,`agent_git_email`"
 
 func scanConfig(scan func(...any) error) (Config, error) {
 	var c Config
@@ -3415,7 +3445,7 @@ func scanConfig(scan func(...any) error) (Config, error) {
 		&targetRepos, &c.NewestFirst, &c.SandboxCPUs, &c.SandboxMemoryMB, &c.SandboxDiskGB, &c.ShowClosedByDefault,
 		&c.AgentFramework, &c.ApprovedByDefault, &c.AutoMergeByDefault, &c.ClaudeModel, &c.CodexModel,
 		&defaultCapabilities, &c.EnvironmentName, &c.PromptExtension, &c.GeminiEffort,
-		&c.TimeZone); err != nil {
+		&c.TimeZone, &c.AgentGitName, &c.AgentGitEmail); err != nil {
 		return Config{}, err
 	}
 	c.PollInterval = time.Duration(pollMS) * time.Millisecond
@@ -3436,13 +3466,13 @@ func scanConfig(scan func(...any) error) (Config, error) {
 func (s *Store) PutConfig(ctx context.Context, c Config) error {
 	return s.write(ctx, "update config", func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx,
-			"REPLACE INTO `grain_config` (`id`, "+configColumns+") VALUES (1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+			"REPLACE INTO `grain_config` (`id`, "+configColumns+") VALUES (1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
 			c.PollInterval.Milliseconds(), c.MaxWorkers, c.MaxMergers, c.GeminiModel, c.MaxAgentTurns,
 			c.GitHubHost, c.GitHubInsecureHTTP, c.GCPProject, c.GCPServiceAccountEmail,
 			joinCSV(c.TargetRepos), c.NewestFirst, c.SandboxCPUs, c.SandboxMemoryMB, c.SandboxDiskGB, c.ShowClosedByDefault,
 			c.AgentFramework, c.ApprovedByDefault, c.AutoMergeByDefault, c.ClaudeModel, c.CodexModel,
 			joinCSV(c.DefaultCapabilities), c.EnvironmentName, c.PromptExtension, c.GeminiEffort,
-			TimeZoneOrDefault(c.TimeZone))
+			TimeZoneOrDefault(c.TimeZone), c.AgentGitName, c.AgentGitEmail)
 		return err
 	})
 }

@@ -374,6 +374,41 @@ type Config struct {
 	// to an agent, exactly like a task's own Body, and grain has no more
 	// business bounding one than the other.
 	PromptExtension string
+	// AgentGitName and AgentGitEmail are the git identity every
+	// dispatched run commits under: user.name and user.email in the
+	// .gitconfig grain writes into each sandbox
+	// (mcp.ConfigureGitCredentials). They are what `git log` shows against
+	// every commit an agent pushes, what GitHub prints beside it, and what
+	// GitHub matches that commit to an account by -- so a deployment that
+	// wants its agents' work attributed to a bot account of its own, or
+	// simply to a name its reviewers recognise, sets them here instead of
+	// living with the one grain baked in.
+	//
+	// Empty -- the default, and what every row written before these
+	// columns existed reads back as -- means grain's own
+	// mcp.DefaultGitIdentityName/DefaultGitIdentityEmail, resolved per
+	// half (mcp.GitIdentity.OrDefault) rather than all-or-nothing, so
+	// naming the committer without giving it an address still leaves a
+	// sandbox that can commit at all. That resolution deliberately lives
+	// in pkg/mcp, beside the file it is written into, rather than being
+	// applied here on read: a sandbox with no identity configured is one
+	// where `git commit` fails outright, so the fallback belongs at the
+	// last moment rather than at each caller that has to remember it.
+	//
+	// Read at dispatch, not seeded onto a task: orchestrator.RunCycle
+	// refreshes orchestrator.Config.GitIdentity from this row every tick,
+	// the same as PromptExtension above, so a change reaches the next run
+	// dispatched rather than the next restart. Runs already in flight keep
+	// the identity their sandbox was configured with, which is decided
+	// once, when that sandbox is prepared.
+	//
+	// This is the identity of the *commits*. It is not the GitHub account
+	// a pull request or a comment is posted as -- that is decided by which
+	// token the git proxy and the REST client authenticate with
+	// (pkg/gitproxy's credential ladder), and there is nothing here that
+	// could change it.
+	AgentGitName  string
+	AgentGitEmail string
 }
 
 // DefaultConfig is the configuration a deployment that has never chosen

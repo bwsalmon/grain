@@ -42,23 +42,24 @@ func recreateStore(t *testing.T) (*model.Store, context.Context) {
 // deliberately a separate embedded type so a test can build one *without*
 // a Rebuild method and check what that is answered with.
 type fakeSandbox struct {
-	name       string
-	gitCalls   int
-	gitRemote  string
-	gitToken   string
-	gitErr     error
-	releases   int
-	rebuilds   int
-	rebuildErr error
+	name        string
+	gitCalls    int
+	gitRemote   string
+	gitToken    string
+	gitIdentity mcp.GitIdentity
+	gitErr      error
+	releases    int
+	rebuilds    int
+	rebuildErr  error
 }
 
 func (s *fakeSandbox) Name() string { return s.name }
 
 func (s *fakeSandbox) Tools(context.Context) ([]mcp.Tool, error) { return nil, nil }
 
-func (s *fakeSandbox) ConfigureGitCredentials(_ context.Context, remoteURL, token string) error {
+func (s *fakeSandbox) ConfigureGitCredentials(_ context.Context, remoteURL, token string, identity mcp.GitIdentity) error {
 	s.gitCalls++
-	s.gitRemote, s.gitToken = remoteURL, token
+	s.gitRemote, s.gitToken, s.gitIdentity = remoteURL, token, identity
 	return s.gitErr
 }
 

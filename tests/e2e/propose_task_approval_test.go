@@ -123,7 +123,7 @@ func newProposalRig(t *testing.T) *proposalRig {
 func (r *proposalRig) credentialedRoot() string {
 	r.t.Helper()
 	root := r.t.TempDir()
-	if err := mcp.ConfigureGitCredentials(root, r.remote, "unused"); err != nil {
+	if err := mcp.ConfigureGitCredentials(root, r.remote, "unused", mcp.GitIdentity{}); err != nil {
 		r.t.Fatal(err)
 	}
 	return root

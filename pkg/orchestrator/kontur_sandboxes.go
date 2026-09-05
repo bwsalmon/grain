@@ -543,8 +543,8 @@ func (s *konturSandbox) Tools(ctx context.Context) ([]mcp.Tool, error) {
 // ConfigureGitCredentials points this VM's guest at the proxy over the
 // same transport every tool call uses -- what mcp.ConfigureGitCredentials
 // does with a plain file write for a host directory.
-func (s *konturSandbox) ConfigureGitCredentials(ctx context.Context, remoteURL, token string) error {
-	if err := mcp.ConfigureGitCredentialsOverSSH(s.runner, remoteURL, token); err != nil {
+func (s *konturSandbox) ConfigureGitCredentials(ctx context.Context, remoteURL, token string, identity mcp.GitIdentity) error {
+	if err := mcp.ConfigureGitCredentialsOverSSH(s.runner, remoteURL, token, identity); err != nil {
 		return fmt.Errorf("orchestrator: configuring git credentials on kontur VM %q: %w", s.vmName, err)
 	}
 	return nil

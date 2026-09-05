@@ -261,7 +261,7 @@ func TestRunCommandSeesGitCredentialsConfiguredForItsSandboxRoot(t *testing.T) {
 		t.Skip("git not installed")
 	}
 	root := t.TempDir()
-	if err := ConfigureGitCredentials(root, "http://proxy.example:8080/owner/repo.git", "sandbox-token"); err != nil {
+	if err := ConfigureGitCredentials(root, "http://proxy.example:8080/owner/repo.git", "sandbox-token", GitIdentity{}); err != nil {
 		t.Fatal(err)
 	}
 	client := newTestClient(t, root)
