@@ -210,7 +210,13 @@ export default function DetailOverlay({
               />
             )}
             {t.blocked && <Chip size="small" color="error" label="Blocked" />}
-            {t.base && <Chip size="small" variant="outlined" label={`target: ${t.base}`} />}
+            {t.base && (
+              <Chip
+                size="small"
+                variant="outlined"
+                label={`target: ${t.base}`}
+              />
+            )}
           </div>
           {/* What the run is doing, under the badge that says only that
               it is running (state.js's runActivity) -- the run's own
