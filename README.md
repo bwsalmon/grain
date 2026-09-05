@@ -7229,3 +7229,61 @@ what was wrong was the silence, not the numbers. `false` is the quiet
 answer, so a UI with no backend to speak for (`grain demo`'s throwaway
 one) and an older daemon that predates the field both render the pane
 exactly as it was.
+
+## Host mode is a choice now, and says so
+
+`scripts/setup.sh` used to install an unisolated deployment by default.
+`GRAIN_KONTUR_ENABLE` was off unless something turned it on, so the
+`sudo ./setup.sh` that file's own header recommends produced a daemon
+dispatching every agent into a plain directory on the host
+(`orchestrator.HostSandboxes`) — as `$GRAIN_USER`, with that host's
+filesystem, its network, its git proxy and whatever credentials either
+can reach, and with nothing it wrote thrown away at the end of the run.
+Nothing said so: not the installer's summary, not the daemon's journal,
+not a single screen of the UI, which drew a deployment giving every run
+a VM of its own and a deployment giving every run the machine grain
+itself is on exactly alike.
+
+Two ways to arrive there, and neither of them was a decision. The
+default was one. The other was the fallback every kontur prerequisite
+took when it was not ready — no `/dev/kvm`, a sandbox image that would
+not pull, no gateway address a guest could reach the git proxy through:
+each logged a line and set `GRAIN_KONTUR_ENABLE=0` for the rest of the
+run, on the "converge with what's ready, don't fail the whole install"
+principle `mint_gemini_operating_key` still follows for a missing Gemini
+key. That principle is right where what's ready is a subset of what was
+asked for. It is wrong here, because the thing it converges on is not a
+lesser deployment — it is a different security posture, reached because
+a registry was briefly unreachable, on a host nobody was watching.
+
+So the installer asks. `GRAIN_KONTUR_ENABLE` defaults to 1, and
+`GRAIN_HOST_SANDBOXES=1` is the only way to get host mode: without it,
+`setup.sh` exits before it touches this host at all rather than
+installing a shape nobody named, and a kontur prerequisite that is not
+ready fails the run instead of falling back (`kontur_unavailable`). With
+it, the fallback is exactly what it always was — an operator who has said
+host mode is acceptable is not told twice — and the installer's own
+readiness report ends by naming what that deployment is. `terraform/gcp`
+needs no new variable: `enable_kontur_sandboxes = false` is the asking,
+and `files/deploy.sh` passes the matching `GRAIN_HOST_SANDBOXES=1`
+through.
+
+The daemon and the UI say it too, because an install is a moment and a
+deployment is not. `grain daemon` logs a warning on every start when it
+builds `HostSandboxes`, and `-host-sandboxes` — a flag that selects
+nothing, since leaving both sandbox flags off already runs that backend —
+is how a unit file records that the shape was chosen, so the startup line
+can tell a choice from an accident. The UI carries
+`ui.Config.HostSandboxes` from the same field `run()` branches on, out
+through `GET /api/config`, onto a standing banner that stacks above the
+reconciler-down and agent-pause banners rather than taking turns with
+them: those two describe an incident that will end, and this describes
+what the deployment is for as long as it runs.
+
+What this deliberately does not do is make the daemon refuse to start in
+host mode without the flag. A deployment installed before any of this
+existed has a unit file with neither sandbox flag in it, and the UI's own
+Upgrade button replaces the binary without rewriting that unit — so a
+binary that insisted would turn an upgrade into an outage, at the moment
+nobody is watching a terminal. The installer is where the refusal
+belongs; the daemon's job is to be loud.

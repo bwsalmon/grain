@@ -432,6 +432,25 @@ type Config struct {
 	// ReconcilerDown always reports false, the same nil-means-
 	// unavailable-feature default AutoMergeDegraded above gives.
 	ReconcilerDown func() bool
+	// HostSandboxes reports that this deployment dispatches into plain
+	// directories on the daemon's own machine (orchestrator.HostSandboxes)
+	// rather than into a VM per run (orchestrator.KonturSandboxes) -- so
+	// a run has this host's filesystem, network and credentials, and
+	// nothing between an agent and the machine grain itself is on.
+	//
+	// GET /api/config reports it and the frontend draws a standing
+	// banner from it (grain/task-15). Not a warning about something that
+	// has gone wrong, unlike ReconcilerDown above: it is a true and
+	// permanent fact about the deployment, which is exactly why it needs
+	// saying -- host sandboxing used to be what a deployment got by
+	// leaving a flag off, and nothing on screen distinguished it from an
+	// isolated one.
+	//
+	// A plain bool rather than one of the funcs around it: the backend is
+	// chosen once, at startup, and no setting the UI can write moves it.
+	// false is the safe reading for a UI wired to no daemon at all
+	// (`grain demo`), which dispatches nothing and so sandboxes nothing.
+	HostSandboxes bool
 	// RunningConfig, when set, reports the store-backed configuration the
 	// daemon this UI runs inside actually has in effect right now -- what
 	// it read at startup, plus every later change it was able to apply
