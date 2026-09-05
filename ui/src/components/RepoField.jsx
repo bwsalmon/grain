@@ -19,6 +19,15 @@ const CUSTOM = "custom";
 // Falls back to a plain text input outright when there is nothing to
 // choose from yet, rather than rendering a one-item "Other…" dropdown
 // that would only cost a click for no benefit.
+//
+// onChange fires on every keystroke of the text path, which is what a
+// form collecting an answer to submit later wants and exactly what a
+// field that saves each edit as it is made does not: PATCHing per
+// keystroke would send "a", "ac", "acm"… on the way to one repo name.
+// onCommit is that second reading -- the value somebody has settled on:
+// a pick from the list (a choice is complete the moment it is made), or
+// the text in the box once it is left or Enter is pressed. Both are
+// optional and independent, so a caller can take either reading alone.
 export default function RepoField({
   name,
   options,
@@ -26,6 +35,7 @@ export default function RepoField({
   required = false,
   placeholder = "owner/name",
   onChange,
+  onCommit,
 }) {
   const knownDefault = defaultValue === "" || options.includes(defaultValue);
   const [custom, setCustom] = useState(options.length === 0 || !knownDefault);
@@ -42,6 +52,17 @@ export default function RepoField({
             required={required}
             autoComplete="off"
             onChange={(e) => onChange?.(e.target.value)}
+            onBlur={(e) => onCommit?.(e.target.value)}
+            // Enter is swallowed only for a caller that asked for
+            // onCommit: in a form (NewTaskOverlay, TemplateOverlay) it is
+            // the key that submits, and taking that away from a field
+            // whose caller reads the value at submit time would be a
+            // change nobody asked for.
+            onKeyDown={(e) => {
+              if (!onCommit || e.key !== "Enter") return;
+              e.preventDefault();
+              onCommit(e.target.value);
+            }}
           />
         </div>
         {options.length > 0 && (
@@ -71,6 +92,7 @@ export default function RepoField({
               return;
             }
             onChange?.(e.target.value);
+            onCommit?.(e.target.value);
           }}
         >
           {!required && <option value="">—</option>}

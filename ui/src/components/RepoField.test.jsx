@@ -107,4 +107,61 @@ describe("RepoField", () => {
     await user.type(screen.getByRole("textbox"), "a");
     expect(onChange).toHaveBeenCalledWith("a");
   });
+
+  // grain/task-328: onCommit is the reading a field that saves each edit
+  // needs -- the value somebody settled on, rather than every keystroke
+  // on the way to it. A pick from the list is settled the moment it is
+  // made, so it reports both.
+  it("reports a dropdown pick to onCommit as well as to onChange", async () => {
+    const onCommit = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <RepoField
+        name="repo"
+        options={["acme/widgets", "acme/other"]}
+        onCommit={onCommit}
+      />,
+    );
+
+    await user.selectOptions(screen.getByRole("combobox"), "acme/other");
+    expect(onCommit).toHaveBeenCalledWith("acme/other");
+  });
+
+  it("reports free text to onCommit only once the box is left", async () => {
+    const onCommit = vi.fn();
+    const user = userEvent.setup();
+    render(<RepoField name="repo" options={[]} onCommit={onCommit} />);
+
+    await user.type(screen.getByRole("textbox"), "acme/new-repo");
+    expect(onCommit).not.toHaveBeenCalled();
+
+    await user.tab();
+    expect(onCommit).toHaveBeenCalledExactlyOnceWith("acme/new-repo");
+  });
+
+  it("reports free text to onCommit on Enter, without leaving the box", async () => {
+    const onCommit = vi.fn();
+    const user = userEvent.setup();
+    render(<RepoField name="repo" options={[]} onCommit={onCommit} />);
+
+    await user.type(screen.getByRole("textbox"), "acme/new-repo{Enter}");
+    expect(onCommit).toHaveBeenCalledExactlyOnceWith("acme/new-repo");
+  });
+
+  // Enter is only swallowed for a caller that asked for onCommit: in the
+  // forms this field started in (NewTaskOverlay, TemplateOverlay) it is
+  // the key that submits, and taking that away from a field whose caller
+  // reads the value at submit time would be a change nobody asked for.
+  it("leaves Enter alone for a caller that takes no onCommit", async () => {
+    const submit = vi.fn((e) => e.preventDefault());
+    const user = userEvent.setup();
+    render(
+      <form onSubmit={submit}>
+        <RepoField name="repo" options={[]} />
+      </form>,
+    );
+
+    await user.type(screen.getByRole("textbox"), "acme/new-repo{Enter}");
+    expect(submit).toHaveBeenCalled();
+  });
 });
