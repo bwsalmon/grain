@@ -271,10 +271,10 @@ export default function GitHubTokensSection({ showError }) {
           </Typography>
           <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
             credentials.json, the ladder the git proxy resolves every clone and
-            push against. The narrowest entry covering a repo wins:
-            owner/repo, then owner/*, then &quot;*&quot; -- the deployment
-            default, which the first credential added above becomes. Changes
-            here need no restart.
+            push against. The narrowest entry covering a repo wins: owner/repo,
+            then owner/*, then &quot;*&quot; -- the deployment default, which
+            the first credential added above becomes. Changes here need no
+            restart.
           </Typography>
           <ul className="secrets-list">
             {patterns.map((entry) => (
