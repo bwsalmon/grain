@@ -520,8 +520,8 @@ a guest-writable path inside it would let the sandbox appear to have
 authored a prompt, a credential or a setup script. `/run/grain/activity`
 keeps the two directions separate, and a test holds the line.
 
-**Settled since**: the writer is a verb of the guest CLI rather than a
-second binary, because the guest gets one CLI ("Three binaries, one per
+**Settled since**: the writer is a verb of `grain` rather than a second
+binary, because the guest gets the ordinary client ("Three binaries, one per
 trust zone" in `grain.md`). The objection that argued for two — the
 controller verbs need a placed credential and an address, this needs
 neither — becomes a constraint on that CLI instead: the credential is
@@ -692,7 +692,7 @@ mechanism — a uid split, a second listener, a header-rewriting proxy — and
 it exists only because the agent and the thing it must not read share a
 container.
 
-The guest CLI has no such problem to solve, because grain already solved
+A client in the guest has no such problem to solve, because grain already solved
 it once. **A credential in the guest is not a new exposure**: git's token
 is already there, because git runs there. What makes that safe is what
 gets copied — `gitproxy.SandboxTokenStore.EnsureToken` mints per grain,
@@ -747,14 +747,14 @@ re-derivation — where `open_pull_request` plus `wait_for_checks` do it
 inside one run today, deliberately: "instead of exiting blind and leaving
 the pull request to orchestrator's finish path."
 
-Worth noting what survived it: the guest CLI keeps the in-run property the
+Worth noting what survived it: a guest command keeps the in-run property the
 message tool lost — `grain wait-for-checks` blocks in the guest and the
 run continues after it — while keeping the message tool's best property,
 that a grain needs no controller connection to run.
 
 ## Forwarding calls, and the connection that replaced it
 
-Both are superseded by the guest CLI above; kept because the reasoning
+Both are superseded by the guest client above; kept because the reasoning
 about session-oriented transports is what ruled design 3 out and is worth
 having written down.
 

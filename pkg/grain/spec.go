@@ -103,7 +103,7 @@ type Spec struct {
 	// that and nothing more.
 	//
 	// How the CLI gets there is not this field's business, and there are
-	// two routes: grain's own guest CLI is baked into the container layer
+	// two routes: grain's own client is baked into the container layer
 	// and installed by the shim on the pass that applies these, while a
 	// deployment's extras can be in the guest image or arrive here like
 	// anything else. A binary does not travel in a Placement -- that

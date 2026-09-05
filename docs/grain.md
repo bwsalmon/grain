@@ -37,7 +37,7 @@ boots, with the shim as PID 1 holding them together.
 
 ```
 ┌─ grain container (one per run) ─────────────────────────────┐
-│  grain-shim (PID 1)                                         │
+│  granule (PID 1)                                            │
 │   ├─ kontur (VMM) ── cloud-hypervisor ──┐                   │
 │   ├─ agent CLI (claude / agy / codex)   │                   │
 │   └─ MCP server ─> /run/kontur/vsock.sock ┼─> guest VM      │ ← the sandbox
@@ -90,9 +90,9 @@ controller exists.
 | `run_command`, `read_file`, … | `docker exec` → `kontur exec` | built in — local, vsock |
 | `recreate_sandbox` | MCP → daemon REST → registry → four `restore*` | built in — local kontur call |
 | `update_status` → `status` | MCP → daemon REST → store write | built in — a local file write |
-| `open_pull_request`, `pull_request_status`, `wait_for_checks` | daemon REST / controller's GitHub client | the guest CLI |
-| `ask_question`, `request_secret` | deferred into the result | the guest CLI |
-| `comment_on_issue`, `propose_task`, `add_review_comment` | deferred into the result | the guest CLI |
+| `open_pull_request`, `pull_request_status`, `wait_for_checks` | daemon REST / controller's GitHub client | `grain`, in the guest |
+| `ask_question`, `request_secret` | deferred into the result | `grain`, in the guest |
+| `comment_on_issue`, `propose_task`, `add_review_comment` | deferred into the result | `grain`, in the guest |
 
 `status` is the one escape hatch that becomes *fully* local: `update_status`
 is an HTTP hop today to put a phrase on a task's row, and as a built-in it
@@ -364,10 +364,10 @@ environment, the files under `/grain` and the records on stdout are what
 cross between the daemon binary and the sandbox image.
 
 ```
-grain-shim
+granule
         PID 1 and the image's entrypoint, invoked with no arguments at
         all. Boots the VMM, waits for the guest, applies placements,
-        installs the guest CLI, runs /grain/setup, starts the agent named
+        installs grain, runs /grain/setup, starts the agent named
         by GRAIN_FRAMEWORK with /grain/prompt, serving the six sandbox
         tools and nothing else. Writes trajectory and status records to
         stdout. Does not exit until the grain is done.
@@ -393,7 +393,7 @@ property this whole section is about.
 
 ### Exit codes
 
-`grain-shim`'s own, read where the runtime reports it —
+`granule`'s own, read where the runtime reports it —
 `.status.containerStatuses[].state.terminated.exitCode`, or `docker
 inspect` — rather than from any call:
 
@@ -728,17 +728,29 @@ The split falls out of the credential boundary rather than being chosen
 against it: each binary runs in exactly one of the three places, and the
 places are the same ones every other decision here turns on.
 
+The system is **grain**. The binaries are:
+
 | binary | runs | does | reaches |
 | --- | --- | --- | --- |
-| **`grain`** — the controller | the operator's host | UI, work selection, dispatch, git proxy, the guest-CLI endpoint, and today's operator verbs — `state`, `secrets`, `repo`, `sync`, `list`, `pause`, `metrics`, the image builders | the container runtime; GitHub |
-| **`grain-shim`** | the container, as PID 1 | boots the VMM, applies placements, runs setup, starts the agent, serves the six sandbox tools, writes records to stdout | the guest, over vsock |
-| **`grain`** — the guest CLI | the guest | what the agent runs with `run_command`: `activity` locally, and the controller verbs — `open-pull-request`, `wait-for-checks`, `ask-question` | the controller, with a placed credential |
+| **`graind`** — the server | the operator's host | UI, work selection, dispatch, the git proxy, and the endpoint `grain` calls | the container runtime; GitHub |
+| **`granule`** — one per agent | the container, as PID 1 | boots the VMM, applies placements, installs `grain`, runs setup, starts the agent, serves the six sandbox tools, writes records to stdout | the guest, over vsock |
+| **`grain`** — the client | an operator's terminal **and** the guest | `state`, `secrets`, `repo`, `sync`, `list`, `pause`, `metrics` for a human; `open-pull-request`, `wait-for-checks`, `ask-question`, `activity` for an agent | `graind` |
 
-Two of them are called `grain`, and that is the decision rather than an
-oversight — see "Naming" below. They never share a filesystem, and they
-are the same interface seen from its two ends. **In prose here: "the
-controller", "the shim", "the guest CLI".** Role words, because that is
-what the ambiguity costs and it is a price other projects pay too.
+`graind`/`grain` is the ordinary daemon-and-client pair — `sshd`/`ssh`,
+`dockerd`/`docker` — and `granule` is a small grain, one per run, which is
+exactly what it is.
+
+In prose throughout this document, **"the controller" is `graind`** and
+**"the shim" is `granule`**. The role words predate the names and are kept
+where the role is the point.
+
+**The client is one program with two audiences, not two programs.** An
+operator at a terminal and an agent in a sandbox are both clients of
+`graind`; what differs is the credential and therefore the scope, not the
+binary. Which is the right place for that difference: a guest copy
+compiled without the operator verbs would be enforcing policy by
+packaging, where the scope check enforces it on every request from any
+caller (open item 7).
 
 Ships alongside, not grain's: `kontur` in the container layer
 (`COPY --from=kontur`, since kontur's own final stage is `FROM scratch`),
@@ -756,12 +768,11 @@ to be built per host. So all three binaries live in two images:
 
 | image | holds |
 | --- | --- |
-| grain's own | the controller |
-| the sandbox image | `grain-shim` + `kontur` + the agent CLIs in the container layer; `kontur-agent` in the guest disk; **the guest CLI** |
+| grain's own | `graind`, and `grain` beside it |
+| the sandbox image | `granule` + `kontur` + the agent CLIs in the container layer; `kontur-agent` in the guest disk; **`grain`** |
 
-**The guest CLI is baked into the container layer and installed into the
-guest by the shim**, on the same provisioning pass that applies
-placements. Not *as* a placement — a placement's bytes come from the Spec,
+**`grain` is baked into the container layer and installed into the guest
+by `granule`**, on the same provisioning pass that applies placements. Not *as* a placement — a placement's bytes come from the Spec,
 and a Spec carrying a binary is the configuration path being used as a
 delivery mechanism — but by the same walk, from a fixed path in the
 container to a fixed path in the guest.
@@ -769,32 +780,34 @@ container to a fixed path in the guest.
 That way round because the guest disk is *derived* from a published kontur
 image (`scripts/kontur/build-guest.sh`) rather than authored, so keeping
 grain's binaries out of the derivation keeps it a derivation. It also
-means the guest CLI versions with the shim that reads its `activity` file,
-which is the coupling that would otherwise need a rule.
+means the copy in the guest versions with the `granule` that reads its
+`activity` file, which is the coupling that would otherwise need a rule.
 
-### But it is a separable artifact, and should be published as one
+### A different harness needs no new artifact
 
-The default path is the sandbox image; it should not be the only one. A
-deployment running a different agent harness — no grain shim, no kontur
-guest, an agent somewhere else entirely — still wants the controller
-verbs, and the controller does not care what is on the other end: it
-resolves a token to a live run and checks scope, which is true of any
-caller.
+This is where one client stops being a tidiness argument and starts
+paying. A deployment running a different agent harness — no `granule`, no
+kontur guest, an agent somewhere else entirely — ships **`grain`, the
+ordinary client**, and points it at `graind`. There is no special guest
+build to publish and keep in step, because the thing an agent runs is the
+thing an operator already runs; `graind` does not care what is on the
+other end, since it resolves a token to a live run and checks scope, which
+is true of any caller.
 
-Two things follow for how the guest CLI is built:
+Two things follow for how `grain` is built:
 
-- **Static, with no assumption that grain is around it.** It has to run in
-  a guest grain did not build.
+- **Static, with no assumption that anything of grain's is around it.** It
+  has to run in a guest grain did not build.
 - **Its verbs split by what they assume, and that split is worth being
-  explicit about.** The controller verbs need only an address and a
-  credential. `activity` needs grain's shim to be reading
-  `/run/grain/activity` — outside a grain, it writes a file nobody reads.
+  explicit about.** The server verbs need only an address and a
+  credential. `activity` needs a `granule` to be reading
+  `/run/grain/activity` — outside one, it writes a file nobody reads.
   A no-op sink rather than an error, since a harness that cannot report
   activity should not thereby fail to open a pull request.
 
-**This resolves the guest-writer question**: one guest CLI means `activity`
+**This resolves the guest-writer question**: one client means `activity`
 is a verb of it rather than a second binary. The consequence to build
-against is that **the guest CLI must run with no credential present** —
+against is that **`grain` must run with no credential present** —
 `grain activity` writes `/run/grain/activity` and needs neither an address
 nor a token, so the credential is per-verb rather than a startup
 requirement. One that refused to start without a token would make the
@@ -802,43 +815,34 @@ local verb depend on a deployment having configured the remote ones.
 
 ## Naming
 
-**The principle: give the new name to the thing with the least human
-traffic.** Operators type the controller daily. Agents are told the guest
-CLI's name in prompts, and models read it. Nobody types the shim — it is
-one `ENTRYPOINT` line. So the shim absorbs the new name, and the two that
-people and models handle keep the one they know.
+The system is **grain**. Within it, `graind` serves, `grain` calls, and
+`granule` is one run.
 
-### The controller keeps `grain`
+**`graind`/`grain` is the ordinary daemon-and-client pair** — `sshd`/`ssh`,
+`dockerd`/`docker`. It is worth naming why that shape fits here and not
+just that it is familiar: an operator at a terminal and an agent in a
+sandbox are doing the same thing, asking `graind` for something they
+cannot do themselves. Two clients would have been two names for one
+relationship.
 
-`cmd/grain` is the daemon today — `grain daemon`, `grain state`, `grain
-secrets`. Moving that name onto a different program is the one change here
-that fails *by running something else* rather than by not resolving, which
-is the worst way for a rename to fail: every script, unit file and runbook
-that says `grain daemon` would quietly start a shim.
+**`granule` is a small grain, one per run**, which is what it is. It also
+takes the new name, which is the one thing that mattered: operators type
+`grain` daily and agents are told it in prompts, while nobody types the
+per-run binary — it is one `ENTRYPOINT` line. Giving the novel name to the
+thing with no human traffic is what keeps the rename cheap.
 
-Nothing needed that rename. The clean split comes from naming the shim,
-which no human types.
-
-A wholesale product rename — `drift`, `drift-shim` — would also be
-coherent, since nothing gets recycled. Two notes if that is ever tempting:
-[driftctl](https://github.com/snyk/driftctl) is an existing Snyk CLI for
-Terraform drift detection, so the term is occupied in exactly this
-neighbourhood; and "drift" names the condition a reconciler exists to
-correct rather than the cure.
-
-### The guest CLI is `grain`, not `grainctl`
+### The client is not `grainctl`, and the precedent is one-sided
 
 `-ctl` is not a neutral suffix. It marks **an operator at a terminal
 talking to a control plane** — `kubectl`, `systemctl`, `journalctl`,
-`etcdctl`, `doctl`, `flyctl`, `driftctl`, and `konturctl` next door. The
-guest CLI is the opposite: the sandboxed thing asking for what it cannot
-do itself, and the one holding a credential. A newcomer reading
-`konturctl` and `grainctl` side by side would guess exactly wrong about
-which is which.
+`etcdctl`, `doctl`, `flyctl`, `driftctl`, and `konturctl` next door. Half
+of `grain`'s use is exactly that, so the suffix would not have been wrong
+so much as half-right: the other half is the sandboxed thing asking for
+what it cannot do itself, and it is the half holding a credential.
 
-The comparable category — **a client inside a workload, calling a control
-plane, authenticated by a scoped credential from its environment** — names
-things differently, and consistently:
+That other half has its own convention, and it is consistent. A client
+inside a workload, calling a control plane, authenticated by a scoped
+credential from its environment:
 
 | system | in-workload client | verbs |
 | --- | --- | --- |
@@ -850,33 +854,50 @@ things differently, and consistently:
 
 Buildkite is the closest structural match found: a binary run inside the
 job, scoped to that job, with verbs that ask the control plane to do what
-the job cannot. `buildkite-agent annotate` is `grain open-pull-request`
-with a different noun.
+the job cannot. `buildkite-agent annotate` is `grain activity` with a
+different noun.
 
 **Nothing in that category uses `-ctl`.** Two conventions are live — name
-it after the service, or `<product>-agent` — and **`-agent` is unavailable
-here**, triply: the model agent is what runs in the container,
-`kontur-agent` is the guest daemon, and `grain-agent` would collide with
-both. So: named after the service.
+it after the service, or `<product>-agent` — and `-agent` is unavailable
+here, triply: the model agent is what runs in the container, `kontur-agent`
+is the guest daemon, and `grain-agent` would collide with both. Both
+halves of this client's use therefore point the same way: name it after
+the service.
 
-The prose ambiguity is real and is the price every project in that table
-pays (`aws` the CLI against AWS the service, `vault` against Vault). They
-pay it with role words in prose, which this document already has — the
-controller, the shim, the guest CLI.
+### What this avoids
+
+An earlier draft had the server keep `grain` and the per-run binary called
+`grain-shim`, with the guest client *also* called `grain` — two binaries
+sharing a name, mitigated by prose. `graind` removes the collision instead
+of managing it, and the mitigations it needed go with it.
+
+It also avoids the trap in the draft before that, where `grain` moved from
+the server onto the per-run binary: a rename that fails **by running
+something else** rather than by not resolving, so every script that said
+`grain daemon` would quietly have started a shim.
+
+**One rename does happen and it is the safe kind.** `grain daemon` becomes
+`graind`, and because `grain` still exists as a client with a known verb
+set, the old invocation is an unknown subcommand — an error naming its
+replacement, not a different program starting successfully.
 
 ### One binary or two
 
-Buildkite makes these the *same* binary: `buildkite-agent start` runs the
-agent, `buildkite-agent annotate` runs inside the job. One binary in two
-modes is available here too, and has that precedent.
+Buildkite makes the workload runner and the in-job client the *same*
+binary: `buildkite-agent start` runs the agent, `buildkite-agent annotate`
+runs inside the job. Grain merges a different pair — the operator client
+and the agent client — and keeps the runner separate.
 
-Split anyway, for a plainer reason than trust: the guest CLI is meant to
-be publishable on its own for other agent harnesses ("But it is a
-separable artifact"), and shipping a VMM-booting shim to somebody who
-wants three verbs is a poor trade. The security argument for splitting is
-weaker than it looks and should not be leaned on — the shim's powers come
-from the vsock socket and `/dev/kvm` in the container, not from the
-binary, so a copy in the guest could not boot anything.
+That is the better cut here. The two clients genuinely are one program
+against one server, differing only in credential and scope. The runner is
+not: it boots a VMM, and folding it in would put that in the guest, in
+every operator's `$PATH`, and in the artifact a foreign harness downloads
+for three verbs.
+
+The security argument for keeping `granule` separate is weaker than it
+looks and should not be leaned on — its powers come from the vsock socket
+and `/dev/kvm` in the container, not from the binary, so a copy elsewhere
+could not boot anything.
 
 ## Costs and open items
 
@@ -889,8 +910,8 @@ binary, so a copy in the guest could not boot anything.
    final stage is `FROM scratch` with
    `ENTRYPOINT ["/usr/local/bin/kontur"]`, so a node-based CLI cannot run
    there; kontur keeps its scratch image. Grain's sandbox image needs a
-   real base, `COPY --from=kontur`, the agent CLIs, the guest CLI, and
-   `grain-shim` as entrypoint. Still two published images, not three — the
+   real base, `COPY --from=kontur`, the agent CLIs, `grain`, and
+   `granule` as entrypoint. Still two published images, not three — the
    sandbox image already carries the container layer and the guest disk
    together.
 3. **Verify kontur tolerates not being PID 1.** Its run mode currently boots
@@ -912,17 +933,17 @@ binary, so a copy in the guest could not boot anything.
    run — but written fresh.
 8. **An escape hatch has to be told about.** An MCP client asks
    `tools/list`; a CLI does not announce itself, and an agent never told
-   the guest CLI exists finishes without opening a pull request and reports
+   `grain` exists in its guest finishes without opening a pull request and reports
    success. Naming it belongs in the prompt or the setup script, per
    framework, and is part of the work rather than documentation.
-9. **Two binaries are called `grain`, and the docs are the only thing
-   keeping them apart** ("Naming"). The controller and the guest CLI never
-   share a filesystem, so nothing at runtime can confuse them — but a
-   reader can, and so can a search. The mitigations are cheap and belong
-   in the work: role words in prose (the controller, the shim, the guest
-   CLI), `grain --help` in each saying which one it is and where it runs,
-   and the guest CLI refusing the controller's operator verbs with that
-   sentence rather than "unknown command".
+9. **One client, two audiences, and the seams are `graind`'s to hide.**
+   `grain --help` in a sandbox lists operator verbs that grain's token
+   cannot use, so refusing them has to be a sentence worth reading —
+   "this token authorizes a run, not an operator" — rather than a bare
+   403, and that is the scope check's job (item 7) rather than the
+   client's. The same binary also has to be small enough to install into
+   a guest over vsock at every boot; if the operator verbs make it heavy,
+   a build tag is the answer, not a second name.
 
 ### Asks of kontur
 
@@ -949,16 +970,17 @@ path and the agent's location, not of the task model.
    and the decision table against the existing suite.
 3. The controller loop — `Tick` over `List` + `Reconcile`, alongside the
    existing dispatch path behind a flag.
-4. **Split the binary.** Today's `cmd/grain` is the controller and nothing
-   else, and it keeps both its name and its verbs; `grain-shim` and the
-   guest CLI are both new, so nothing an operator runs changes.
+4. **Split the binary.** Today's `cmd/grain` is server and client in one.
+   The server half becomes `graind`; the client half keeps `grain` and its
+   verbs, so the only operator-visible change is `grain daemon` → `graind`,
+   which errors rather than misfiring. `granule` is new.
    `mcpserver.go` is deleted rather than moved.
-5. The guest CLI and the controller-side listener it calls: the scope check
+5. `grain`'s server verbs and the `graind`-side listener they call: the scope check
    (item 7 above), then the verbs that today are MCP tools reaching the
    daemon. Shares `gitproxy`'s token store and `startGitProxy`'s
    advertise-host handling. `grain activity` lands here too and depends
    on none of it.
-6. kontur's NAT mode (the blocking ask), then `grain-shim` and the sandbox
+6. kontur's NAT mode (the blocking ask), then `granule` and the sandbox
    image. Steps 1–5 do not wait on it.
 7. `KonturGrains`.
 8. Delete: `recreate.go`, `orphan.go`, `recover.go`, `InFlight`, `runOne`,
